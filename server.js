@@ -139,6 +139,43 @@ async function maybeResetAdminPassword() {
   await saveDb();
 }
 
+async function syncRuntimeConfigFromEnv() {
+  let changed = false;
+
+  if (process.env.CLAUDE_COMMAND && db.claudeConfig.command !== process.env.CLAUDE_COMMAND) {
+    db.claudeConfig.command = process.env.CLAUDE_COMMAND;
+    changed = true;
+  }
+
+  if (process.env.CLAUDE_ARGS !== undefined && db.claudeConfig.args !== process.env.CLAUDE_ARGS) {
+    db.claudeConfig.args = process.env.CLAUDE_ARGS;
+    changed = true;
+  }
+
+  if (process.env.WORKSPACE_ROOT && db.claudeConfig.workspaceRoot !== process.env.WORKSPACE_ROOT) {
+    db.claudeConfig.workspaceRoot = process.env.WORKSPACE_ROOT;
+    changed = true;
+  }
+
+  if (process.env.RESET_DEFAULT_TEAM_WORKSPACE === "true" && process.env.WORKSPACE_ROOT) {
+    const defaultTeam = db.teams.find((team) => team.id === "team_platform");
+    const defaultSession = db.sessions.find((session) => session.id === "session_welcome");
+    const workspacePath = join(process.env.WORKSPACE_ROOT, "claude-code-webui");
+    if (defaultTeam) {
+      defaultTeam.workspacePath = workspacePath;
+      defaultTeam.updatedAt = now();
+      changed = true;
+    }
+    if (defaultSession) {
+      defaultSession.cwd = workspacePath;
+      defaultSession.updatedAt = now();
+      changed = true;
+    }
+  }
+
+  if (changed) await saveDb();
+}
+
 async function saveDb() {
   await mkdir(dirname(DB_FILE), { recursive: true });
   await writeFile(DB_FILE, JSON.stringify(db, null, 2));
@@ -525,6 +562,7 @@ async function serveStatic(req, res, pathname) {
 }
 
 await loadDb();
+await syncRuntimeConfigFromEnv();
 await maybeResetAdminPassword();
 
 createServer(async (req, res) => {

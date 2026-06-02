@@ -184,6 +184,29 @@ Remove-Item Env:\RESET_ADMIN_PASSWORD
 
 也可以删除 `data\db.json` 后重新初始化，但这会清空用户、团队、会话和审计数据。
 
+### Workspace 配置没有生效
+
+`.env` 里的 `WORKSPACE_ROOT` 会在服务启动时同步到系统运行配置，用于新建团队时的 workspace allowlist。
+
+如果你已经启动过一次，默认团队 `Claude Code Platform` 的 workspace 路径已经保存在 `data\db.json`，后续修改 `WORKSPACE_ROOT` 不会自动改这个已有团队。
+
+可以选择其一：
+
+1. 在页面里创建一个新团队，workspace 填新的目录。
+2. 删除 `data\db.json` 后重新初始化，这会清空已有数据。
+3. 临时重置默认团队 workspace：
+
+```powershell
+$env:RESET_DEFAULT_TEAM_WORKSPACE="true"
+npm start
+```
+
+重置后清掉临时变量：
+
+```powershell
+Remove-Item Env:\RESET_DEFAULT_TEAM_WORKSPACE
+```
+
 ## 当前能力
 
 - 服务端登录、退出、HttpOnly cookie session
