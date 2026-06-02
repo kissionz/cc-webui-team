@@ -133,6 +133,57 @@ npm start
 http://localhost:3000
 ```
 
+## Windows 原生运行 Claude Code
+
+如果你在 Windows 宿主机上的 Claude Code CLI 已经配置了很多 MCP、hooks、settings 或项目级配置，推荐不要把后端放进 Linux Docker 容器，而是直接在 Windows 上运行 Node 服务。这样后端调用的就是你宿主机环境里的 `claude`，能最大程度复用现有配置。
+
+PowerShell：
+
+```powershell
+git clone https://github.com/kissionz/cc-webui-team.git
+cd cc-webui-team
+
+copy .env.example .env
+notepad .env
+
+$env:ADMIN_PASSWORD="your-strong-password"
+$env:WORKSPACE_ROOT="C:\workspaces"
+$env:CLAUDE_COMMAND="claude"
+$env:CLAUDE_ARGS="-p"
+
+npm start
+```
+
+访问：
+
+```text
+http://localhost:3000
+```
+
+这种方式不会复制 Claude Code CLI，也不会改变你的 MCP 配置；它直接使用当前 Windows 用户的 PATH、`%USERPROFILE%\.claude` 和宿主机可执行环境。
+
+如果用 Docker 复用宿主机 CLI，需要注意：Linux 容器无法直接执行 Windows 的 `claude.cmd`，所以只能复制 CLI 包并挂载 `.claude`。这能复用一部分配置，但如果 MCP 里引用了 Windows 路径、PowerShell 命令、`.exe` 程序或宿主机专用环境变量，容器内可能无法运行。
+
+### 忘记或改错 admin 密码
+
+如果已经启动过一次，`data/db.json` 里会保存初始化时的密码哈希。之后修改 `.env` 里的 `ADMIN_PASSWORD` 不会自动覆盖已有密码。
+
+可以临时设置一次：
+
+```powershell
+$env:RESET_ADMIN_PASSWORD="true"
+$env:ADMIN_PASSWORD="new-strong-password"
+npm start
+```
+
+成功登录后，停止服务并清掉这个临时变量：
+
+```powershell
+Remove-Item Env:\RESET_ADMIN_PASSWORD
+```
+
+也可以删除 `data\db.json` 后重新初始化，但这会清空用户、团队、会话和审计数据。
+
 ## 当前能力
 
 - 服务端登录、退出、HttpOnly cookie session

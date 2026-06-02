@@ -1,12 +1,15 @@
 import { createServer } from "node:http";
-import { createReadStream } from "node:fs";
+import { createReadStream, readFileSync } from "node:fs";
 import { mkdir, readFile, writeFile, stat } from "node:fs/promises";
 import { dirname, extname, join, normalize, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { randomBytes, pbkdf2Sync, timingSafeEqual } from "node:crypto";
 
-const PORT = Number(process.env.PORT || 3000);
 const root = process.cwd();
+
+loadDotEnv(join(root, ".env"));
+
+const PORT = Number(process.env.PORT || 3000);
 const DATA_DIR = process.env.DATA_DIR || join(root, "data");
 const DB_FILE = process.env.DB_FILE || join(DATA_DIR, "db.json");
 const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT || "/workspaces";
@@ -29,6 +32,23 @@ const id = (prefix) => `${prefix}_${randomBytes(6).toString("hex")}`;
 let db = null;
 const clients = new Set();
 const running = new Map();
+
+function loadDotEnv(filePath) {
+  try {
+    const content = readFileSync(filePath, "utf8");
+    for (const line of content.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const index = trimmed.indexOf("=");
+      if (index === -1) continue;
+      const key = trimmed.slice(0, index).trim();
+      const value = trimmed.slice(index + 1).trim().replace(/^["']|["']$/g, "");
+      if (key && process.env[key] === undefined) process.env[key] = value;
+    }
+  } catch {
+    // .env is optional; Docker Compose and shell env vars can provide config.
+  }
+}
 
 function hashPassword(password, salt = randomBytes(16).toString("hex")) {
   const hash = pbkdf2Sync(password, salt, 120000, 32, "sha256").toString("hex");
@@ -106,6 +126,17 @@ async function loadDb() {
     db = seedDb();
     await saveDb();
   }
+}
+
+async function maybeResetAdminPassword() {
+  if (process.env.RESET_ADMIN_PASSWORD !== "true") return;
+  const admin = db.users.find((user) => user.username === "admin");
+  if (!admin) return;
+  admin.passwordHash = hashPassword(process.env.ADMIN_PASSWORD || "admin123");
+  admin.updatedAt = now();
+  db.sessionsByToken = {};
+  audit(admin.id, "user.admin_password_reset_from_env", "user", admin.id);
+  await saveDb();
 }
 
 async function saveDb() {
@@ -494,6 +525,7 @@ async function serveStatic(req, res, pathname) {
 }
 
 await loadDb();
+await maybeResetAdminPassword();
 
 createServer(async (req, res) => {
   try {
