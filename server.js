@@ -16,7 +16,7 @@ const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT || "/workspaces";
 const CLAUDE_COMMAND = process.env.CLAUDE_COMMAND || "claude";
 const CLAUDE_ARGS = (process.env.CLAUDE_ARGS || "-p").split(" ").filter(Boolean);
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
-const USE_SHELL = process.platform === "win32";
+const IS_WINDOWS = process.platform === "win32";
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -61,6 +61,24 @@ function verifyPassword(password, stored) {
   if (!salt || !hash) return false;
   const candidate = hashPassword(password, salt).split(":")[1];
   return timingSafeEqual(Buffer.from(hash, "hex"), Buffer.from(candidate, "hex"));
+}
+
+function cmdQuote(value) {
+  const text = String(value);
+  if (!/[ \t&()^|<>"]/.test(text)) return text;
+  return `"${text.replaceAll('"', '\\"')}"`;
+}
+
+function windowsShellPath() {
+  const systemRoot = process.env.SystemRoot || process.env.WINDIR;
+  if (systemRoot) return join(systemRoot, "System32", "cmd.exe");
+  return "cmd.exe";
+}
+
+function spawnCli(command, args, options = {}) {
+  if (!IS_WINDOWS) return spawn(command, args, options);
+  const line = [command, ...args].map(cmdQuote).join(" ");
+  return spawn(windowsShellPath(), ["/d", "/s", "/c", line], options);
 }
 
 function seedDb() {
@@ -285,7 +303,7 @@ function bootstrapFor(user) {
 async function healthCheck() {
   const started = now();
   return new Promise((resolveHealth) => {
-    const child = spawn(db.claudeConfig.command, ["--version"], { env: process.env, shell: USE_SHELL });
+    const child = spawnCli(db.claudeConfig.command, ["--version"], { env: process.env });
     let out = "";
     let err = "";
     child.stdout.on("data", (chunk) => (out += chunk));
@@ -328,10 +346,9 @@ async function runClaudeSession(session, prompt) {
   broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
 
   const args = [...String(db.claudeConfig.args || "").split(" ").filter(Boolean), prompt];
-  const child = spawn(db.claudeConfig.command, args, {
+  const child = spawnCli(db.claudeConfig.command, args, {
     cwd: session.cwd,
     env: { ...process.env, TERM: "xterm-256color" },
-    shell: USE_SHELL,
   });
   running.set(session.id, child);
 
