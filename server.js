@@ -16,6 +16,7 @@ const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT || "/workspaces";
 const CLAUDE_COMMAND = process.env.CLAUDE_COMMAND || "claude";
 const CLAUDE_ARGS = (process.env.CLAUDE_ARGS || "-p").split(" ").filter(Boolean);
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
+const USE_SHELL = process.platform === "win32";
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -284,20 +285,22 @@ function bootstrapFor(user) {
 async function healthCheck() {
   const started = now();
   return new Promise((resolveHealth) => {
-    const child = spawn(db.claudeConfig.command, ["--version"], { env: process.env });
+    const child = spawn(db.claudeConfig.command, ["--version"], { env: process.env, shell: USE_SHELL });
     let out = "";
     let err = "";
     child.stdout.on("data", (chunk) => (out += chunk));
     child.stderr.on("data", (chunk) => (err += chunk));
-    child.on("error", () => {
-      resolveHealth({ available: false, version: "not found", latencyMs: now() - started, authenticated: false });
+    child.on("error", (spawnError) => {
+      resolveHealth({ available: false, version: "not found", latencyMs: now() - started, authenticated: false, message: spawnError.message });
     });
     child.on("close", (code) => {
+      const output = (out || err || "unknown").trim();
       resolveHealth({
         available: code === 0,
-        version: (out || err || "unknown").trim().split("\n")[0],
+        version: output.split("\n")[0],
         latencyMs: now() - started,
         authenticated: code === 0,
+        message: code === 0 ? "Claude Code CLI is available." : output || `Claude Code exited with code ${code}.`,
       });
     });
   });
@@ -328,6 +331,7 @@ async function runClaudeSession(session, prompt) {
   const child = spawn(db.claudeConfig.command, args, {
     cwd: session.cwd,
     env: { ...process.env, TERM: "xterm-256color" },
+    shell: USE_SHELL,
   });
   running.set(session.id, child);
 

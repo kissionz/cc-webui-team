@@ -412,6 +412,7 @@ function renderSettings() {
       <aside class="panel">
         <div class="panel-header"><h2 class="panel-title">能力状态</h2>${badge("server adapter", "blue")}</div>
         <div class="side-stack">
+          <div class="side-card"><h4>Health Check</h4><p>${escapeHtml(cfg.message || "运行健康检查后会显示 Claude Code CLI 状态。")}</p></div>
           <div class="side-card"><h4>Streaming</h4><p>统一为 message_delta / message_done 事件。</p></div>
           <div class="side-card"><h4>Permission Prompts</h4><p>文件写入、命令执行和越界访问会进入审批队列。</p></div>
           <div class="side-card"><h4>Process Isolation</h4><p>每个会话按 PRD 预留独立 CLI 进程模型。</p></div>
