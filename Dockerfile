@@ -1,0 +1,23 @@
+FROM node:20-alpine
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV PORT=3000
+ENV DATA_DIR=/app/data
+ENV WORKSPACE_ROOT=/workspaces
+ENV CLAUDE_COMMAND=claude
+ENV CLAUDE_ARGS=-p
+
+COPY package.json ./
+COPY index.html app.js styles.css README.md ./
+COPY claude-code-team-platform-prd.md ./
+COPY server.js ./
+
+RUN mkdir -p /app/data /workspaces && chown -R node:node /app /workspaces
+
+USER node
+
+EXPOSE 3000
+
+CMD ["npm", "start"]

@@ -1,0 +1,509 @@
+import { createServer } from "node:http";
+import { createReadStream } from "node:fs";
+import { mkdir, readFile, writeFile, stat } from "node:fs/promises";
+import { dirname, extname, join, normalize, resolve } from "node:path";
+import { spawn } from "node:child_process";
+import { randomBytes, pbkdf2Sync, timingSafeEqual } from "node:crypto";
+
+const PORT = Number(process.env.PORT || 3000);
+const root = process.cwd();
+const DATA_DIR = process.env.DATA_DIR || join(root, "data");
+const DB_FILE = process.env.DB_FILE || join(DATA_DIR, "db.json");
+const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT || "/workspaces";
+const CLAUDE_COMMAND = process.env.CLAUDE_COMMAND || "claude";
+const CLAUDE_ARGS = (process.env.CLAUDE_ARGS || "-p").split(" ").filter(Boolean);
+const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
+
+const mimeTypes = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+};
+
+const now = () => Date.now();
+const id = (prefix) => `${prefix}_${randomBytes(6).toString("hex")}`;
+
+let db = null;
+const clients = new Set();
+const running = new Map();
+
+function hashPassword(password, salt = randomBytes(16).toString("hex")) {
+  const hash = pbkdf2Sync(password, salt, 120000, 32, "sha256").toString("hex");
+  return `${salt}:${hash}`;
+}
+
+function verifyPassword(password, stored) {
+  const [salt, hash] = String(stored || "").split(":");
+  if (!salt || !hash) return false;
+  const candidate = hashPassword(password, salt).split(":")[1];
+  return timingSafeEqual(Buffer.from(hash, "hex"), Buffer.from(candidate, "hex"));
+}
+
+function seedDb() {
+  const adminPassword = process.env.ADMIN_PASSWORD || "admin123";
+  const createdAt = now();
+  const users = [
+    { id: "user_admin", username: "admin", passwordHash: hashPassword(adminPassword), displayName: "System Admin", email: "admin@example.com", role: "admin", status: "active", createdAt, updatedAt: createdAt },
+  ];
+  const members = [
+    { teamId: "team_platform", userId: "user_admin", role: "owner", createdAt, updatedAt: createdAt },
+  ];
+
+  if (process.env.SEED_DEMO_USERS === "true") {
+    users.push(
+      { id: "user_alice", username: "alice", passwordHash: hashPassword("password"), displayName: "Alice Chen", email: "alice@example.com", role: "member", status: "active", createdAt, updatedAt: createdAt },
+      { id: "user_bob", username: "bob", passwordHash: hashPassword("password"), displayName: "Bob Lin", email: "bob@example.com", role: "member", status: "active", createdAt, updatedAt: createdAt },
+      { id: "user_viewer", username: "viewer", passwordHash: hashPassword("password"), displayName: "Viewer", email: "viewer@example.com", role: "member", status: "active", createdAt, updatedAt: createdAt },
+    );
+    members.push(
+      { teamId: "team_platform", userId: "user_alice", role: "admin", createdAt, updatedAt: createdAt },
+      { teamId: "team_platform", userId: "user_bob", role: "member", createdAt, updatedAt: createdAt },
+      { teamId: "team_platform", userId: "user_viewer", role: "viewer", createdAt, updatedAt: createdAt },
+    );
+  }
+
+  return {
+    sessionsByToken: {},
+    users,
+    teams: [
+      { id: "team_platform", name: "Claude Code Platform", workspacePath: join(WORKSPACE_ROOT, "claude-code-webui"), workspaceMode: "shared", createdBy: "user_admin", createdAt, updatedAt: createdAt },
+    ],
+    members,
+    agents: [
+      { id: "agent_claude", teamId: "team_platform", name: "Claude Code", type: "claude_code", command: CLAUDE_COMMAND, enabled: true, status: "idle", createdAt, updatedAt: createdAt },
+    ],
+    sessions: [
+      { id: "session_welcome", teamId: "team_platform", agentId: "agent_claude", createdBy: "user_admin", title: "部署后的第一条 Claude Code 会话", status: "idle", cwd: join(WORKSPACE_ROOT, "claude-code-webui"), createdAt, updatedAt: createdAt },
+    ],
+    messages: [
+      { id: "msg_welcome", sessionId: "session_welcome", senderType: "system", senderId: null, content: "服务端已启动。发送消息后，后端会在团队 workspace 中调用 Claude Code CLI。", createdAt },
+    ],
+    permissions: [],
+    fileChanges: [],
+    auditLogs: [],
+    claudeConfig: {
+      command: CLAUDE_COMMAND,
+      args: CLAUDE_ARGS.join(" "),
+      workspaceRoot: WORKSPACE_ROOT,
+      enabled: true,
+      available: false,
+      version: "unknown",
+      latencyMs: 0,
+      authenticated: false,
+      lastCheckAt: null,
+    },
+  };
+}
+
+async function loadDb() {
+  await mkdir(DATA_DIR, { recursive: true });
+  try {
+    db = JSON.parse(await readFile(DB_FILE, "utf8"));
+  } catch {
+    db = seedDb();
+    await saveDb();
+  }
+}
+
+async function saveDb() {
+  await mkdir(dirname(DB_FILE), { recursive: true });
+  await writeFile(DB_FILE, JSON.stringify(db, null, 2));
+}
+
+function publicUser(user) {
+  if (!user) return null;
+  const { passwordHash, ...safe } = user;
+  return safe;
+}
+
+function parseCookies(req) {
+  return Object.fromEntries(
+    String(req.headers.cookie || "")
+      .split(";")
+      .map((item) => item.trim().split("="))
+      .filter((item) => item.length === 2),
+  );
+}
+
+function getCurrentUser(req) {
+  const token = parseCookies(req).cc_session;
+  const session = token ? db.sessionsByToken[token] : null;
+  if (!session || session.expiresAt < now()) return null;
+  const user = db.users.find((item) => item.id === session.userId);
+  if (!user || user.status !== "active") return null;
+  return user;
+}
+
+async function readBody(req) {
+  let body = "";
+  for await (const chunk of req) body += chunk;
+  if (!body) return {};
+  return JSON.parse(body);
+}
+
+function send(res, status, payload, headers = {}) {
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", ...headers });
+  res.end(JSON.stringify(payload));
+}
+
+function error(res, status, code, message) {
+  send(res, status, { code, message });
+}
+
+function audit(userId, action, targetType, targetId, metadata = {}) {
+  db.auditLogs.push({ id: id("audit"), userId, action, targetType, targetId, metadata, createdAt: now() });
+}
+
+function broadcast(event) {
+  const data = `data: ${JSON.stringify(event)}\n\n`;
+  for (const client of clients) client.write(data);
+}
+
+function getTeamRole(teamId, userId) {
+  return db.members.find((member) => member.teamId === teamId && member.userId === userId)?.role;
+}
+
+function canSeeTeam(user, teamId) {
+  return user.role === "admin" || Boolean(getTeamRole(teamId, user.id));
+}
+
+function canWriteTeam(user, teamId) {
+  return user.role === "admin" || ["owner", "admin", "member"].includes(getTeamRole(teamId, user.id));
+}
+
+function canManageTeam(user, teamId) {
+  return user.role === "admin" || ["owner", "admin"].includes(getTeamRole(teamId, user.id));
+}
+
+function canApprove(user, permission) {
+  const session = db.sessions.find((item) => item.id === permission.sessionId);
+  const role = getTeamRole(session?.teamId, user.id);
+  return user.role === "admin" || ["owner", "admin"].includes(role) || (role === "member" && permission.requestedByUserId === user.id);
+}
+
+function assertWorkspaceAllowed(workspacePath) {
+  const rootPath = resolve(db.claudeConfig.workspaceRoot || WORKSPACE_ROOT);
+  const candidate = resolve(workspacePath);
+  if (candidate !== rootPath && !candidate.startsWith(`${rootPath}/`)) {
+    const problem = new Error("WORKSPACE_NOT_ALLOWED");
+    problem.code = "WORKSPACE_NOT_ALLOWED";
+    throw problem;
+  }
+  return candidate;
+}
+
+function bootstrapFor(user) {
+  const teamIds = new Set(db.teams.filter((team) => canSeeTeam(user, team.id)).map((team) => team.id));
+  const sessionIds = new Set(db.sessions.filter((session) => teamIds.has(session.teamId)).map((session) => session.id));
+  return {
+    currentUserId: user.id,
+    users: user.role === "admin" ? db.users.map(publicUser) : db.users.map(publicUser),
+    teams: db.teams.filter((team) => teamIds.has(team.id)),
+    members: db.members.filter((member) => teamIds.has(member.teamId)),
+    agents: db.agents.filter((agent) => !agent.teamId || teamIds.has(agent.teamId)),
+    sessions: db.sessions.filter((session) => teamIds.has(session.teamId)),
+    messages: db.messages.filter((message) => sessionIds.has(message.sessionId)),
+    permissions: db.permissions.filter((permission) => sessionIds.has(permission.sessionId)),
+    fileChanges: db.fileChanges.filter((file) => sessionIds.has(file.sessionId)),
+    auditLogs: user.role === "admin" ? db.auditLogs : db.auditLogs.filter((log) => log.userId === user.id),
+    claudeConfig: db.claudeConfig,
+  };
+}
+
+async function healthCheck() {
+  const started = now();
+  return new Promise((resolveHealth) => {
+    const child = spawn(db.claudeConfig.command, ["--version"], { env: process.env });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (chunk) => (out += chunk));
+    child.stderr.on("data", (chunk) => (err += chunk));
+    child.on("error", () => {
+      resolveHealth({ available: false, version: "not found", latencyMs: now() - started, authenticated: false });
+    });
+    child.on("close", (code) => {
+      resolveHealth({
+        available: code === 0,
+        version: (out || err || "unknown").trim().split("\n")[0],
+        latencyMs: now() - started,
+        authenticated: code === 0,
+      });
+    });
+  });
+}
+
+function needsApproval(content) {
+  return /(rm\s+-|sudo|install|npm\s+i|pnpm\s+i|yarn\s+add|写入|删除|执行命令|shell|workspace 外|权限)/i.test(content);
+}
+
+async function appendAgentMessage(session, agent, content = "") {
+  const message = { id: id("msg"), sessionId: session.id, senderType: "agent", senderId: agent.id, content, createdAt: now() };
+  db.messages.push(message);
+  await saveDb();
+  broadcast({ type: "session.message.created", sessionId: session.id, message });
+  return message;
+}
+
+async function runClaudeSession(session, prompt) {
+  const agent = db.agents.find((item) => item.id === session.agentId);
+  const message = await appendAgentMessage(session, agent, "");
+  session.status = "running";
+  session.updatedAt = now();
+  agent.status = "running";
+  await saveDb();
+  broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
+
+  const args = [...String(db.claudeConfig.args || "").split(" ").filter(Boolean), prompt];
+  const child = spawn(db.claudeConfig.command, args, {
+    cwd: session.cwd,
+    env: { ...process.env, TERM: "xterm-256color" },
+  });
+  running.set(session.id, child);
+
+  const append = async (text) => {
+    message.content += text;
+    session.updatedAt = now();
+    await saveDb();
+    broadcast({ type: "session.message.delta", sessionId: session.id, messageId: message.id, text });
+  };
+
+  child.stdout.on("data", (chunk) => append(chunk.toString()));
+  child.stderr.on("data", (chunk) => append(chunk.toString()));
+  child.on("error", async (err) => {
+    await append(`\n[agent error] ${err.message}`);
+    session.status = "failed";
+    agent.status = "idle";
+    running.delete(session.id);
+    await saveDb();
+    broadcast({ type: "agent.error", sessionId: session.id, message: err.message });
+  });
+  child.on("close", async (code) => {
+    session.status = code === 0 ? "completed" : "failed";
+    agent.status = "idle";
+    running.delete(session.id);
+    await saveDb();
+    broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
+  });
+}
+
+async function handleApi(req, res, pathname) {
+  if (pathname === "/api/health") return send(res, 200, { ok: true });
+
+  if (pathname === "/api/auth/login" && req.method === "POST") {
+    const body = await readBody(req);
+    const user = db.users.find((item) => item.username === body.username);
+    if (!user || !verifyPassword(body.password || "", user.passwordHash)) {
+      audit(user?.id, "auth.login_failed", "user", user?.id, { username: body.username });
+      await saveDb();
+      return error(res, 401, "AUTH_INVALID_CREDENTIALS", "Invalid username or password.");
+    }
+    if (user.status !== "active") return error(res, 403, "AUTH_USER_DISABLED", "User is disabled.");
+    const token = randomBytes(32).toString("hex");
+    db.sessionsByToken[token] = { userId: user.id, expiresAt: now() + SESSION_TTL_MS };
+    user.lastLoginAt = now();
+    audit(user.id, "auth.login", "user", user.id);
+    await saveDb();
+    return send(res, 200, { user: publicUser(user) }, { "Set-Cookie": `cc_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=43200` });
+  }
+
+  const user = getCurrentUser(req);
+  if (!user) return error(res, 401, "AUTH_REQUIRED", "Please log in.");
+
+  if (pathname === "/api/auth/logout" && req.method === "POST") {
+    const token = parseCookies(req).cc_session;
+    delete db.sessionsByToken[token];
+    await saveDb();
+    return send(res, 200, { ok: true }, { "Set-Cookie": "cc_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0" });
+  }
+
+  if (pathname === "/api/bootstrap") return send(res, 200, bootstrapFor(user));
+
+  if (pathname === "/api/events") {
+    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
+    res.write("data: {\"type\":\"connected\"}\n\n");
+    clients.add(res);
+    req.on("close", () => clients.delete(res));
+    return;
+  }
+
+  if (pathname === "/api/teams" && req.method === "POST") {
+    const body = await readBody(req);
+    try {
+      const workspacePath = assertWorkspaceAllowed(body.workspacePath);
+      const team = { id: id("team"), name: body.name, workspacePath, workspaceMode: "shared", createdBy: user.id, createdAt: now(), updatedAt: now() };
+      const agent = { id: id("agent"), teamId: team.id, name: "Claude Code", type: "claude_code", command: db.claudeConfig.command, enabled: true, status: "idle", createdAt: now(), updatedAt: now() };
+      db.teams.push(team);
+      db.members.push({ teamId: team.id, userId: user.id, role: "owner", createdAt: now(), updatedAt: now() });
+      db.agents.push(agent);
+      audit(user.id, "team.created", "team", team.id);
+      await saveDb();
+      broadcast({ type: "team.created", teamId: team.id });
+      return send(res, 201, { team });
+    } catch (err) {
+      return error(res, 400, err.code || "WORKSPACE_PATH_INVALID", "Workspace path must be inside the configured allowlist.");
+    }
+  }
+
+  const memberMatch = pathname.match(/^\/api\/teams\/([^/]+)\/members$/);
+  if (memberMatch && req.method === "POST") {
+    const teamId = memberMatch[1];
+    if (!canManageTeam(user, teamId)) return error(res, 403, "PERMISSION_DENIED", "Cannot manage this team.");
+    const body = await readBody(req);
+    if (!db.members.some((item) => item.teamId === teamId && item.userId === body.userId)) {
+      db.members.push({ teamId, userId: body.userId, role: body.role, createdAt: now(), updatedAt: now() });
+      audit(user.id, "team.member_added", "team", teamId, { addedUserId: body.userId, role: body.role });
+      await saveDb();
+      broadcast({ type: "team.member_added", teamId });
+    }
+    return send(res, 200, { ok: true });
+  }
+
+  const sessionMatch = pathname.match(/^\/api\/teams\/([^/]+)\/sessions$/);
+  if (sessionMatch && req.method === "POST") {
+    const teamId = sessionMatch[1];
+    if (!canWriteTeam(user, teamId)) return error(res, 403, "PERMISSION_DENIED", "Cannot create sessions.");
+    const body = await readBody(req);
+    const team = db.teams.find((item) => item.id === teamId);
+    const agent = db.agents.find((item) => item.teamId === teamId && item.type === "claude_code");
+    const session = { id: id("session"), teamId, agentId: agent.id, createdBy: user.id, title: body.title, status: "idle", cwd: team.workspacePath, createdAt: now(), updatedAt: now() };
+    db.sessions.unshift(session);
+    db.messages.push({ id: id("msg"), sessionId: session.id, senderType: "system", senderId: null, content: "会话已创建，等待用户发送任务。", createdAt: now() });
+    audit(user.id, "session.created", "session", session.id);
+    await saveDb();
+    broadcast({ type: "session.created", sessionId: session.id });
+    return send(res, 201, { session });
+  }
+
+  const messageMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/messages$/);
+  if (messageMatch && req.method === "POST") {
+    const session = db.sessions.find((item) => item.id === messageMatch[1]);
+    if (!session || !canWriteTeam(user, session.teamId)) return error(res, 403, "PERMISSION_DENIED", "Cannot send messages.");
+    const body = await readBody(req);
+    const content = String(body.content || "").trim();
+    db.messages.push({ id: id("msg"), sessionId: session.id, senderType: "user", senderId: user.id, content, createdAt: now() });
+    audit(user.id, "session.message_sent", "session", session.id);
+    if (needsApproval(content)) {
+      const permission = { id: id("perm"), sessionId: session.id, agentId: session.agentId, requestedByUserId: user.id, type: "platform_gate", risk: "medium", summary: "任务可能执行敏感操作，需要审批后再交给 Claude Code CLI", payload: content, status: "pending", expiresAt: now() + 1000 * 60 * 30, createdAt: now() };
+      db.permissions.push(permission);
+      session.status = "waiting_permission";
+      audit(user.id, "permission.created", "permission", permission.id);
+      await saveDb();
+      broadcast({ type: "permission.created", sessionId: session.id, permissionId: permission.id });
+    } else {
+      await saveDb();
+      runClaudeSession(session, content);
+    }
+    return send(res, 201, { ok: true });
+  }
+
+  const stopMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/stop$/);
+  if (stopMatch && req.method === "POST") {
+    const session = db.sessions.find((item) => item.id === stopMatch[1]);
+    if (!session || !canWriteTeam(user, session.teamId)) return error(res, 403, "PERMISSION_DENIED", "Cannot stop sessions.");
+    const child = running.get(session.id);
+    if (child) child.kill("SIGINT");
+    session.status = "stopped";
+    const agent = db.agents.find((item) => item.id === session.agentId);
+    if (agent) agent.status = "idle";
+    audit(user.id, "session.stopped", "session", session.id);
+    await saveDb();
+    broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
+    return send(res, 200, { ok: true });
+  }
+
+  const permissionMatch = pathname.match(/^\/api\/permissions\/([^/]+)\/(approve|reject)$/);
+  if (permissionMatch && req.method === "POST") {
+    const permission = db.permissions.find((item) => item.id === permissionMatch[1]);
+    if (!permission || !canApprove(user, permission)) return error(res, 403, "PERMISSION_DENIED", "Cannot decide this permission.");
+    permission.status = permissionMatch[2] === "approve" ? "approved" : "rejected";
+    permission.decidedBy = user.id;
+    permission.decidedAt = now();
+    const session = db.sessions.find((item) => item.id === permission.sessionId);
+    db.messages.push({ id: id("msg"), sessionId: session.id, senderType: "system", senderId: null, content: `权限请求已${permission.status === "approved" ? "批准" : "拒绝"}：${permission.summary}`, createdAt: now() });
+    audit(user.id, `permission.${permission.status}`, "permission", permission.id);
+    await saveDb();
+    broadcast({ type: "permission.updated", sessionId: session.id, permissionId: permission.id, status: permission.status });
+    if (permission.status === "approved") runClaudeSession(session, permission.payload);
+    else {
+      session.status = "stopped";
+      await saveDb();
+    }
+    return send(res, 200, { ok: true });
+  }
+
+  if (pathname === "/api/users" && req.method === "POST") {
+    if (user.role !== "admin") return error(res, 403, "PERMISSION_DENIED", "Admin required.");
+    const body = await readBody(req);
+    if (db.users.some((item) => item.username === body.username)) return error(res, 409, "USER_EXISTS", "Username already exists.");
+    const newUser = { id: id("user"), username: body.username, passwordHash: hashPassword(body.password || "password"), displayName: body.displayName, email: body.email || `${body.username}@example.com`, role: body.role || "member", status: "active", createdAt: now(), updatedAt: now() };
+    db.users.push(newUser);
+    audit(user.id, "user.created", "user", newUser.id);
+    await saveDb();
+    return send(res, 201, { user: publicUser(newUser) });
+  }
+
+  const userStatusMatch = pathname.match(/^\/api\/users\/([^/]+)\/status$/);
+  if (userStatusMatch && req.method === "PATCH") {
+    if (user.role !== "admin") return error(res, 403, "PERMISSION_DENIED", "Admin required.");
+    const target = db.users.find((item) => item.id === userStatusMatch[1]);
+    if (!target || target.id === user.id) return error(res, 400, "USER_STATUS_INVALID", "Cannot update this user.");
+    target.status = target.status === "active" ? "disabled" : "active";
+    target.updatedAt = now();
+    audit(user.id, "user.status_changed", "user", target.id);
+    await saveDb();
+    return send(res, 200, { user: publicUser(target) });
+  }
+
+  if (pathname === "/api/claude/config" && req.method === "PATCH") {
+    if (user.role !== "admin") return error(res, 403, "PERMISSION_DENIED", "Admin required.");
+    const body = await readBody(req);
+    db.claudeConfig.command = body.command || db.claudeConfig.command;
+    db.claudeConfig.args = body.args || "";
+    db.claudeConfig.workspaceRoot = body.workspaceRoot || db.claudeConfig.workspaceRoot;
+    audit(user.id, "claude.config_updated", "agent", "claude_code");
+    await saveDb();
+    return send(res, 200, { claudeConfig: db.claudeConfig });
+  }
+
+  if (pathname === "/api/claude/health-check" && req.method === "POST") {
+    if (user.role !== "admin") return error(res, 403, "PERMISSION_DENIED", "Admin required.");
+    const result = await healthCheck();
+    Object.assign(db.claudeConfig, result, { lastCheckAt: now() });
+    audit(user.id, "claude.health_check", "agent", "claude_code", result);
+    await saveDb();
+    return send(res, 200, db.claudeConfig);
+  }
+
+  return error(res, 404, "NOT_FOUND", "API route not found.");
+}
+
+async function serveStatic(req, res, pathname) {
+  const filePath = pathname === "/" ? join(root, "index.html") : join(root, normalize(pathname));
+  if (!filePath.startsWith(root)) return error(res, 403, "PATH_FORBIDDEN", "Forbidden.");
+  try {
+    const info = await stat(filePath);
+    if (!info.isFile()) throw new Error("not file");
+    res.writeHead(200, { "Content-Type": mimeTypes[extname(filePath)] || "application/octet-stream" });
+    createReadStream(filePath).pipe(res);
+  } catch {
+    createReadStream(join(root, "index.html")).pipe(res);
+  }
+}
+
+await loadDb();
+
+createServer(async (req, res) => {
+  try {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    if (url.pathname.startsWith("/api/")) return await handleApi(req, res, url.pathname);
+    return await serveStatic(req, res, url.pathname);
+  } catch (err) {
+    console.error(err);
+    return error(res, 500, "INTERNAL_ERROR", "Internal server error.");
+  }
+}).listen(PORT, () => {
+  console.log(`Claude Code Team Platform listening on :${PORT}`);
+});

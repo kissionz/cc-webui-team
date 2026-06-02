@@ -1,0 +1,18 @@
+services:
+  claude-code-webui:
+    build: .
+    container_name: claude-code-webui
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: "3000"
+      DATA_DIR: "/app/data"
+      WORKSPACE_ROOT: "/workspaces"
+      CLAUDE_COMMAND: "claude"
+      CLAUDE_ARGS: "-p"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env before starting}"
+      SEED_DEMO_USERS: "false"
+    volumes:
+      - ./data:/app/data
+      - ./workspaces:/workspaces
