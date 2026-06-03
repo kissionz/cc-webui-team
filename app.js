@@ -601,7 +601,7 @@ function renderRightRail(team, session) {
         </div>
         <div class="side-card">
           <h4>权限请求</h4>
-          ${permissions.map(renderPermission).join("") || "<p>当前没有平台审批请求；Claude Code MCP 工具授权桥接尚未启用。</p>"}
+          ${permissions.map(renderPermission).join("") || "<p>当前没有待处理权限。MCP 工具请求会在这里出现，可选择允许一次、总是允许工具或总是允许 server。</p>"}
         </div>
         <div class="side-card">
           <h4>文件变更</h4>
@@ -627,6 +627,7 @@ function effectiveAgentStatus(agent, session) {
 
 function renderPermission(permission) {
   const canAct = permission.status === "pending" && canApprove(permission);
+  if (permission.type === "mcp_tool") return renderMcpPermission(permission, canAct);
   return `
     <div class="side-card">
       <div class="meta">${badge(permission.type, "amber")} ${badge(permission.risk, permission.risk === "high" ? "red" : "amber")}</div>
@@ -635,6 +636,25 @@ function renderPermission(permission) {
       <div class="meta">过期 ${fmt(permission.expiresAt)} · ${escapeHtml(permission.status)}</div>
       <div class="toolbar">
         <button class="button primary" data-permission="${permission.id}" data-decision="approved" ${canAct ? "" : "disabled"}>${icons.check}批准</button>
+        <button class="button danger" data-permission="${permission.id}" data-decision="rejected" ${canAct ? "" : "disabled"}>${icons.close}拒绝</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderMcpPermission(permission, canAct) {
+  const input = permission.toolInput ? JSON.stringify(permission.toolInput, null, 2) : permission.payload;
+  return `
+    <div class="side-card permission-card">
+      <div class="meta">${badge("MCP 工具", "amber")} ${permission.serverName ? badge(permission.serverName, "blue") : ""}</div>
+      <h4>${escapeHtml(permission.summary)}</h4>
+      <p>${escapeHtml(permission.reason || "Claude Code 请求使用该工具。")}</p>
+      <pre class="workspace">${escapeHtml(input || "")}</pre>
+      <div class="meta">过期 ${fmt(permission.expiresAt)} · ${escapeHtml(permission.status)}</div>
+      <div class="permission-actions">
+        <button class="button primary" data-permission="${permission.id}" data-decision="allow_once" ${canAct ? "" : "disabled"}>允许一次</button>
+        <button class="button" data-permission="${permission.id}" data-decision="allow_always_tool" ${canAct ? "" : "disabled"}>总是允许工具</button>
+        <button class="button" data-permission="${permission.id}" data-decision="allow_always_server" ${canAct && permission.serverName ? "" : "disabled"}>总是允许 server</button>
         <button class="button danger" data-permission="${permission.id}" data-decision="rejected" ${canAct ? "" : "disabled"}>${icons.close}拒绝</button>
       </div>
     </div>
@@ -849,8 +869,8 @@ async function sendMessage(form) {
 async function decidePermission(id, decision) {
   const permission = state.permissions.find((item) => item.id === id);
   if (!permission || !canApprove(permission)) return;
-  const action = decision === "approved" ? "approve" : "reject";
-  await api(`/api/permissions/${id}/${action}`, { method: "POST", body: "{}" });
+  const action = decision === "rejected" ? "reject" : "approve";
+  await api(`/api/permissions/${id}/${action}`, { method: "POST", body: JSON.stringify({ decision }) });
   await refresh();
 }
 
