@@ -446,7 +446,7 @@ function renderChat(team, session) {
   }
   const messages = state.messages.filter((message) => message.sessionId === session.id);
   const turns = buildMessageTurns(messages);
-  const canSend = canWriteTeam(team.id) && session.status === "idle";
+  const canSend = canWriteTeam(team.id) && !["running", "waiting_permission"].includes(session.status);
   const placeholder = composerPlaceholder(team, session);
   return `
     <section class="panel chat-panel">
@@ -511,9 +511,9 @@ function renderTurnEvents(messages, collapsed) {
 function composerPlaceholder(team, session) {
   if (!canWriteTeam(team.id)) return "viewer 角色只能查看会话";
   if (session.status === "idle") return "向 Claude Code 发送任务";
-  if (session.status === "running") return "Claude Code 正在运行，等待输出或停止后新建会话";
+  if (session.status === "running") return "Claude Code 正在运行，等待输出或停止后再继续";
   if (session.status === "waiting_permission") return "当前任务等待审批";
-  return "当前会话已结束，请创建新会话继续";
+  return "继续向 Claude Code 发送下一轮任务";
 }
 
 function renderMessage(message) {
@@ -614,6 +614,7 @@ function effectiveAgentStatus(agent, session) {
     if (session.status === "running") return { label: "运行中", className: "running" };
     if (session.status === "waiting_permission") return { label: "等待审批", className: "waiting" };
     if (session.status === "failed" || session.status === "stopped") return { label: "异常/已停止", className: "error" };
+    if (session.status === "completed" || session.status === "idle") return state.claudeConfig.available ? { label: "空闲可用", className: "ready" } : { label: "未就绪", className: "" };
   }
   if (agent.status === "running") return { label: "运行中", className: "running" };
   if (agent.status === "waiting") return { label: "等待审批", className: "waiting" };

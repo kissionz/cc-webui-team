@@ -424,10 +424,6 @@ function needsApproval(content) {
   return /(rm\s+-|sudo|install|npm\s+i|pnpm\s+i|yarn\s+add|写入|删除|执行命令|shell|workspace 外|权限)/i.test(content);
 }
 
-function sessionHasClaudeRun(sessionId) {
-  return db.messages.some((message) => message.sessionId === sessionId && message.senderType === "tool" && message.metadata?.type === "command");
-}
-
 function titleFromPrompt(content) {
   return String(content || "").replace(/\s+/g, " ").trim().slice(0, 10) || "新会话";
 }
@@ -681,9 +677,6 @@ async function handleApi(req, res, pathname) {
     if (!content) return error(res, 400, "MESSAGE_EMPTY", "Message cannot be empty.");
     if (["running", "waiting_permission"].includes(session.status)) {
       return error(res, 409, "SESSION_BUSY", "This session is already running. Wait for it to finish or stop it first.");
-    }
-    if (sessionHasClaudeRun(session.id) || ["completed", "failed", "stopped"].includes(session.status)) {
-      return error(res, 409, "SESSION_ALREADY_RAN", "This session already ran Claude Code. Create a new session for another task.");
     }
     const turnId = id("turn");
     if (session.title === "新会话") session.title = titleFromPrompt(content);
