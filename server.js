@@ -1,8 +1,8 @@
 import { createServer } from "node:http";
-import { createReadStream, readFileSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, writeFile, stat } from "node:fs/promises";
-import { dirname, extname, join, normalize, resolve } from "node:path";
-import { spawn } from "node:child_process";
+import { delimiter, dirname, extname, isAbsolute, join, normalize, resolve } from "node:path";
+import { execFileSync, spawn } from "node:child_process";
 import { randomBytes, pbkdf2Sync, timingSafeEqual } from "node:crypto";
 
 const root = process.cwd();
@@ -77,8 +77,63 @@ function windowsShellPath() {
 
 function spawnCli(command, args, options = {}) {
   if (!IS_WINDOWS) return spawn(command, args, options);
+  const resolved = resolveWindowsCli(command, args);
+  if (resolved) return spawn(resolved.command, resolved.args, options);
   const line = [command, ...args].map(cmdQuote).join(" ");
   return spawn(windowsShellPath(), ["/d", "/s", "/c", line], options);
+}
+
+function resolveWindowsCli(command, args) {
+  const commandPath = resolveWindowsCommandPath(command);
+  if (!commandPath) return null;
+  const lower = commandPath.toLowerCase();
+  if (lower.endsWith(".cmd") || lower.endsWith(".bat")) {
+    const cliPath = resolveClaudeCliFromCmd(commandPath);
+    if (cliPath) return { command: process.execPath, args: [cliPath, ...args] };
+    return null;
+  }
+  return { command: commandPath, args };
+}
+
+function resolveWindowsCommandPath(command) {
+  if (!command) return null;
+  if ((isAbsolute(command) || command.includes("\\") || command.includes("/")) && existsSync(command)) return command;
+  try {
+    const output = execFileSync("where.exe", [command], { encoding: "utf8", windowsHide: true });
+    return output
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean) || null;
+  } catch {
+    for (const dir of String(process.env.PATH || "").split(delimiter)) {
+      for (const ext of [".cmd", ".bat", ".exe", ""]) {
+        const candidate = join(dir, `${command}${ext}`);
+        if (existsSync(candidate)) return candidate;
+      }
+    }
+  }
+  return null;
+}
+
+function resolveClaudeCliFromCmd(cmdPath) {
+  const candidates = [
+    join(dirname(cmdPath), "node_modules", "@anthropic-ai", "claude-code", "cli.js"),
+    join(dirname(dirname(cmdPath)), "node_modules", "@anthropic-ai", "claude-code", "cli.js"),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+
+  try {
+    const cmdText = readFileSync(cmdPath, "utf8");
+    const match = cmdText.match(/(["']?)([^"'\r\n]*node_modules[\\/]+@anthropic-ai[\\/]+claude-code[\\/]+cli\.js)\1/i);
+    if (!match) return null;
+    const raw = match[2].replaceAll("%~dp0", dirname(cmdPath));
+    const normalized = resolve(raw);
+    return existsSync(normalized) ? normalized : null;
+  } catch {
+    return null;
+  }
 }
 
 function seedDb() {

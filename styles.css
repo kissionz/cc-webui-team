@@ -627,9 +627,19 @@ select:disabled {
   box-shadow: 0 0 0 5px rgba(21, 128, 61, 0.12);
 }
 
+.status-dot.ready {
+  background: var(--blue);
+  box-shadow: 0 0 0 5px rgba(37, 99, 235, 0.12);
+}
+
 .status-dot.waiting {
   background: var(--amber);
   box-shadow: 0 0 0 5px rgba(180, 83, 9, 0.12);
+}
+
+.status-dot.error {
+  background: var(--red);
+  box-shadow: 0 0 0 5px rgba(180, 35, 24, 0.12);
 }
 
 .table {

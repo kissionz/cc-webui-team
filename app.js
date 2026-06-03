@@ -354,7 +354,10 @@ function renderRightRail(team, session) {
         </div>
         <div class="side-card">
           <h4>Agent 状态</h4>
-          ${agents.map((agent) => `<div class="agent-row"><div><strong>${escapeHtml(agent.name)}</strong><p>${escapeHtml(agent.command)} · ${escapeHtml(agent.type)}</p></div><span class="status-dot ${agent.status === "running" ? "running" : agent.status === "waiting" ? "waiting" : ""}"></span></div>`).join("")}
+          ${agents.map((agent) => {
+            const status = effectiveAgentStatus(agent, session);
+            return `<div class="agent-row"><div><strong>${escapeHtml(agent.name)}</strong><p>${escapeHtml(agent.command)} · ${escapeHtml(status.label)}</p></div><span title="${escapeHtml(status.label)}" class="status-dot ${status.className}"></span></div>`;
+          }).join("")}
         </div>
         <div class="side-card">
           <h4>权限请求</h4>
@@ -367,6 +370,18 @@ function renderRightRail(team, session) {
       </div>
     </aside>
   `;
+}
+
+function effectiveAgentStatus(agent, session) {
+  if (session?.agentId === agent.id) {
+    if (session.status === "running") return { label: "运行中", className: "running" };
+    if (session.status === "waiting_permission") return { label: "等待审批", className: "waiting" };
+    if (session.status === "failed" || session.status === "stopped") return { label: "异常/已停止", className: "error" };
+  }
+  if (agent.status === "running") return { label: "运行中", className: "running" };
+  if (agent.status === "waiting") return { label: "等待审批", className: "waiting" };
+  if (state.claudeConfig.available) return { label: "空闲可用", className: "ready" };
+  return { label: "未就绪", className: "" };
 }
 
 function renderPermission(permission) {
