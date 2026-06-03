@@ -147,16 +147,20 @@ cd cc-webui-team
 
 copy .env.example .env
 notepad .env
+npm install
 
 $env:ADMIN_PASSWORD="your-strong-password"
 $env:PORT="8068"
 $env:HOST="0.0.0.0"
 $env:WORKSPACE_ROOT="C:\workspaces"
 $env:CLAUDE_COMMAND="claude"
-$env:CLAUDE_ARGS="-p"
+$env:CLAUDE_TRANSPORT="pty"
+$env:CLAUDE_ARGS=""
 
 npm start
 ```
+
+`CLAUDE_TRANSPORT=pty` 会用 `node-pty` 创建真实终端会话，适合不带 `-p` 的 Claude Code 多轮交互。`CLAUDE_ARGS` 请保持为空；如果设置成 `-p`，就会回到一次性任务模式。
 
 访问：
 

@@ -11,7 +11,8 @@ services:
       DATA_DIR: "/app/data"
       WORKSPACE_ROOT: "/workspaces"
       CLAUDE_COMMAND: "claude"
-      CLAUDE_ARGS: "-p"
+      CLAUDE_TRANSPORT: "pty"
+      CLAUDE_ARGS: ""
       ADMIN_PASSWORD: "${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env before starting}"
       SEED_DEMO_USERS: "false"
     volumes:

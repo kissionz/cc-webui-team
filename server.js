@@ -15,7 +15,8 @@ const DATA_DIR = process.env.DATA_DIR || join(root, "data");
 const DB_FILE = process.env.DB_FILE || join(DATA_DIR, "db.json");
 const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT || "/workspaces";
 const CLAUDE_COMMAND = process.env.CLAUDE_COMMAND || "claude";
-const CLAUDE_ARGS = (process.env.CLAUDE_ARGS || "-p").split(" ").filter(Boolean);
+const CLAUDE_TRANSPORT = process.env.CLAUDE_TRANSPORT || "pty";
+const CLAUDE_ARGS = (process.env.CLAUDE_ARGS || (CLAUDE_TRANSPORT === "pty" ? "" : "-p")).split(" ").filter(Boolean);
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
 const IS_WINDOWS = process.platform === "win32";
 
@@ -81,6 +82,35 @@ function spawnCli(command, args, options = {}) {
   const resolved = resolveWindowsCli(command, args);
   if (resolved) return spawn(resolved.command, resolved.args, options);
   return spawnWindowsCommand(command, args, options);
+}
+
+async function spawnClaudePty(command, args, options = {}) {
+  let pty;
+  try {
+    const module = await import("node-pty");
+    pty = module.default || module;
+  } catch {
+    const problem = new Error("node-pty is required for interactive Claude Code sessions. Run npm install, then restart the server.");
+    problem.code = "PTY_MISSING";
+    throw problem;
+  }
+  const resolved = IS_WINDOWS ? resolveWindowsCli(command, args) : { command, args };
+  const launch = resolved || { command: windowsShellPath(), args: ["/d", "/s", "/c", [command, ...args].map(cmdQuote).join(" ")] };
+  return pty.spawn(launch.command, launch.args, {
+    name: "xterm-256color",
+    cols: 120,
+    rows: 40,
+    cwd: options.cwd,
+    env: { ...options.env, TERM: "xterm-256color" },
+  });
+}
+
+function cleanTerminalOutput(text) {
+  return String(text)
+    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\r/g, "")
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
 }
 
 function resolveWindowsCli(command, args) {
@@ -509,29 +539,45 @@ async function submitClaudeTurn(session, prompt, turnId) {
       agent.id,
       { type: "command", command: db.claudeConfig.command, args, cwd: session.cwd, turnId },
     );
-    const child = spawnCli(db.claudeConfig.command, args, {
-      cwd: session.cwd,
-      env: { ...process.env, TERM: "xterm-256color" },
-    });
+    let child;
+    try {
+      child = CLAUDE_TRANSPORT === "pty"
+        ? await spawnClaudePty(db.claudeConfig.command, args, { cwd: session.cwd, env: process.env })
+        : spawnCli(db.claudeConfig.command, args, { cwd: session.cwd, env: { ...process.env, TERM: "xterm-256color" } });
+    } catch (err) {
+      session.status = "failed";
+      agent.status = "idle";
+      await appendSessionMessage(session, "tool", err.message, agent.id, { type: "exit", code: err.code || "PTY_ERROR", turnId });
+      await saveDb();
+      broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
+      return;
+    }
     runtime = { child, agent, currentMessage: message, turnId, lastOutputAt: now(), heartbeat: null, heartbeatCount: 0, heartbeatMessage: null };
     running.set(session.id, runtime);
 
     const append = async (text) => {
+      const cleaned = cleanTerminalOutput(text);
+      if (!cleaned.trim()) return;
       runtime.lastOutputAt = now();
       if (!runtime.currentMessage) return;
-      runtime.currentMessage.content += text;
+      runtime.currentMessage.content += cleaned;
+      clearRuntimeHeartbeat(runtime);
       session.updatedAt = now();
       await saveDb();
-      broadcast({ type: "session.message.delta", sessionId: session.id, messageId: runtime.currentMessage.id, text });
+      broadcast({ type: "session.message.delta", sessionId: session.id, messageId: runtime.currentMessage.id, text: cleaned });
     };
 
-    child.stdout.on("data", (chunk) => append(chunk.toString()));
-    child.stderr.on("data", (chunk) => {
-      const text = chunk.toString();
-      if (/Warning: no stdin data received/i.test(text)) return;
-      append(text);
-    });
-    child.on("error", async (err) => {
+    if (CLAUDE_TRANSPORT === "pty") {
+      child.onData((data) => append(data));
+    } else {
+      child.stdout.on("data", (chunk) => append(chunk.toString()));
+      child.stderr.on("data", (chunk) => {
+        const text = chunk.toString();
+        if (/Warning: no stdin data received/i.test(text)) return;
+        append(text);
+      });
+    }
+    const handleError = async (err) => {
       clearRuntimeHeartbeat(runtime);
       await append(`\n[agent error] ${err.message}\ncommand: ${db.claudeConfig.command}\ncwd: ${session.cwd}`);
       session.status = "failed";
@@ -539,8 +585,8 @@ async function submitClaudeTurn(session, prompt, turnId) {
       running.delete(session.id);
       await saveDb();
       broadcast({ type: "agent.error", sessionId: session.id, message: err.message });
-    });
-    child.on("close", async (code) => {
+    };
+    const handleClose = async (code) => {
       clearRuntimeHeartbeat(runtime);
       if (session.status !== "stopped") session.status = code === 0 ? "completed" : "failed";
       agent.status = "idle";
@@ -554,7 +600,12 @@ async function submitClaudeTurn(session, prompt, turnId) {
       );
       await saveDb();
       broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
-    });
+    };
+    if (CLAUDE_TRANSPORT === "pty") child.onExit((event) => handleClose(event.exitCode));
+    else {
+      child.on("error", handleError);
+      child.on("close", handleClose);
+    }
   } else {
     await appendSessionMessage(session, "tool", "发送到现有 Claude Code 进程。", agent.id, { type: "input", turnId });
   }
@@ -563,7 +614,8 @@ async function submitClaudeTurn(session, prompt, turnId) {
   runtime.currentMessage = message;
   runtime.turnId = turnId;
   startTurnHeartbeat(session, runtime);
-  runtime.child.stdin?.write(`${prompt}\n`);
+  if (CLAUDE_TRANSPORT === "pty") runtime.child.write(`${prompt}\r`);
+  else runtime.child.stdin?.write(`${prompt}\n`);
 }
 
 async function handleApi(req, res, pathname) {
