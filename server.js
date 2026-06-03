@@ -86,6 +86,11 @@ function spawnCli(command, args, options = {}) {
 function resolveWindowsCli(command, args) {
   const commandPath = resolveWindowsCommandPath(command);
   if (!commandPath) return null;
+  const cmdSibling = `${commandPath}.cmd`;
+  if (!extname(commandPath) && existsSync(cmdSibling)) {
+    const cliPath = resolveClaudeCliFromCmd(cmdSibling);
+    if (cliPath) return { command: process.execPath, args: [cliPath, ...args] };
+  }
   const lower = commandPath.toLowerCase();
   if (lower.endsWith(".cmd") || lower.endsWith(".bat")) {
     const cliPath = resolveClaudeCliFromCmd(commandPath);
@@ -100,10 +105,11 @@ function resolveWindowsCommandPath(command) {
   if ((isAbsolute(command) || command.includes("\\") || command.includes("/")) && existsSync(command)) return command;
   try {
     const output = execFileSync("where.exe", [command], { encoding: "utf8", windowsHide: true });
-    return output
+    const matches = output
       .split(/\r?\n/)
       .map((line) => line.trim())
-      .find(Boolean) || null;
+      .filter(Boolean);
+    return preferWindowsCommandMatch(matches) || null;
   } catch {
     for (const dir of String(process.env.PATH || "").split(delimiter)) {
       for (const ext of [".cmd", ".bat", ".exe", ""]) {
@@ -113,6 +119,15 @@ function resolveWindowsCommandPath(command) {
     }
   }
   return null;
+}
+
+function preferWindowsCommandMatch(matches) {
+  return (
+    matches.find((match) => match.toLowerCase().endsWith(".cmd")) ||
+    matches.find((match) => match.toLowerCase().endsWith(".bat")) ||
+    matches.find((match) => match.toLowerCase().endsWith(".exe")) ||
+    matches[0]
+  );
 }
 
 function resolveClaudeCliFromCmd(cmdPath) {
