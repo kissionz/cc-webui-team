@@ -7,9 +7,6 @@
     "start": "node server.js",
     "dev": "node server.js"
   },
-  "dependencies": {
-    "node-pty": "^1.0.0"
-  },
   "engines": {
     "node": ">=20"
   }

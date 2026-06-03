@@ -7,12 +7,9 @@ ENV PORT=8068
 ENV DATA_DIR=/app/data
 ENV WORKSPACE_ROOT=/workspaces
 ENV CLAUDE_COMMAND=claude
-ENV CLAUDE_TRANSPORT=pty
 ENV CLAUDE_ARGS=
 
 COPY package.json ./
-RUN npm install --omit=dev
-
 COPY index.html app.js styles.css README.md ./
 COPY claude-code-team-platform-prd.md ./
 COPY server.js ./

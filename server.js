@@ -15,8 +15,7 @@ const DATA_DIR = process.env.DATA_DIR || join(root, "data");
 const DB_FILE = process.env.DB_FILE || join(DATA_DIR, "db.json");
 const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT || "/workspaces";
 const CLAUDE_COMMAND = process.env.CLAUDE_COMMAND || "claude";
-const CLAUDE_TRANSPORT = process.env.CLAUDE_TRANSPORT || "pty";
-const CLAUDE_ARGS = (process.env.CLAUDE_ARGS || (CLAUDE_TRANSPORT === "pty" ? "" : "-p")).split(" ").filter(Boolean);
+const CLAUDE_ARGS = (process.env.CLAUDE_ARGS || "").split(" ").filter(Boolean);
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
 const IS_WINDOWS = process.platform === "win32";
 
@@ -82,35 +81,6 @@ function spawnCli(command, args, options = {}) {
   const resolved = resolveWindowsCli(command, args);
   if (resolved) return spawn(resolved.command, resolved.args, options);
   return spawnWindowsCommand(command, args, options);
-}
-
-async function spawnClaudePty(command, args, options = {}) {
-  let pty;
-  try {
-    const module = await import("node-pty");
-    pty = module.default || module;
-  } catch {
-    const problem = new Error("node-pty is required for interactive Claude Code sessions. Run npm install, then restart the server.");
-    problem.code = "PTY_MISSING";
-    throw problem;
-  }
-  const resolved = IS_WINDOWS ? resolveWindowsCli(command, args) : { command, args };
-  const launch = resolved || { command: windowsShellPath(), args: ["/d", "/s", "/c", [command, ...args].map(cmdQuote).join(" ")] };
-  return pty.spawn(launch.command, launch.args, {
-    name: "xterm-256color",
-    cols: 120,
-    rows: 40,
-    cwd: options.cwd,
-    env: { ...options.env, TERM: "xterm-256color" },
-  });
-}
-
-function cleanTerminalOutput(text) {
-  return String(text)
-    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
-    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
-    .replace(/\r/g, "")
-    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
 }
 
 function resolveWindowsCli(command, args) {
@@ -454,6 +424,21 @@ function needsApproval(content) {
   return /(rm\s+-|sudo|install|npm\s+i|pnpm\s+i|yarn\s+add|写入|删除|执行命令|shell|workspace 外|权限)/i.test(content);
 }
 
+function sanitizeClaudeExtraArgs(args) {
+  const blocked = new Set(["-p", "--print", "--output-format", "--resume", "-r", "--continue", "-c"]);
+  const sanitized = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (blocked.has(arg)) {
+      if (["--output-format", "--resume", "-r"].includes(arg)) index += 1;
+      continue;
+    }
+    if (arg.startsWith("--output-format=") || arg.startsWith("--resume=")) continue;
+    sanitized.push(arg);
+  }
+  return sanitized;
+}
+
 function titleFromPrompt(content) {
   return String(content || "").replace(/\s+/g, " ").trim().slice(0, 10) || "新会话";
 }
@@ -486,9 +471,7 @@ async function updateSessionMessage(session, message, content, metadata = messag
 }
 
 function getRuntime(sessionId) {
-  const runtime = running.get(sessionId);
-  if (!runtime) return null;
-  return runtime.child ? runtime : { child: runtime };
+  return running.get(sessionId) || null;
 }
 
 function clearRuntimeHeartbeat(runtime) {
@@ -521,101 +504,77 @@ function startTurnHeartbeat(session, runtime) {
 async function submitClaudeTurn(session, prompt, turnId) {
   const agent = db.agents.find((item) => item.id === session.agentId);
   const message = await appendAgentMessage(session, agent, "", { turnId });
-  let runtime = getRuntime(session.id);
+  session.status = "running";
+  session.updatedAt = now();
+  agent.status = "running";
+  await saveDb();
+  broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
 
-  if (!runtime) {
-    session.status = "running";
-    session.updatedAt = now();
-    agent.status = "running";
+  const extraArgs = sanitizeClaudeExtraArgs(String(db.claudeConfig.args || "").split(" ").filter(Boolean));
+  const args = ["-p", "--output-format", "json", ...extraArgs];
+  if (session.claudeSessionId) args.push("--resume", session.claudeSessionId);
+  await mkdir(session.cwd, { recursive: true });
+  await appendSessionMessage(
+    session,
+    "tool",
+    `${session.claudeSessionId ? "恢复 Claude Code 会话" : "启动 Claude Code 会话"}\ncommand: ${db.claudeConfig.command}\nargs: ${args.join(" ")}\ncwd: ${session.cwd}`,
+    agent.id,
+    { type: "command", command: db.claudeConfig.command, args, cwd: session.cwd, claudeSessionId: session.claudeSessionId || null, turnId },
+  );
+
+  const child = spawnCli(db.claudeConfig.command, args, {
+    cwd: session.cwd,
+    env: { ...process.env, TERM: "xterm-256color" },
+  });
+  const runtime = { child, agent, currentMessage: message, turnId, lastOutputAt: now(), heartbeat: null, heartbeatCount: 0, heartbeatMessage: null, stdout: "", stderr: "" };
+  running.set(session.id, runtime);
+  startTurnHeartbeat(session, runtime);
+  child.stdin?.end(prompt);
+
+  child.stdout.on("data", (chunk) => {
+    runtime.lastOutputAt = now();
+    runtime.stdout += chunk.toString();
+  });
+  child.stderr.on("data", (chunk) => {
+    const text = chunk.toString();
+    if (/Warning: no stdin data received/i.test(text)) return;
+    runtime.lastOutputAt = now();
+    runtime.stderr += text;
+  });
+  child.on("error", async (err) => {
+    clearRuntimeHeartbeat(runtime);
+    await updateSessionMessage(session, message, `[agent error] ${err.message}`, { ...message.metadata, error: err.message });
+    session.status = "failed";
+    agent.status = "idle";
+    running.delete(session.id);
     await saveDb();
-    broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
-
-    const args = String(db.claudeConfig.args || "").split(" ").filter(Boolean);
-    await mkdir(session.cwd, { recursive: true });
+    broadcast({ type: "agent.error", sessionId: session.id, message: err.message });
+  });
+  child.on("close", async (code) => {
+    clearRuntimeHeartbeat(runtime);
+    running.delete(session.id);
+    let resultText = runtime.stdout.trim();
+    let parsed = null;
+    try {
+      parsed = JSON.parse(resultText);
+      resultText = parsed.result || parsed.message || resultText;
+      if (parsed.session_id) session.claudeSessionId = parsed.session_id;
+    } catch {
+      if (!resultText && runtime.stderr.trim()) resultText = runtime.stderr.trim();
+    }
+    await updateSessionMessage(session, message, resultText || (code === 0 ? "Claude Code 本轮没有返回文本。" : runtime.stderr.trim() || `Claude Code exited with code ${code}.`), { ...message.metadata, claudeSessionId: session.claudeSessionId || null });
+    session.status = code === 0 && !parsed?.is_error ? "completed" : "failed";
+    agent.status = "idle";
     await appendSessionMessage(
       session,
       "tool",
-      `启动 Claude Code\ncommand: ${db.claudeConfig.command}\nargs: ${args.join(" ") || "(none)"}\ncwd: ${session.cwd}`,
+      session.status === "completed" ? "本轮完成，会话上下文已保存，可继续发送下一轮。" : `本轮失败，退出码：${code}`,
       agent.id,
-      { type: "command", command: db.claudeConfig.command, args, cwd: session.cwd, turnId },
+      { type: "exit", code, claudeSessionId: session.claudeSessionId || null, turnId },
     );
-    let child;
-    try {
-      child = CLAUDE_TRANSPORT === "pty"
-        ? await spawnClaudePty(db.claudeConfig.command, args, { cwd: session.cwd, env: process.env })
-        : spawnCli(db.claudeConfig.command, args, { cwd: session.cwd, env: { ...process.env, TERM: "xterm-256color" } });
-    } catch (err) {
-      session.status = "failed";
-      agent.status = "idle";
-      await appendSessionMessage(session, "tool", err.message, agent.id, { type: "exit", code: err.code || "PTY_ERROR", turnId });
-      await saveDb();
-      broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
-      return;
-    }
-    runtime = { child, agent, currentMessage: message, turnId, lastOutputAt: now(), heartbeat: null, heartbeatCount: 0, heartbeatMessage: null };
-    running.set(session.id, runtime);
-
-    const append = async (text) => {
-      const cleaned = cleanTerminalOutput(text);
-      if (!cleaned.trim()) return;
-      runtime.lastOutputAt = now();
-      if (!runtime.currentMessage) return;
-      runtime.currentMessage.content += cleaned;
-      clearRuntimeHeartbeat(runtime);
-      session.updatedAt = now();
-      await saveDb();
-      broadcast({ type: "session.message.delta", sessionId: session.id, messageId: runtime.currentMessage.id, text: cleaned });
-    };
-
-    if (CLAUDE_TRANSPORT === "pty") {
-      child.onData((data) => append(data));
-    } else {
-      child.stdout.on("data", (chunk) => append(chunk.toString()));
-      child.stderr.on("data", (chunk) => {
-        const text = chunk.toString();
-        if (/Warning: no stdin data received/i.test(text)) return;
-        append(text);
-      });
-    }
-    const handleError = async (err) => {
-      clearRuntimeHeartbeat(runtime);
-      await append(`\n[agent error] ${err.message}\ncommand: ${db.claudeConfig.command}\ncwd: ${session.cwd}`);
-      session.status = "failed";
-      agent.status = "idle";
-      running.delete(session.id);
-      await saveDb();
-      broadcast({ type: "agent.error", sessionId: session.id, message: err.message });
-    };
-    const handleClose = async (code) => {
-      clearRuntimeHeartbeat(runtime);
-      if (session.status !== "stopped") session.status = code === 0 ? "completed" : "failed";
-      agent.status = "idle";
-      running.delete(session.id);
-      await appendSessionMessage(
-        session,
-        "tool",
-        code === 0 ? "Claude Code 进程已退出。当前会话连接已断开，需要重新连接后才能继续同一进程上下文。" : `Claude Code 进程异常退出，退出码：${code}`,
-        agent.id,
-        { type: "exit", code, turnId: runtime.turnId },
-      );
-      await saveDb();
-      broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
-    };
-    if (CLAUDE_TRANSPORT === "pty") child.onExit((event) => handleClose(event.exitCode));
-    else {
-      child.on("error", handleError);
-      child.on("close", handleClose);
-    }
-  } else {
-    await appendSessionMessage(session, "tool", "发送到现有 Claude Code 进程。", agent.id, { type: "input", turnId });
-  }
-
-  runtime.agent = agent;
-  runtime.currentMessage = message;
-  runtime.turnId = turnId;
-  startTurnHeartbeat(session, runtime);
-  if (CLAUDE_TRANSPORT === "pty") runtime.child.write(`${prompt}\r`);
-  else runtime.child.stdin?.write(`${prompt}\n`);
+    await saveDb();
+    broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
+  });
 }
 
 async function handleApi(req, res, pathname) {
@@ -756,9 +715,7 @@ async function handleApi(req, res, pathname) {
     const body = await readBody(req);
     const content = String(body.content || "").trim();
     if (!content) return error(res, 400, "MESSAGE_EMPTY", "Message cannot be empty.");
-    if (session.status === "waiting_permission") return error(res, 409, "SESSION_BUSY", "This session is waiting for permission.");
-    if (["completed", "failed", "stopped"].includes(session.status)) return error(res, 409, "SESSION_DISCONNECTED", "Claude Code process is no longer connected. Create a new session.");
-    if (session.status === "running" && !getRuntime(session.id)) return error(res, 409, "SESSION_DISCONNECTED", "Claude Code process is no longer connected. Create a new session.");
+    if (["running", "waiting_permission"].includes(session.status)) return error(res, 409, "SESSION_BUSY", "This conversation turn is already running.");
     const turnId = id("turn");
     if (session.title === "新会话") session.title = titleFromPrompt(content);
     session.updatedAt = now();
