@@ -15,6 +15,7 @@ const icons = {
 
 const now = () => Date.now();
 const fmt = (timestamp) => new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(timestamp);
+const CHAT_RENDER_LIMIT = 180;
 
 const seedState = () => ({
   currentUserId: null,
@@ -444,7 +445,8 @@ function renderChat(team, session) {
   if (!session) {
     return `<section class="panel chat-panel"><div class="empty">创建一个 Claude Code 会话开始协作</div></section>`;
   }
-  const messages = state.messages.filter((message) => message.sessionId === session.id);
+  const allMessages = state.messages.filter((message) => message.sessionId === session.id);
+  const messages = allMessages.slice(-CHAT_RENDER_LIMIT);
   const turns = buildMessageTurns(messages);
   const canSend = canWriteTeam(team.id) && !["running", "waiting_permission"].includes(session.status);
   const placeholder = composerPlaceholder(team, session);
@@ -458,6 +460,7 @@ function renderChat(team, session) {
         </div>
       </div>
       <div class="chat-stream" id="chat-stream">
+        ${allMessages.length > messages.length ? `<div class="history-notice">已隐藏更早的 ${allMessages.length - messages.length} 条本地记录，保持页面流畅。</div>` : ""}
         ${turns.map(renderTurn).join("")}
       </div>
       <form class="composer" data-form="message">
@@ -777,6 +780,10 @@ function renderWorkspaceModal(teamId) {
 let activeModal = "";
 let modalTeamId = "";
 
+function showError(err) {
+  alert(err?.message || "操作失败");
+}
+
 function render() {
   if (!state.currentUserId) {
     renderLogin();
@@ -915,54 +922,64 @@ document.addEventListener("submit", async (event) => {
     if (kind === "config") await saveConfig(form);
     if (kind === "workspace") await saveWorkspace(form);
   } catch (err) {
-    alert(err.message || "操作失败");
+    showError(err);
   }
 });
 
 document.addEventListener("click", async (event) => {
-  if (event.target.classList?.contains("modal-backdrop")) {
-    activeModal = "";
-    render();
-    return;
-  }
-  const target = event.target.closest("button");
-  if (!target) return;
-  if (target.dataset.view) setState({ activeView: target.dataset.view });
-  if (target.dataset.openTeam) setState({ activeView: "team", selectedTeamId: target.dataset.openTeam });
-  if (target.dataset.backTeams !== undefined) setState({ activeView: "teams" });
-  if (target.dataset.session) setState({ selectedSessionId: target.dataset.session });
-  if (target.dataset.modal) {
-    activeModal = target.dataset.modal;
-    modalTeamId = target.dataset.team || state.selectedTeamId;
-    render();
-  }
-  if (target.dataset.closeModal !== undefined) {
-    activeModal = "";
-    render();
-  }
-  if (target.dataset.action === "logout") {
-    await api("/api/auth/logout", { method: "POST", body: "{}" });
-    eventSource?.close();
-    eventSource = null;
-    setState({ currentUserId: null });
-  }
-  if (target.dataset.action === "new-session") await createSession();
-  if (target.dataset.deleteSession) await deleteSession(target.dataset.deleteSession);
-  if (target.dataset.action === "stop-session") {
-    const session = sessionById(state.selectedSessionId);
-    if (session) {
-      await api(`/api/sessions/${session.id}/stop`, { method: "POST", body: "{}" });
+  try {
+    if (event.target.classList?.contains("modal-backdrop")) {
+      activeModal = "";
+      render();
+      return;
+    }
+    const target = event.target.closest("button");
+    if (!target || target.disabled) return;
+
+    if (target.dataset.view) return setState({ activeView: target.dataset.view });
+    if (target.dataset.openTeam) return setState({ activeView: "team", selectedTeamId: target.dataset.openTeam, selectedSessionId: target.dataset.session || state.selectedSessionId });
+    if (target.dataset.backTeams !== undefined) return setState({ activeView: "teams" });
+    if (target.dataset.session) return setState({ selectedSessionId: target.dataset.session });
+    if (target.dataset.modal) {
+      activeModal = target.dataset.modal;
+      modalTeamId = target.dataset.team || state.selectedTeamId;
+      render();
+      return;
+    }
+    if (target.dataset.closeModal !== undefined) {
+      activeModal = "";
+      render();
+      return;
+    }
+    if (target.dataset.action === "logout") {
+      await api("/api/auth/logout", { method: "POST", body: "{}" });
+      eventSource?.close();
+      eventSource = null;
+      setState({ currentUserId: null });
+      return;
+    }
+    if (target.dataset.action === "new-session") return await createSession();
+    if (target.dataset.deleteSession) return await deleteSession(target.dataset.deleteSession);
+    if (target.dataset.action === "stop-session") {
+      const session = sessionById(state.selectedSessionId);
+      if (session) {
+        await api(`/api/sessions/${session.id}/stop`, { method: "POST", body: "{}" });
+        await refresh();
+      }
+      return;
+    }
+    if (target.dataset.action === "health-check") {
+      await api("/api/claude/health-check", { method: "POST", body: "{}" });
+      await refresh();
+      return;
+    }
+    if (target.dataset.permission) return await decidePermission(target.dataset.permission, target.dataset.decision);
+    if (target.dataset.toggleUser) {
+      await api(`/api/users/${target.dataset.toggleUser}/status`, { method: "PATCH", body: "{}" });
       await refresh();
     }
-  }
-  if (target.dataset.action === "health-check") {
-    await api("/api/claude/health-check", { method: "POST", body: "{}" });
-    await refresh();
-  }
-  if (target.dataset.permission) await decidePermission(target.dataset.permission, target.dataset.decision);
-  if (target.dataset.toggleUser) {
-    await api(`/api/users/${target.dataset.toggleUser}/status`, { method: "PATCH", body: "{}" });
-    await refresh();
+  } catch (err) {
+    showError(err);
   }
 });
 

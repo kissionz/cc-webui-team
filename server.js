@@ -17,6 +17,8 @@ const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT || "/workspaces";
 const CLAUDE_COMMAND = process.env.CLAUDE_COMMAND || "claude";
 const CLAUDE_ARGS = (process.env.CLAUDE_ARGS || "").split(" ").filter(Boolean);
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
+const BOOTSTRAP_MESSAGES_PER_SESSION = 240;
+const BOOTSTRAP_AUDIT_LIMIT = 300;
 const IS_WINDOWS = process.platform === "win32";
 
 const mimeTypes = {
@@ -373,6 +375,7 @@ function assertWorkspaceAllowed(workspacePath) {
 function bootstrapFor(user) {
   const teamIds = new Set(db.teams.filter((team) => canSeeTeam(user, team.id)).map((team) => team.id));
   const sessionIds = new Set(db.sessions.filter((session) => teamIds.has(session.teamId)).map((session) => session.id));
+  const auditLogs = user.role === "admin" ? db.auditLogs : db.auditLogs.filter((log) => log.userId === user.id);
   return {
     currentUserId: user.id,
     users: user.role === "admin" ? db.users.map(publicUser) : db.users.map(publicUser),
@@ -380,12 +383,25 @@ function bootstrapFor(user) {
     members: db.members.filter((member) => teamIds.has(member.teamId)),
     agents: db.agents.filter((agent) => !agent.teamId || teamIds.has(agent.teamId)),
     sessions: db.sessions.filter((session) => teamIds.has(session.teamId)),
-    messages: db.messages.filter((message) => sessionIds.has(message.sessionId)),
+    messages: recentMessagesForSessions(sessionIds, BOOTSTRAP_MESSAGES_PER_SESSION),
     permissions: db.permissions.filter((permission) => sessionIds.has(permission.sessionId)),
     fileChanges: db.fileChanges.filter((file) => sessionIds.has(file.sessionId)),
-    auditLogs: user.role === "admin" ? db.auditLogs : db.auditLogs.filter((log) => log.userId === user.id),
+    auditLogs: auditLogs.slice(-BOOTSTRAP_AUDIT_LIMIT),
     claudeConfig: db.claudeConfig,
   };
+}
+
+function recentMessagesForSessions(sessionIds, limitPerSession) {
+  const buckets = new Map();
+  for (let index = db.messages.length - 1; index >= 0; index -= 1) {
+    const message = db.messages[index];
+    if (!sessionIds.has(message.sessionId)) continue;
+    const bucket = buckets.get(message.sessionId) || [];
+    if (bucket.length >= limitPerSession) continue;
+    bucket.push(message);
+    buckets.set(message.sessionId, bucket);
+  }
+  return [...buckets.values()].flatMap((bucket) => bucket.reverse());
 }
 
 async function healthCheck() {
