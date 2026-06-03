@@ -43,6 +43,7 @@ const seedState = () => ({
 let state = loadState();
 let eventSource = null;
 let refreshTimer = null;
+let renderTimer = null;
 
 function loadState() {
   return {
@@ -99,15 +100,49 @@ function scheduleRefresh() {
   refreshTimer = setTimeout(() => refresh(), 180);
 }
 
+function scheduleRender() {
+  clearTimeout(renderTimer);
+  renderTimer = setTimeout(() => render(), 80);
+}
+
 function connectEvents() {
   if (eventSource || !state.currentUserId) return;
   eventSource = new EventSource("/api/events");
-  eventSource.onmessage = scheduleRefresh;
+  eventSource.onmessage = (event) => {
+    try {
+      applyRealtimeEvent(JSON.parse(event.data));
+    } catch {
+      scheduleRefresh();
+    }
+  };
   eventSource.onerror = () => {
     eventSource?.close();
     eventSource = null;
     setTimeout(() => state.currentUserId && connectEvents(), 1500);
   };
+}
+
+function applyRealtimeEvent(event) {
+  if (event.type === "session.message.created" && event.message) {
+    const exists = state.messages.some((message) => message.id === event.message.id);
+    if (!exists) state.messages = [...state.messages, event.message];
+    scheduleRender();
+    return;
+  }
+
+  if (event.type === "session.message.delta") {
+    state.messages = state.messages.map((message) => (message.id === event.messageId ? { ...message, content: `${message.content || ""}${event.text || ""}`, createdAt: message.createdAt } : message));
+    scheduleRender();
+    return;
+  }
+
+  if (event.type === "session.status.changed") {
+    state.sessions = state.sessions.map((session) => (session.id === event.sessionId ? { ...session, status: event.status, updatedAt: now() } : session));
+    scheduleRender();
+    return;
+  }
+
+  scheduleRefresh();
 }
 
 function currentUser() {
@@ -248,6 +283,14 @@ function renderTeams() {
   const user = currentUser();
   const teams = user.role === "admin" ? state.teams : state.teams.filter((team) => teamRole(team.id));
   const actions = `<button class="button primary" data-modal="team">${icons.plus}创建团队</button>`;
+  const visibleTeamIds = new Set(teams.map((team) => team.id));
+  const visibleSessions = state.sessions.filter((session) => visibleTeamIds.has(session.teamId));
+  const runningCount = visibleSessions.filter((session) => session.status === "running").length;
+  const pendingCount = state.permissions.filter((permission) => permission.status === "pending" && visibleSessions.some((session) => session.id === permission.sessionId)).length;
+  const recentSessions = visibleSessions
+    .slice()
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, 5);
   const cards = teams
     .map((team) => {
       const members = state.members.filter((member) => member.teamId === team.id);
@@ -269,7 +312,51 @@ function renderTeams() {
       `;
     })
     .join("");
-  return appRoot(`${topbar("团队工作台", "共享工作区、会话、权限请求和 Agent 状态", actions)}<section class="content"><div class="grid teams">${cards}</div></section>`);
+  return appRoot(`
+    ${topbar("团队工作台", "共享工作区、会话、权限请求和 Agent 状态", actions)}
+    <section class="content dashboard">
+      <div class="dashboard-hero">
+        <div>
+          <p class="eyebrow">Team Agent Console</p>
+          <h2>统一管理 Claude Code 工作区</h2>
+          <p>查看团队、运行会话、待审批动作和 CLI 健康状态。进入团队后可以直接发送任务、观察输出和调整工作区。</p>
+        </div>
+        <div class="health-pill ${state.claudeConfig.available ? "ok" : "down"}">
+          <span class="status-dot ${state.claudeConfig.available ? "ready" : "error"}"></span>
+          <div><strong>${state.claudeConfig.available ? "CLI 可用" : "CLI 未就绪"}</strong><span>${escapeHtml(state.claudeConfig.version || "未检测")}</span></div>
+        </div>
+      </div>
+      <div class="metric-row">
+        ${metricCard("团队", teams.length, "可访问团队")}
+        ${metricCard("运行中", runningCount, "正在执行的会话")}
+        ${metricCard("待审批", pendingCount, "权限请求")}
+        ${metricCard("会话", visibleSessions.length, "历史记录")}
+      </div>
+      <div class="dashboard-grid">
+        <section>
+          <div class="section-title"><h3>团队</h3><span>${teams.length} 个工作区</span></div>
+          <div class="grid teams">${cards || '<div class="empty">还没有团队</div>'}</div>
+        </section>
+        <aside class="panel activity-panel">
+          <div class="panel-header"><h2 class="panel-title">最近活动</h2>${badge("live", "blue")}</div>
+          <div class="side-stack">
+            ${recentSessions.map((session) => {
+              const team = state.teams.find((item) => item.id === session.teamId);
+              return `<button class="activity-item" data-open-team="${session.teamId}" data-session="${session.id}">
+                <strong>${escapeHtml(session.title)}</strong>
+                <span>${escapeHtml(team?.name || "")}</span>
+                <div class="meta">${badge(session.status, statusTone(session.status))}<span>${fmt(session.updatedAt)}</span></div>
+              </button>`;
+            }).join("") || '<p class="empty">暂无会话活动</p>'}
+          </div>
+        </aside>
+      </div>
+    </section>
+  `);
+}
+
+function metricCard(label, value, caption) {
+  return `<div class="metric card"><div class="metric-label">${escapeHtml(label)}</div><div class="metric-value">${escapeHtml(value)}</div><div class="metric-caption">${escapeHtml(caption)}</div></div>`;
 }
 
 function renderTeamDetail() {
@@ -383,6 +470,8 @@ function renderRightRail(team, session) {
   const agents = state.agents.filter((agent) => agent.teamId === team.id);
   const permissions = session ? state.permissions.filter((permission) => permission.sessionId === session.id) : [];
   const files = session ? state.fileChanges.filter((file) => file.sessionId === session.id) : [];
+  const toolEvents = session ? state.messages.filter((message) => message.sessionId === session.id && message.senderType === "tool").slice(-6).reverse() : [];
+  const commandEvents = toolEvents.filter((message) => message.metadata?.type === "command" || /command:/i.test(message.content));
   return `
     <aside class="panel">
       <div class="panel-header"><h2 class="panel-title">运行侧栏</h2>${badge("SSE ready", "blue")}</div>
@@ -399,6 +488,11 @@ function renderRightRail(team, session) {
           }).join("")}
         </div>
         <div class="side-card">
+          <h4>运行事件</h4>
+          <p>${commandEvents.length} 次命令启动 · ${toolEvents.filter((event) => event.metadata?.type === "heartbeat").length} 次心跳</p>
+          ${toolEvents.map((event) => `<div class="runtime-event"><strong>${escapeHtml(runtimeEventTitle(event))}</strong><p>${escapeHtml(event.content)}</p><span>${fmt(event.createdAt)}</span></div>`).join("") || "<p>暂无运行事件。</p>"}
+        </div>
+        <div class="side-card">
           <h4>权限请求</h4>
           ${permissions.map(renderPermission).join("") || "<p>当前会话没有待处理权限。</p>"}
         </div>
@@ -409,6 +503,14 @@ function renderRightRail(team, session) {
       </div>
     </aside>
   `;
+}
+
+function runtimeEventTitle(event) {
+  const type = event.metadata?.type;
+  if (type === "command") return "命令启动";
+  if (type === "heartbeat") return "运行心跳";
+  if (type === "exit") return "进程结束";
+  return "工具事件";
 }
 
 function effectiveAgentStatus(agent, session) {

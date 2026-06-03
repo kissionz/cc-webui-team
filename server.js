@@ -431,6 +431,15 @@ async function appendAgentMessage(session, agent, content = "") {
   return message;
 }
 
+async function appendSessionMessage(session, senderType, content, senderId = null, metadata = {}) {
+  const message = { id: id("msg"), sessionId: session.id, senderType, senderId, content, metadata, createdAt: now() };
+  db.messages.push(message);
+  session.updatedAt = now();
+  await saveDb();
+  broadcast({ type: "session.message.created", sessionId: session.id, message });
+  return message;
+}
+
 async function runClaudeSession(session, prompt) {
   const agent = db.agents.find((item) => item.id === session.agentId);
   const message = await appendAgentMessage(session, agent, "");
@@ -442,14 +451,36 @@ async function runClaudeSession(session, prompt) {
 
   const args = String(db.claudeConfig.args || "").split(" ").filter(Boolean);
   await mkdir(session.cwd, { recursive: true });
+  await appendSessionMessage(
+    session,
+    "tool",
+    `启动 Claude Code\ncommand: ${db.claudeConfig.command}\nargs: ${args.join(" ") || "(none)"}\ncwd: ${session.cwd}`,
+    agent.id,
+    { type: "command", command: db.claudeConfig.command, args, cwd: session.cwd },
+  );
   const child = spawnCli(db.claudeConfig.command, args, {
     cwd: session.cwd,
     env: { ...process.env, TERM: "xterm-256color" },
   });
   running.set(session.id, child);
   child.stdin?.end(prompt);
+  let lastOutputAt = now();
+  let heartbeatCount = 0;
+  const heartbeat = setInterval(() => {
+    if (now() - lastOutputAt < 10000) return;
+    heartbeatCount += 1;
+    appendSessionMessage(
+      session,
+      "tool",
+      `Claude Code 仍在运行，已等待 ${Math.round((now() - message.createdAt) / 1000)} 秒，最近暂无输出。`,
+      agent.id,
+      { type: "heartbeat", count: heartbeatCount },
+    );
+    lastOutputAt = now();
+  }, 5000);
 
   const append = async (text) => {
+    lastOutputAt = now();
     message.content += text;
     session.updatedAt = now();
     await saveDb();
@@ -463,6 +494,7 @@ async function runClaudeSession(session, prompt) {
     append(text);
   });
   child.on("error", async (err) => {
+    clearInterval(heartbeat);
     await append(`\n[agent error] ${err.message}\ncommand: ${db.claudeConfig.command}\ncwd: ${session.cwd}`);
     session.status = "failed";
     agent.status = "idle";
@@ -471,9 +503,11 @@ async function runClaudeSession(session, prompt) {
     broadcast({ type: "agent.error", sessionId: session.id, message: err.message });
   });
   child.on("close", async (code) => {
+    clearInterval(heartbeat);
     session.status = code === 0 ? "completed" : "failed";
     agent.status = "idle";
     running.delete(session.id);
+    await appendSessionMessage(session, "tool", `Claude Code 进程结束，退出码：${code}`, agent.id, { type: "exit", code });
     await saveDb();
     broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
   });
