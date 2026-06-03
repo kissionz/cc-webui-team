@@ -483,22 +483,32 @@ function startTurnHeartbeat(session, runtime) {
   clearRuntimeHeartbeat(runtime);
   runtime.lastOutputAt = now();
   runtime.heartbeatCount = 0;
-  runtime.heartbeatMessage = null;
   runtime.heartbeat = setInterval(() => {
     if (!runtime.currentMessage || now() - runtime.lastOutputAt < 10000) return;
     runtime.heartbeatCount += 1;
     const waitedSeconds = Math.round((now() - runtime.currentMessage.createdAt) / 1000);
-    const content = `Claude Code 仍在运行，已等待 ${waitedSeconds} 秒，最近暂无输出。`;
-    const metadata = { type: "heartbeat", count: runtime.heartbeatCount, waitedSeconds, turnId: runtime.turnId };
+    const metadata = { type: "thinking", status: "thinking", count: runtime.heartbeatCount, waitedSeconds, turnId: runtime.turnId };
     if (runtime.heartbeatMessage) {
-      updateSessionMessage(session, runtime.heartbeatMessage, content, metadata);
+      updateSessionMessage(session, runtime.heartbeatMessage, "", metadata);
     } else {
-      appendSessionMessage(session, "tool", content, runtime.agent?.id, metadata).then((created) => {
+      appendSessionMessage(session, "tool", "", runtime.agent?.id, metadata).then((created) => {
         runtime.heartbeatMessage = created;
       });
     }
     runtime.lastOutputAt = now();
   }, 5000);
+}
+
+async function finishTurnThinking(session, runtime) {
+  if (!runtime?.heartbeatMessage) return;
+  const durationMs = Math.max(0, now() - (runtime.currentMessage?.createdAt || now()));
+  await updateSessionMessage(session, runtime.heartbeatMessage, "", {
+    ...runtime.heartbeatMessage.metadata,
+    type: "thinking",
+    status: "done",
+    durationMs,
+    turnId: runtime.turnId,
+  });
 }
 
 async function submitClaudeTurn(session, prompt, turnId) {
@@ -528,6 +538,7 @@ async function submitClaudeTurn(session, prompt, turnId) {
   });
   const runtime = { child, agent, currentMessage: message, turnId, lastOutputAt: now(), heartbeat: null, heartbeatCount: 0, heartbeatMessage: null, stdout: "", stderr: "" };
   running.set(session.id, runtime);
+  runtime.heartbeatMessage = await appendSessionMessage(session, "tool", "", agent.id, { type: "thinking", status: "thinking", waitedSeconds: 0, turnId });
   startTurnHeartbeat(session, runtime);
   child.stdin?.end(prompt);
 
@@ -543,6 +554,7 @@ async function submitClaudeTurn(session, prompt, turnId) {
   });
   child.on("error", async (err) => {
     clearRuntimeHeartbeat(runtime);
+    await finishTurnThinking(session, runtime);
     await updateSessionMessage(session, message, `[agent error] ${err.message}`, { ...message.metadata, error: err.message });
     session.status = "failed";
     agent.status = "idle";
@@ -553,6 +565,7 @@ async function submitClaudeTurn(session, prompt, turnId) {
   child.on("close", async (code) => {
     clearRuntimeHeartbeat(runtime);
     running.delete(session.id);
+    await finishTurnThinking(session, runtime);
     let resultText = runtime.stdout.trim();
     let parsed = null;
     try {

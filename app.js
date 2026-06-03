@@ -519,7 +519,7 @@ function composerPlaceholder(team, session) {
 function renderMessage(message) {
   if (message.senderType === "tool" || message.senderType === "system") return renderTimelineEvent(message);
   if (message.senderType === "agent" && !String(message.content || "").trim()) {
-    return renderTimelineEvent({ ...message, senderType: "tool", metadata: { type: "thinking" }, content: "Claude Code 正在思考，等待首个输出。" });
+    return "";
   }
   const sender =
     message.senderType === "user"
@@ -539,7 +539,7 @@ function renderTimelineEvent(message) {
   const event = timelineEventMeta(message);
   return `
     <article class="timeline-event ${event.tone}">
-      <span class="event-icon">${event.icon}</span>
+      <span class="event-icon">${event.spinner ? '<span class="event-spinner" aria-hidden="true"></span>' : event.icon}</span>
       <div class="event-body">
         <div class="event-head"><strong>${escapeHtml(event.title)}</strong><span>${fmt(message.updatedAt || message.createdAt)}</span></div>
         ${event.detail ? `<pre class="event-detail">${escapeHtml(event.detail)}</pre>` : ""}
@@ -552,8 +552,19 @@ function timelineEventMeta(message) {
   const type = message.metadata?.type || (message.senderType === "system" ? "system" : "tool");
   if (type === "command") return { title: message.metadata?.claudeSessionId ? "已恢复 Claude Code 会话" : "已启动 Claude Code 会话", detail: message.content, icon: icons.terminal, tone: "tool" };
   if (type === "input") return { title: "已发送到 Claude Code", detail: message.content, icon: icons.terminal, tone: "tool" };
-  if (type === "heartbeat") return { title: "正在思考", detail: message.content, icon: icons.activity, tone: "pending" };
-  if (type === "thinking") return { title: "正在思考", detail: message.content, icon: icons.activity, tone: "pending" };
+  if (type === "heartbeat" || type === "thinking") {
+    const done = message.metadata?.status === "done";
+    const durationMs = Number(message.metadata?.durationMs || 0);
+    const waitedSeconds = Number(message.metadata?.waitedSeconds || 0);
+    const seconds = Math.max(1, Math.round(durationMs ? durationMs / 1000 : waitedSeconds || 1));
+    return {
+      title: done ? `思考完成 · ${seconds}s` : "正在思考",
+      detail: message.content,
+      icon: icons.activity,
+      tone: done ? "done" : "pending",
+      spinner: !done,
+    };
+  }
   if (type === "exit") {
     const ok = message.metadata?.code === 0;
     return { title: ok ? "任务完成" : "任务失败", detail: message.content, icon: ok ? icons.check : icons.close, tone: ok ? "done" : "error" };
@@ -566,9 +577,6 @@ function renderRightRail(team, session) {
   const agents = state.agents.filter((agent) => agent.teamId === team.id);
   const permissions = session ? state.permissions.filter((permission) => permission.sessionId === session.id) : [];
   const files = session ? state.fileChanges.filter((file) => file.sessionId === session.id) : [];
-  const toolEvents = session ? state.messages.filter((message) => message.sessionId === session.id && message.senderType === "tool").slice(-6).reverse() : [];
-  const commandEvents = toolEvents.filter((message) => message.metadata?.type === "command" || /command:/i.test(message.content));
-  const heartbeatTicks = toolEvents.find((event) => event.metadata?.type === "heartbeat")?.metadata?.count || 0;
   return `
     <aside class="panel">
       <div class="panel-header"><h2 class="panel-title">运行侧栏</h2>${badge("SSE ready", "blue")}</div>
@@ -585,13 +593,8 @@ function renderRightRail(team, session) {
           }).join("")}
         </div>
         <div class="side-card">
-          <h4>运行事件</h4>
-          <p>${commandEvents.length} 次命令启动 · ${heartbeatTicks} 次等待更新</p>
-          ${toolEvents.map((event) => `<div class="runtime-event"><strong>${escapeHtml(runtimeEventTitle(event))}</strong><p>${escapeHtml(event.content)}</p><span>${fmt(event.createdAt)}</span></div>`).join("") || "<p>暂无运行事件。</p>"}
-        </div>
-        <div class="side-card">
           <h4>权限请求</h4>
-          ${permissions.map(renderPermission).join("") || "<p>当前会话没有待处理权限。</p>"}
+          ${permissions.map(renderPermission).join("") || "<p>当前没有平台审批请求；Claude Code MCP 工具授权桥接尚未启用。</p>"}
         </div>
         <div class="side-card">
           <h4>文件变更</h4>
@@ -600,14 +603,6 @@ function renderRightRail(team, session) {
       </div>
     </aside>
   `;
-}
-
-function runtimeEventTitle(event) {
-  const type = event.metadata?.type;
-  if (type === "command") return "命令启动";
-  if (type === "heartbeat") return "运行心跳";
-  if (type === "exit") return "任务状态";
-  return "工具事件";
 }
 
 function effectiveAgentStatus(agent, session) {

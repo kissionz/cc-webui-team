@@ -245,6 +245,12 @@ Remove-Item Env:\RESET_DEFAULT_TEAM_WORKSPACE
 - 在团队 workspace 中调用 Claude Code CLI
 - 审计日志
 
+## MCP / 工具授权说明
+
+当前版本只实现了 Web 平台自己的敏感任务审批，尚未接入 Claude Code CLI 的 MCP 工具授权确认通道。因此如果 Claude Code 返回“需要授权 MCP 工具”的提示，页面里目前不会出现可点击的 MCP 授权弹窗。
+
+要做成 AionUi 那种体验，需要后端接入 Claude Code 的权限请求机制，把工具名、MCP server、参数摘要和确认选项存成待处理授权，再通过 SSE 推给前端确认。不要只在前端做一个假确认按钮；真正的授权结果必须能回传给 Claude Code 运行流程。
+
 ## 生产建议
 
 - 使用 Caddy/Nginx 做 HTTPS 反代

@@ -795,6 +795,21 @@ select:disabled {
   height: 15px;
 }
 
+.event-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid #fde68a;
+  border-top-color: var(--amber);
+  border-radius: 50%;
+  animation: spin 0.86s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .event-body {
   min-width: 0;
 }
@@ -903,32 +918,6 @@ select:disabled {
 .activity-item span {
   color: var(--muted);
   font-size: 13px;
-}
-
-.runtime-event {
-  display: grid;
-  gap: 5px;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--panel-soft);
-}
-
-.runtime-event strong {
-  font-size: 12px;
-}
-
-.runtime-event p {
-  max-height: 92px;
-  overflow: auto;
-  white-space: pre-wrap;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 12px;
-}
-
-.runtime-event span {
-  color: var(--subtle);
-  font-size: 11px;
 }
 
 .agent-row,
