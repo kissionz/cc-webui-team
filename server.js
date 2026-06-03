@@ -424,6 +424,10 @@ function needsApproval(content) {
   return /(rm\s+-|sudo|install|npm\s+i|pnpm\s+i|yarn\s+add|写入|删除|执行命令|shell|workspace 外|权限)/i.test(content);
 }
 
+function sessionHasClaudeRun(sessionId) {
+  return db.messages.some((message) => message.sessionId === sessionId && message.senderType === "tool" && message.metadata?.type === "command");
+}
+
 async function appendAgentMessage(session, agent, content = "") {
   const message = { id: id("msg"), sessionId: session.id, senderType: "agent", senderId: agent.id, content, createdAt: now() };
   db.messages.push(message);
@@ -443,12 +447,12 @@ async function appendSessionMessage(session, senderType, content, senderId = nul
 
 async function runClaudeSession(session, prompt) {
   const agent = db.agents.find((item) => item.id === session.agentId);
-  const message = await appendAgentMessage(session, agent, "");
   session.status = "running";
   session.updatedAt = now();
   agent.status = "running";
   await saveDb();
   broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
+  const message = await appendAgentMessage(session, agent, "");
 
   const args = String(db.claudeConfig.args || "").split(" ").filter(Boolean);
   await mkdir(session.cwd, { recursive: true });
@@ -635,6 +639,13 @@ async function handleApi(req, res, pathname) {
     if (!session || !canWriteTeam(user, session.teamId)) return error(res, 403, "PERMISSION_DENIED", "Cannot send messages.");
     const body = await readBody(req);
     const content = String(body.content || "").trim();
+    if (!content) return error(res, 400, "MESSAGE_EMPTY", "Message cannot be empty.");
+    if (["running", "waiting_permission"].includes(session.status)) {
+      return error(res, 409, "SESSION_BUSY", "This session is already running. Wait for it to finish or stop it first.");
+    }
+    if (sessionHasClaudeRun(session.id) || ["completed", "failed", "stopped"].includes(session.status)) {
+      return error(res, 409, "SESSION_ALREADY_RAN", "This session already ran Claude Code. Create a new session for another task.");
+    }
     db.messages.push({ id: id("msg"), sessionId: session.id, senderType: "user", senderId: user.id, content, createdAt: now() });
     audit(user.id, "session.message_sent", "session", session.id);
     if (needsApproval(content)) {

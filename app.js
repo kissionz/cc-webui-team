@@ -430,7 +430,8 @@ function renderChat(team, session) {
     return `<section class="panel chat-panel"><div class="empty">创建一个 Claude Code 会话开始协作</div></section>`;
   }
   const messages = state.messages.filter((message) => message.sessionId === session.id);
-  const readonly = !canWriteTeam(team.id);
+  const canSend = canWriteTeam(team.id) && session.status === "idle";
+  const placeholder = composerPlaceholder(team, session);
   return `
     <section class="panel chat-panel">
       <div class="panel-header">
@@ -444,11 +445,19 @@ function renderChat(team, session) {
         ${messages.map(renderMessage).join("")}
       </div>
       <form class="composer" data-form="message">
-        <textarea class="textarea" name="content" placeholder="${readonly ? "viewer 角色只能查看会话" : "向 Claude Code 发送任务"}" ${readonly ? "disabled" : ""}></textarea>
-        <button class="button primary" type="submit" ${readonly ? "disabled" : ""}>${icons.send}发送</button>
+        <textarea class="textarea" name="content" placeholder="${escapeHtml(placeholder)}" ${canSend ? "" : "disabled"}></textarea>
+        <button class="button primary" type="submit" ${canSend ? "" : "disabled"}>${icons.send}发送</button>
       </form>
     </section>
   `;
+}
+
+function composerPlaceholder(team, session) {
+  if (!canWriteTeam(team.id)) return "viewer 角色只能查看会话";
+  if (session.status === "idle") return "向 Claude Code 发送任务";
+  if (session.status === "running") return "Claude Code 正在运行，等待输出或停止后新建会话";
+  if (session.status === "waiting_permission") return "当前任务等待审批";
+  return "当前会话已结束，请创建新会话继续";
 }
 
 function renderMessage(message) {
