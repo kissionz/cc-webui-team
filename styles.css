@@ -388,7 +388,7 @@ select:disabled {
 }
 
 .grid.teams {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
 }
 
 .grid.two {
@@ -407,6 +407,16 @@ select:disabled {
   gap: 14px;
   min-height: 202px;
   padding: 18px;
+  transition:
+    transform 160ms ease,
+    box-shadow 160ms ease,
+    border-color 160ms ease;
+}
+
+.team-card:hover {
+  transform: translateY(-2px);
+  border-color: #bfdbfe;
+  box-shadow: 0 24px 54px rgba(15, 23, 42, 0.12);
 }
 
 .team-card h3 {
@@ -506,7 +516,8 @@ select:disabled {
 
 .team-rail {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-height: 0;
 }
 
 .team-rail-top {
@@ -534,6 +545,15 @@ select:disabled {
 
 .session-section .session-list {
   overflow: auto;
+}
+
+.rail-footer {
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  background: #0b1220;
+  color: #eef4ff;
 }
 
 .session-item {

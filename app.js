@@ -11,7 +11,6 @@ const icons = {
 };
 
 const now = () => Date.now();
-const uid = (prefix) => `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
 const fmt = (timestamp) => new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(timestamp);
 
 const seedState = () => ({
@@ -59,9 +58,6 @@ function loadState() {
     fileChanges: [],
     auditLogs: [],
   };
-}
-
-function saveState() {
 }
 
 function setState(patch) {
@@ -176,10 +172,7 @@ function appRoot(inner) {
           </div>
         </div>
         <nav class="nav-group">
-          ${navButton("teams", icons.teams, "团队工作台")}
-          ${navButton("settings", icons.settings, "Agent 设置")}
-          ${user?.role === "admin" ? navButton("users", icons.users, "用户管理") : ""}
-          ${navButton("audit", icons.check, "审计日志")}
+          ${renderMainNav(user)}
         </nav>
         <div class="sidebar-footer">
           <div class="user-chip">
@@ -193,6 +186,30 @@ function appRoot(inner) {
         </div>
       </aside>
       <main class="main">${inner}</main>
+    </div>
+  `;
+}
+
+function renderMainNav(user = currentUser()) {
+  return `
+    ${navButton("teams", icons.teams, "团队工作台")}
+    ${navButton("settings", icons.settings, "Agent 设置")}
+    ${user?.role === "admin" ? navButton("users", icons.users, "用户管理") : ""}
+    ${navButton("audit", icons.check, "审计日志")}
+  `;
+}
+
+function renderUserPanel(user = currentUser()) {
+  return `
+    <div class="sidebar-footer rail-footer">
+      <div class="user-chip">
+        <div class="avatar">${escapeHtml(user?.displayName?.slice(0, 1) || "U")}</div>
+        <div>
+          <strong>${escapeHtml(user?.displayName || "")}</strong>
+          <div class="brand-subtitle">${escapeHtml(user?.role || "")}</div>
+        </div>
+      </div>
+      <button class="nav-button" style="margin-top:12px" data-action="logout">${icons.logout}<span>退出</span></button>
     </div>
   `;
 }
@@ -293,13 +310,11 @@ function renderTeamRail(team, activeSession) {
           </div>
         </div>
         <nav class="nav-group rail-nav">
-          ${navButton("teams", icons.teams, "团队工作台")}
-          ${navButton("settings", icons.settings, "Agent 设置")}
-          ${currentUser()?.role === "admin" ? navButton("users", icons.users, "用户管理") : ""}
-          ${navButton("audit", icons.check, "审计日志")}
+          ${renderMainNav()}
         </nav>
       </div>
       ${renderSessionList(team, activeSession, true)}
+      ${renderUserPanel()}
     </aside>
   `;
 }
@@ -699,7 +714,12 @@ document.addEventListener("submit", async (event) => {
 });
 
 document.addEventListener("click", async (event) => {
-  const target = event.target.closest("button, [data-close-modal]");
+  if (event.target.classList?.contains("modal-backdrop")) {
+    activeModal = "";
+    render();
+    return;
+  }
+  const target = event.target.closest("button");
   if (!target) return;
   if (target.dataset.view) setState({ activeView: target.dataset.view });
   if (target.dataset.openTeam) setState({ activeView: "team", selectedTeamId: target.dataset.openTeam });
@@ -710,7 +730,7 @@ document.addEventListener("click", async (event) => {
     modalTeamId = target.dataset.team || state.selectedTeamId;
     render();
   }
-  if (target.dataset.closeModal !== undefined && target === event.target.closest("[data-close-modal]")) {
+  if (target.dataset.closeModal !== undefined) {
     activeModal = "";
     render();
   }

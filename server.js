@@ -549,7 +549,7 @@ async function handleApi(req, res, pathname) {
       if (body.workspacePath) {
         const workspacePath = assertWorkspaceAllowed(body.workspacePath);
         team.workspacePath = workspacePath;
-        for (const session of db.sessions.filter((item) => item.teamId === teamId && item.status === "idle")) {
+        for (const session of db.sessions.filter((item) => item.teamId === teamId && item.status !== "running")) {
           session.cwd = workspacePath;
           session.updatedAt = now();
         }
@@ -703,7 +703,7 @@ async function serveStatic(req, res, pathname) {
   try {
     const info = await stat(filePath);
     if (!info.isFile()) throw new Error("not file");
-    res.writeHead(200, { "Content-Type": mimeTypes[extname(filePath)] || "application/octet-stream" });
+    res.writeHead(200, { "Content-Type": mimeTypes[extname(filePath)] || "application/octet-stream", "Cache-Control": "no-store" });
     createReadStream(filePath).pipe(res);
   } catch {
     createReadStream(join(root, "index.html")).pipe(res);
