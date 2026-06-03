@@ -136,6 +136,12 @@ function applyRealtimeEvent(event) {
     return;
   }
 
+  if (event.type === "session.message.updated" && event.message) {
+    state.messages = state.messages.map((message) => (message.id === event.message.id ? event.message : message));
+    scheduleRender();
+    return;
+  }
+
   if (event.type === "session.status.changed") {
     state.sessions = state.sessions.map((session) => (session.id === event.sessionId ? { ...session, status: event.status, updatedAt: now() } : session));
     scheduleRender();
@@ -197,7 +203,7 @@ function badge(text, tone = "") {
 function appRoot(inner) {
   const user = currentUser();
   return `
-    <div class="app-shell ${state.activeView === "team" ? "team-mode" : ""}">
+    <div class="app-shell">
       <aside class="sidebar">
         <div class="brand">
           <div class="brand-mark">CC</div>
@@ -250,7 +256,8 @@ function renderUserPanel(user = currentUser()) {
 }
 
 function navButton(view, icon, text) {
-  return `<button class="nav-button ${state.activeView === view ? "active" : ""}" data-view="${view}">${icon}<span>${text}</span></button>`;
+  const active = state.activeView === view || (view === "teams" && state.activeView === "team");
+  return `<button class="nav-button ${active ? "active" : ""}" data-view="${view}">${icon}<span>${text}</span></button>`;
 }
 
 function topbar(title, subtitle, actions = "") {
@@ -386,22 +393,16 @@ function renderTeamDetail() {
 }
 
 function renderTeamRail(team, activeSession) {
+  const members = state.members.filter((member) => member.teamId === team.id);
+  const running = state.sessions.filter((session) => session.teamId === team.id && session.status === "running").length;
   return `
     <aside class="panel team-rail">
-      <div class="team-rail-top">
-        <div class="brand rail-brand">
-          <div class="brand-mark">CC</div>
-          <div>
-            <div class="brand-title">Claude Code</div>
-            <div class="brand-subtitle">Team Platform</div>
-          </div>
-        </div>
-        <nav class="nav-group rail-nav">
-          ${renderMainNav()}
-        </nav>
+      <div class="team-summary">
+        <div class="section-title"><h3>${escapeHtml(team.name)}</h3>${badge(running ? `${running} running` : "idle", running ? "blue" : "")}</div>
+        <p>${escapeHtml(team.workspacePath)}</p>
+        <div class="meta"><span>${members.length} 名成员</span><span>${fmt(team.updatedAt)}</span></div>
       </div>
       ${renderSessionList(team, activeSession, true)}
-      ${renderUserPanel()}
     </aside>
   `;
 }
@@ -481,6 +482,7 @@ function renderRightRail(team, session) {
   const files = session ? state.fileChanges.filter((file) => file.sessionId === session.id) : [];
   const toolEvents = session ? state.messages.filter((message) => message.sessionId === session.id && message.senderType === "tool").slice(-6).reverse() : [];
   const commandEvents = toolEvents.filter((message) => message.metadata?.type === "command" || /command:/i.test(message.content));
+  const heartbeatTicks = toolEvents.find((event) => event.metadata?.type === "heartbeat")?.metadata?.count || 0;
   return `
     <aside class="panel">
       <div class="panel-header"><h2 class="panel-title">运行侧栏</h2>${badge("SSE ready", "blue")}</div>
@@ -498,7 +500,7 @@ function renderRightRail(team, session) {
         </div>
         <div class="side-card">
           <h4>运行事件</h4>
-          <p>${commandEvents.length} 次命令启动 · ${toolEvents.filter((event) => event.metadata?.type === "heartbeat").length} 次心跳</p>
+          <p>${commandEvents.length} 次命令启动 · ${heartbeatTicks} 次等待更新</p>
           ${toolEvents.map((event) => `<div class="runtime-event"><strong>${escapeHtml(runtimeEventTitle(event))}</strong><p>${escapeHtml(event.content)}</p><span>${fmt(event.createdAt)}</span></div>`).join("") || "<p>暂无运行事件。</p>"}
         </div>
         <div class="side-card">
@@ -518,7 +520,7 @@ function runtimeEventTitle(event) {
   const type = event.metadata?.type;
   if (type === "command") return "命令启动";
   if (type === "heartbeat") return "运行心跳";
-  if (type === "exit") return "进程结束";
+  if (type === "exit") return "任务状态";
   return "工具事件";
 }
 
@@ -605,6 +607,7 @@ function renderUsers() {
       <form class="card form-row" style="padding:16px" data-form="user">
         <div class="field"><label>用户名</label><input class="input" name="username" required /></div>
         <div class="field"><label>显示名</label><input class="input" name="displayName" required /></div>
+        <div class="field"><label>初始密码</label><input class="input" name="password" type="password" autocomplete="new-password" required /></div>
         <div class="field"><label>角色</label><select class="select" name="role"><option value="member">member</option><option value="admin">admin</option></select></div>
         <button class="button primary" type="submit">${icons.plus}创建用户</button>
       </form>
@@ -765,7 +768,7 @@ async function createUser(form) {
   const username = String(data.get("username")).trim();
   const payload = {
     username,
-    password: "password",
+    password: String(data.get("password") || ""),
     displayName: String(data.get("displayName")).trim(),
     email: `${username}@example.com`,
     role: String(data.get("role")),

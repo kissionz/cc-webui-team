@@ -234,7 +234,7 @@ Remove-Item Env:\RESET_DEFAULT_TEAM_WORKSPACE
 ## 当前能力
 
 - 服务端登录、退出、HttpOnly cookie session
-- 用户创建、启用/禁用
+- 用户创建、初始密码设置、启用/禁用
 - 团队创建、成员添加、角色权限
 - 单 Agent 会话创建、停止、发送消息
 - 敏感任务平台层审批

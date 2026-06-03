@@ -61,14 +61,6 @@ select:disabled {
   grid-template-columns: 248px minmax(0, 1fr);
 }
 
-.app-shell.team-mode {
-  grid-template-columns: minmax(0, 1fr);
-}
-
-.app-shell.team-mode > .sidebar {
-  display: none;
-}
-
 .sidebar {
   display: flex;
   flex-direction: column;
@@ -604,25 +596,22 @@ select:disabled {
 
 .team-rail {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr);
   min-height: 0;
 }
 
-.team-rail-top {
+.team-summary {
   padding: 16px;
   border-bottom: 1px solid var(--line);
-  background: #0b1220;
-  color: #eef4ff;
+  background: linear-gradient(180deg, #f8fafc, #fff);
 }
 
-.rail-brand {
-  padding: 0;
-  margin-bottom: 16px;
-}
-
-.rail-nav .nav-button {
-  min-height: 38px;
-  color: #cbd5e1;
+.team-summary p {
+  margin: 8px 0 10px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .session-section {
@@ -815,7 +804,7 @@ select:disabled {
 }
 
 .agent-row {
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
 }
 
@@ -825,8 +814,12 @@ select:disabled {
 }
 
 .status-dot {
+  display: inline-block;
+  flex: 0 0 auto;
   width: 10px;
   height: 10px;
+  min-width: 10px;
+  min-height: 10px;
   border-radius: 50%;
   background: var(--subtle);
 }

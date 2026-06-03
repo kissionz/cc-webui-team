@@ -445,6 +445,16 @@ async function appendSessionMessage(session, senderType, content, senderId = nul
   return message;
 }
 
+async function updateSessionMessage(session, message, content, metadata = message.metadata || {}) {
+  message.content = content;
+  message.metadata = metadata;
+  message.updatedAt = now();
+  session.updatedAt = now();
+  await saveDb();
+  broadcast({ type: "session.message.updated", sessionId: session.id, message });
+  return message;
+}
+
 async function runClaudeSession(session, prompt) {
   const agent = db.agents.find((item) => item.id === session.agentId);
   session.status = "running";
@@ -471,16 +481,19 @@ async function runClaudeSession(session, prompt) {
   child.stdin?.end(prompt);
   let lastOutputAt = now();
   let heartbeatCount = 0;
+  let heartbeatMessage = null;
   const heartbeat = setInterval(() => {
     if (now() - lastOutputAt < 10000) return;
     heartbeatCount += 1;
-    appendSessionMessage(
-      session,
-      "tool",
-      `Claude Code 仍在运行，已等待 ${Math.round((now() - message.createdAt) / 1000)} 秒，最近暂无输出。`,
-      agent.id,
-      { type: "heartbeat", count: heartbeatCount },
-    );
+    const waitedSeconds = Math.round((now() - message.createdAt) / 1000);
+    const content = `Claude Code 仍在运行，已等待 ${waitedSeconds} 秒，最近暂无输出。`;
+    if (heartbeatMessage) {
+      updateSessionMessage(session, heartbeatMessage, content, { type: "heartbeat", count: heartbeatCount, waitedSeconds });
+    } else {
+      appendSessionMessage(session, "tool", content, agent.id, { type: "heartbeat", count: heartbeatCount, waitedSeconds }).then((created) => {
+        heartbeatMessage = created;
+      });
+    }
     lastOutputAt = now();
   }, 5000);
 
@@ -512,7 +525,13 @@ async function runClaudeSession(session, prompt) {
     session.status = code === 0 ? "completed" : "failed";
     agent.status = "idle";
     running.delete(session.id);
-    await appendSessionMessage(session, "tool", `Claude Code 进程结束，退出码：${code}`, agent.id, { type: "exit", code });
+    await appendSessionMessage(
+      session,
+      "tool",
+      code === 0 ? "Claude Code 本轮任务已完成。当前使用 -p 单次运行模式，回答完成后 CLI 会正常退出。" : `Claude Code 本轮任务失败，退出码：${code}`,
+      agent.id,
+      { type: "exit", code },
+    );
     await saveDb();
     broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
   });
@@ -700,8 +719,9 @@ async function handleApi(req, res, pathname) {
   if (pathname === "/api/users" && req.method === "POST") {
     if (user.role !== "admin") return error(res, 403, "PERMISSION_DENIED", "Admin required.");
     const body = await readBody(req);
+    if (!String(body.password || "").trim()) return error(res, 400, "PASSWORD_REQUIRED", "Initial password is required.");
     if (db.users.some((item) => item.username === body.username)) return error(res, 409, "USER_EXISTS", "Username already exists.");
-    const newUser = { id: id("user"), username: body.username, passwordHash: hashPassword(body.password || "password"), displayName: body.displayName, email: body.email || `${body.username}@example.com`, role: body.role || "member", status: "active", createdAt: now(), updatedAt: now() };
+    const newUser = { id: id("user"), username: body.username, passwordHash: hashPassword(body.password), displayName: body.displayName, email: body.email || `${body.username}@example.com`, role: body.role || "member", status: "active", createdAt: now(), updatedAt: now() };
     db.users.push(newUser);
     audit(user.id, "user.created", "user", newUser.id);
     await saveDb();
