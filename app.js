@@ -555,6 +555,10 @@ function timelineEventMeta(message) {
   const type = message.metadata?.type || (message.senderType === "system" ? "system" : "tool");
   if (type === "command") return { title: message.metadata?.claudeSessionId ? "已恢复 Claude Code 会话" : "已启动 Claude Code 会话", detail: message.content, icon: icons.terminal, tone: "tool" };
   if (type === "input") return { title: "已发送到 Claude Code", detail: message.content, icon: icons.terminal, tone: "tool" };
+  if (type === "tool_call") {
+    const running = message.metadata?.status === "running";
+    return { title: `${running ? "正在调用" : "已调用"} ${message.metadata?.name || "工具"}`, detail: message.content, icon: icons.terminal, tone: running ? "pending" : "done", spinner: running };
+  }
   if (type === "heartbeat" || type === "thinking") {
     const done = message.metadata?.status === "done";
     const durationMs = Number(message.metadata?.durationMs || 0);

@@ -486,6 +486,16 @@ async function updateSessionMessage(session, message, content, metadata = messag
   return message;
 }
 
+async function appendMessageDelta(session, message, text, metadata = message.metadata || {}) {
+  if (!text) return message;
+  message.content = `${message.content || ""}${text}`;
+  message.metadata = metadata;
+  message.updatedAt = now();
+  session.updatedAt = now();
+  broadcast({ type: "session.message.delta", sessionId: session.id, messageId: message.id, text });
+  return message;
+}
+
 function getRuntime(sessionId) {
   return running.get(sessionId) || null;
 }
@@ -503,9 +513,9 @@ function startTurnHeartbeat(session, runtime) {
     if (!runtime.currentMessage || now() - runtime.lastOutputAt < 10000) return;
     runtime.heartbeatCount += 1;
     const waitedSeconds = Math.round((now() - runtime.currentMessage.createdAt) / 1000);
-    const metadata = { type: "thinking", status: "thinking", count: runtime.heartbeatCount, waitedSeconds, turnId: runtime.turnId };
+    const metadata = { ...runtime.heartbeatMessage?.metadata, type: "thinking", status: "thinking", count: runtime.heartbeatCount, waitedSeconds, turnId: runtime.turnId };
     if (runtime.heartbeatMessage) {
-      updateSessionMessage(session, runtime.heartbeatMessage, "", metadata);
+      updateSessionMessage(session, runtime.heartbeatMessage, runtime.heartbeatMessage.content || "", metadata);
     } else {
       appendSessionMessage(session, "tool", "", runtime.agent?.id, metadata).then((created) => {
         runtime.heartbeatMessage = created;
@@ -518,13 +528,129 @@ function startTurnHeartbeat(session, runtime) {
 async function finishTurnThinking(session, runtime) {
   if (!runtime?.heartbeatMessage) return;
   const durationMs = Math.max(0, now() - (runtime.currentMessage?.createdAt || now()));
-  await updateSessionMessage(session, runtime.heartbeatMessage, "", {
+  await updateSessionMessage(session, runtime.heartbeatMessage, runtime.heartbeatMessage.content || "", {
     ...runtime.heartbeatMessage.metadata,
     type: "thinking",
     status: "done",
     durationMs,
     turnId: runtime.turnId,
   });
+}
+
+async function appendThinkingDelta(session, runtime, text, subject = "正在分析") {
+  if (!runtime.heartbeatMessage) {
+    runtime.heartbeatMessage = await appendSessionMessage(session, "tool", "", runtime.agent?.id, { type: "thinking", status: "thinking", subject, waitedSeconds: 0, turnId: runtime.turnId });
+  }
+  const metadata = { ...runtime.heartbeatMessage.metadata, type: "thinking", status: "thinking", subject, turnId: runtime.turnId };
+  await appendMessageDelta(session, runtime.heartbeatMessage, text, metadata);
+}
+
+function streamPartDelta(runtime, key, value) {
+  const text = String(value || "");
+  if (!text) return "";
+  const previous = runtime.streamParts.get(key) || "";
+  runtime.streamParts.set(key, text);
+  if (text.startsWith(previous)) return text.slice(previous.length);
+  return text;
+}
+
+function extractClaudeTextPart(part) {
+  if (!part || typeof part !== "object") return "";
+  return part.text || part.content || part.delta?.text || part.delta?.content || "";
+}
+
+async function handleClaudeStreamEvent(session, runtime, event) {
+  if (!event || typeof event !== "object") return;
+  if (event.session_id) session.claudeSessionId = event.session_id;
+
+  if (event.type === "system") {
+    if (event.subtype === "init") {
+      runtime.model = event.model || runtime.model;
+      return;
+    }
+    if (event.subtype === "api_retry") {
+      const delaySeconds = Math.max(1, Math.round(Number(event.retry_delay_ms || 0) / 1000));
+      await appendThinkingDelta(session, runtime, `API 重试 ${event.attempt}/${event.max_retries}，约 ${delaySeconds}s 后继续。\n`, "连接模型");
+    }
+    return;
+  }
+
+  if (event.type === "assistant" && event.message?.content) {
+    const messageId = event.message.id || event.uuid || runtime.turnId;
+    for (const [index, part] of event.message.content.entries()) {
+      const partType = part?.type || "text";
+      const key = `${messageId}:${index}:${partType}`;
+      if (partType === "text") {
+        const delta = streamPartDelta(runtime, key, extractClaudeTextPart(part));
+        runtime.finalText += delta;
+        await appendMessageDelta(session, runtime.currentMessage, delta, { ...runtime.currentMessage.metadata, claudeSessionId: session.claudeSessionId || null });
+      } else if (partType === "thinking") {
+        const delta = streamPartDelta(runtime, key, extractClaudeTextPart(part));
+        await appendThinkingDelta(session, runtime, delta, part.subject || "正在分析");
+      } else if (partType === "tool_use") {
+        await upsertToolStreamMessage(session, runtime, part, "running");
+      }
+    }
+    return;
+  }
+
+  if (event.type === "user" && event.message?.content) {
+    for (const part of event.message.content) {
+      if (part?.type === "tool_result") await upsertToolStreamMessage(session, runtime, part, "completed");
+    }
+    return;
+  }
+
+  if (event.type === "result") {
+    runtime.result = event;
+    if (event.session_id) session.claudeSessionId = event.session_id;
+    if (!runtime.finalText && event.result) {
+      runtime.finalText = String(event.result);
+      await appendMessageDelta(session, runtime.currentMessage, runtime.finalText, { ...runtime.currentMessage.metadata, claudeSessionId: session.claudeSessionId || null });
+    }
+  }
+}
+
+async function upsertToolStreamMessage(session, runtime, part, status) {
+  const callId = part.id || part.tool_use_id || part.call_id || part.name || id("tool");
+  const existing = runtime.toolMessages.get(callId);
+  const name = part.name || part.tool_name || existing?.metadata?.name || "tool";
+  const output = part.content || part.output || "";
+  const payload = part.input || part.args || existing?.metadata?.input || {};
+  const content = status === "completed" ? `${name} 完成${output ? `\n${typeof output === "string" ? output : JSON.stringify(output, null, 2)}` : ""}` : `${name} 运行中\n${JSON.stringify(payload, null, 2)}`;
+  const metadata = { type: "tool_call", callId, name, status, input: payload, turnId: runtime.turnId };
+  if (existing) {
+    await updateSessionMessage(session, existing, content, metadata);
+    return;
+  }
+  const message = await appendSessionMessage(session, "tool", content, runtime.agent?.id, metadata);
+  runtime.toolMessages.set(callId, message);
+}
+
+async function consumeClaudeStreamChunk(session, runtime, chunk) {
+  runtime.streamBuffer += chunk.toString();
+  const lines = runtime.streamBuffer.split(/\r?\n/);
+  runtime.streamBuffer = lines.pop() || "";
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      await handleClaudeStreamEvent(session, runtime, JSON.parse(trimmed));
+    } catch (err) {
+      runtime.stderr += `\n[stream parse error] ${err.message}: ${trimmed.slice(0, 300)}`;
+    }
+  }
+}
+
+async function flushClaudeStreamBuffer(session, runtime) {
+  const trimmed = runtime.streamBuffer.trim();
+  runtime.streamBuffer = "";
+  if (!trimmed) return;
+  try {
+    await handleClaudeStreamEvent(session, runtime, JSON.parse(trimmed));
+  } catch (err) {
+    runtime.stderr += `\n[stream parse error] ${err.message}: ${trimmed.slice(0, 300)}`;
+  }
 }
 
 async function submitClaudeTurn(session, prompt, turnId) {
@@ -537,7 +663,7 @@ async function submitClaudeTurn(session, prompt, turnId) {
   broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
 
   const extraArgs = sanitizeClaudeExtraArgs(String(db.claudeConfig.args || "").split(" ").filter(Boolean));
-  const args = ["-p", "--output-format", "json", ...extraArgs];
+  const args = ["-p", "--verbose", "--output-format", "stream-json", "--include-partial-messages", ...extraArgs];
   if (session.claudeSessionId) args.push("--resume", session.claudeSessionId);
   await mkdir(session.cwd, { recursive: true });
   await appendSessionMessage(
@@ -552,15 +678,15 @@ async function submitClaudeTurn(session, prompt, turnId) {
     cwd: session.cwd,
     env: { ...process.env, TERM: "xterm-256color" },
   });
-  const runtime = { child, agent, currentMessage: message, turnId, lastOutputAt: now(), heartbeat: null, heartbeatCount: 0, heartbeatMessage: null, stdout: "", stderr: "" };
+  const runtime = { child, agent, currentMessage: message, turnId, lastOutputAt: now(), heartbeat: null, heartbeatCount: 0, heartbeatMessage: null, streamBuffer: "", streamParts: new Map(), streamQueue: Promise.resolve(), toolMessages: new Map(), result: null, finalText: "", stderr: "" };
   running.set(session.id, runtime);
-  runtime.heartbeatMessage = await appendSessionMessage(session, "tool", "", agent.id, { type: "thinking", status: "thinking", waitedSeconds: 0, turnId });
+  runtime.heartbeatMessage = await appendSessionMessage(session, "tool", "启动 Claude Code，等待模型输出。\n", agent.id, { type: "thinking", status: "thinking", subject: "正在分析", waitedSeconds: 0, turnId });
   startTurnHeartbeat(session, runtime);
   child.stdin?.end(prompt);
 
   child.stdout.on("data", (chunk) => {
     runtime.lastOutputAt = now();
-    runtime.stdout += chunk.toString();
+    runtime.streamQueue = runtime.streamQueue.then(() => consumeClaudeStreamChunk(session, runtime, chunk));
   });
   child.stderr.on("data", (chunk) => {
     const text = chunk.toString();
@@ -581,18 +707,16 @@ async function submitClaudeTurn(session, prompt, turnId) {
   child.on("close", async (code) => {
     clearRuntimeHeartbeat(runtime);
     running.delete(session.id);
+    await runtime.streamQueue;
+    await flushClaudeStreamBuffer(session, runtime);
     await finishTurnThinking(session, runtime);
-    let resultText = runtime.stdout.trim();
-    let parsed = null;
-    try {
-      parsed = JSON.parse(resultText);
-      resultText = parsed.result || parsed.message || resultText;
-      if (parsed.session_id) session.claudeSessionId = parsed.session_id;
-    } catch {
-      if (!resultText && runtime.stderr.trim()) resultText = runtime.stderr.trim();
+    const resultText = runtime.finalText || runtime.result?.result || runtime.result?.message || "";
+    if (!String(message.content || "").trim()) {
+      await updateSessionMessage(session, message, resultText || (code === 0 ? "Claude Code 本轮没有返回文本。" : runtime.stderr.trim() || `Claude Code exited with code ${code}.`), { ...message.metadata, claudeSessionId: session.claudeSessionId || null });
+    } else {
+      await updateSessionMessage(session, message, message.content, { ...message.metadata, claudeSessionId: session.claudeSessionId || null });
     }
-    await updateSessionMessage(session, message, resultText || (code === 0 ? "Claude Code 本轮没有返回文本。" : runtime.stderr.trim() || `Claude Code exited with code ${code}.`), { ...message.metadata, claudeSessionId: session.claudeSessionId || null });
-    session.status = code === 0 && !parsed?.is_error ? "completed" : "failed";
+    session.status = code === 0 && !runtime.result?.is_error ? "completed" : "failed";
     agent.status = "idle";
     await appendSessionMessage(
       session,
