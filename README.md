@@ -23,6 +23,8 @@ cp .env.example .env
 
 ```text
 ADMIN_PASSWORD=replace-with-a-strong-admin-password
+PORT=8068
+HOST=0.0.0.0
 ```
 
 ```bash
@@ -32,7 +34,7 @@ docker compose up -d --build
 访问：
 
 ```text
-http://服务器IP:3000
+http://服务器IP:8068
 ```
 
 默认管理员账号：
@@ -130,7 +132,7 @@ npm start
 默认监听：
 
 ```text
-http://localhost:3000
+http://localhost:8068
 ```
 
 ## Windows 原生运行 Claude Code
@@ -147,6 +149,8 @@ copy .env.example .env
 notepad .env
 
 $env:ADMIN_PASSWORD="your-strong-password"
+$env:PORT="8068"
+$env:HOST="0.0.0.0"
 $env:WORKSPACE_ROOT="C:\workspaces"
 $env:CLAUDE_COMMAND="claude"
 $env:CLAUDE_ARGS="-p"
@@ -157,8 +161,28 @@ npm start
 访问：
 
 ```text
-http://localhost:3000
+http://localhost:8068
 ```
+
+同一内网里的其他电脑访问：
+
+```text
+http://你的Windows内网IP:8068
+```
+
+Windows 防火墙如果拦截，需要放行 8068 端口：
+
+```powershell
+New-NetFirewallRule -DisplayName "Claude Code WebUI 8068" -Direction Inbound -Protocol TCP -LocalPort 8068 -Action Allow
+```
+
+查看本机内网 IP：
+
+```powershell
+ipconfig
+```
+
+通常看正在使用的网卡下的 `IPv4 地址`，例如 `192.168.1.23`。
 
 这种方式不会复制 Claude Code CLI，也不会改变你的 MCP 配置；它直接使用当前 Windows 用户的 PATH、`%USERPROFILE%\.claude` 和宿主机可执行环境。
 

@@ -9,7 +9,8 @@ const root = process.cwd();
 
 loadDotEnv(join(root, ".env"));
 
-const PORT = Number(process.env.PORT || 3000);
+const PORT = Number(process.env.PORT || 8068);
+const HOST = process.env.HOST || "0.0.0.0";
 const DATA_DIR = process.env.DATA_DIR || join(root, "data");
 const DB_FILE = process.env.DB_FILE || join(DATA_DIR, "db.json");
 const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT || "/workspaces";
@@ -757,6 +758,6 @@ createServer(async (req, res) => {
     console.error(err);
     return error(res, 500, "INTERNAL_ERROR", "Internal server error.");
   }
-}).listen(PORT, () => {
-  console.log(`Claude Code Team Platform listening on :${PORT}`);
+}).listen(PORT, HOST, () => {
+  console.log(`Claude Code Team Platform listening on ${HOST}:${PORT}`);
 });

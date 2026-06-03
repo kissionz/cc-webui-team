@@ -3,7 +3,7 @@ FROM node:20-alpine
 WORKDIR /app
 
 ENV NODE_ENV=production
-ENV PORT=3000
+ENV PORT=8068
 ENV DATA_DIR=/app/data
 ENV WORKSPACE_ROOT=/workspaces
 ENV CLAUDE_COMMAND=claude
@@ -18,6 +18,6 @@ RUN mkdir -p /app/data /workspaces && chown -R node:node /app /workspaces
 
 USER node
 
-EXPOSE 3000
+EXPOSE 8068
 
 CMD ["npm", "start"]
