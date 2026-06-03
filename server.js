@@ -79,8 +79,7 @@ function spawnCli(command, args, options = {}) {
   if (!IS_WINDOWS) return spawn(command, args, options);
   const resolved = resolveWindowsCli(command, args);
   if (resolved) return spawn(resolved.command, resolved.args, options);
-  const line = [command, ...args].map(cmdQuote).join(" ");
-  return spawn(windowsShellPath(), ["/d", "/s", "/c", line], options);
+  return spawnWindowsCommand(command, args, options);
 }
 
 function resolveWindowsCli(command, args) {
@@ -90,14 +89,21 @@ function resolveWindowsCli(command, args) {
   if (!extname(commandPath) && existsSync(cmdSibling)) {
     const cliPath = resolveClaudeCliFromCmd(cmdSibling);
     if (cliPath) return { command: process.execPath, args: [cliPath, ...args] };
+    return { command: windowsShellPath(), args: ["/d", "/s", "/c", [cmdSibling, ...args].map(cmdQuote).join(" ")] };
   }
   const lower = commandPath.toLowerCase();
   if (lower.endsWith(".cmd") || lower.endsWith(".bat")) {
     const cliPath = resolveClaudeCliFromCmd(commandPath);
     if (cliPath) return { command: process.execPath, args: [cliPath, ...args] };
-    return null;
+    return { command: windowsShellPath(), args: ["/d", "/s", "/c", [commandPath, ...args].map(cmdQuote).join(" ")] };
   }
+  if (!extname(commandPath)) return null;
   return { command: commandPath, args };
+}
+
+function spawnWindowsCommand(command, args, options) {
+  const line = [command, ...args].map(cmdQuote).join(" ");
+  return spawn(windowsShellPath(), ["/d", "/s", "/c", line], options);
 }
 
 function resolveWindowsCommandPath(command) {
