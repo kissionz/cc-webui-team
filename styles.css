@@ -644,6 +644,24 @@ select:disabled {
   text-align: left;
 }
 
+.session-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+}
+
+.session-delete {
+  width: 34px;
+  height: 34px;
+  opacity: 0;
+}
+
+.session-row:hover .session-delete,
+.session-delete:focus-visible {
+  opacity: 1;
+}
+
 .session-item:hover,
 .session-item.active {
   border-color: #bfdbfe;
@@ -675,6 +693,12 @@ select:disabled {
   margin-bottom: 16px;
 }
 
+.turn {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 18px;
+}
+
 .message.user {
   margin-left: auto;
 }
@@ -703,10 +727,50 @@ select:disabled {
 }
 
 .message.agent .bubble {
-  border-color: transparent;
-  padding-left: 0;
-  background: transparent;
+  border-color: #dbe3ef;
+  background: #fff;
   font-size: 15px;
+}
+
+.turn-events {
+  max-width: 820px;
+  margin: 4px 0 14px;
+}
+
+.turn-events.collapsed {
+  color: var(--muted);
+}
+
+.turn-events summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  list-style: none;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.turn-events summary::-webkit-details-marker {
+  display: none;
+}
+
+.turn-events summary .icon {
+  width: 15px;
+  height: 15px;
+}
+
+.turn-events summary strong {
+  display: grid;
+  place-items: center;
+  min-width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--panel-soft);
+  color: var(--subtle);
+  font-size: 11px;
 }
 
 .timeline-event {

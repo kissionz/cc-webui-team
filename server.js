@@ -428,8 +428,12 @@ function sessionHasClaudeRun(sessionId) {
   return db.messages.some((message) => message.sessionId === sessionId && message.senderType === "tool" && message.metadata?.type === "command");
 }
 
-async function appendAgentMessage(session, agent, content = "") {
-  const message = { id: id("msg"), sessionId: session.id, senderType: "agent", senderId: agent.id, content, createdAt: now() };
+function titleFromPrompt(content) {
+  return String(content || "").replace(/\s+/g, " ").trim().slice(0, 10) || "新会话";
+}
+
+async function appendAgentMessage(session, agent, content = "", metadata = {}) {
+  const message = { id: id("msg"), sessionId: session.id, senderType: "agent", senderId: agent.id, content, metadata, createdAt: now() };
   db.messages.push(message);
   await saveDb();
   broadcast({ type: "session.message.created", sessionId: session.id, message });
@@ -455,14 +459,14 @@ async function updateSessionMessage(session, message, content, metadata = messag
   return message;
 }
 
-async function runClaudeSession(session, prompt) {
+async function runClaudeSession(session, prompt, turnId) {
   const agent = db.agents.find((item) => item.id === session.agentId);
   session.status = "running";
   session.updatedAt = now();
   agent.status = "running";
   await saveDb();
   broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
-  const message = await appendAgentMessage(session, agent, "");
+  const message = await appendAgentMessage(session, agent, "", { turnId });
 
   const args = String(db.claudeConfig.args || "").split(" ").filter(Boolean);
   await mkdir(session.cwd, { recursive: true });
@@ -471,7 +475,7 @@ async function runClaudeSession(session, prompt) {
     "tool",
     `启动 Claude Code\ncommand: ${db.claudeConfig.command}\nargs: ${args.join(" ") || "(none)"}\ncwd: ${session.cwd}`,
     agent.id,
-    { type: "command", command: db.claudeConfig.command, args, cwd: session.cwd },
+    { type: "command", command: db.claudeConfig.command, args, cwd: session.cwd, turnId },
   );
   const child = spawnCli(db.claudeConfig.command, args, {
     cwd: session.cwd,
@@ -488,9 +492,9 @@ async function runClaudeSession(session, prompt) {
     const waitedSeconds = Math.round((now() - message.createdAt) / 1000);
     const content = `Claude Code 仍在运行，已等待 ${waitedSeconds} 秒，最近暂无输出。`;
     if (heartbeatMessage) {
-      updateSessionMessage(session, heartbeatMessage, content, { type: "heartbeat", count: heartbeatCount, waitedSeconds });
+      updateSessionMessage(session, heartbeatMessage, content, { type: "heartbeat", count: heartbeatCount, waitedSeconds, turnId });
     } else {
-      appendSessionMessage(session, "tool", content, agent.id, { type: "heartbeat", count: heartbeatCount, waitedSeconds }).then((created) => {
+      appendSessionMessage(session, "tool", content, agent.id, { type: "heartbeat", count: heartbeatCount, waitedSeconds, turnId }).then((created) => {
         heartbeatMessage = created;
       });
     }
@@ -528,9 +532,9 @@ async function runClaudeSession(session, prompt) {
     await appendSessionMessage(
       session,
       "tool",
-      code === 0 ? "Claude Code 本轮任务已完成。当前使用 -p 单次运行模式，回答完成后 CLI 会正常退出。" : `Claude Code 本轮任务失败，退出码：${code}`,
+      code === 0 ? "Claude Code 本轮任务已完成。CLI 进程回答完成后已正常退出。" : `Claude Code 本轮任务失败，退出码：${code}`,
       agent.id,
-      { type: "exit", code },
+      { type: "exit", code, turnId },
     );
     await saveDb();
     broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
@@ -640,16 +644,32 @@ async function handleApi(req, res, pathname) {
   if (sessionMatch && req.method === "POST") {
     const teamId = sessionMatch[1];
     if (!canWriteTeam(user, teamId)) return error(res, 403, "PERMISSION_DENIED", "Cannot create sessions.");
-    const body = await readBody(req);
     const team = db.teams.find((item) => item.id === teamId);
     const agent = db.agents.find((item) => item.teamId === teamId && item.type === "claude_code");
-    const session = { id: id("session"), teamId, agentId: agent.id, createdBy: user.id, title: body.title, status: "idle", cwd: team.workspacePath, createdAt: now(), updatedAt: now() };
+    const session = { id: id("session"), teamId, agentId: agent.id, createdBy: user.id, title: "新会话", status: "idle", cwd: team.workspacePath, createdAt: now(), updatedAt: now() };
     db.sessions.unshift(session);
     db.messages.push({ id: id("msg"), sessionId: session.id, senderType: "system", senderId: null, content: "会话已创建，等待用户发送任务。", createdAt: now() });
     audit(user.id, "session.created", "session", session.id);
     await saveDb();
     broadcast({ type: "session.created", sessionId: session.id });
     return send(res, 201, { session });
+  }
+
+  const deleteSessionMatch = pathname.match(/^\/api\/sessions\/([^/]+)$/);
+  if (deleteSessionMatch && req.method === "DELETE") {
+    const session = db.sessions.find((item) => item.id === deleteSessionMatch[1]);
+    if (!session || !canWriteTeam(user, session.teamId)) return error(res, 403, "PERMISSION_DENIED", "Cannot delete this session.");
+    const child = running.get(session.id);
+    if (child) child.kill("SIGINT");
+    running.delete(session.id);
+    db.sessions = db.sessions.filter((item) => item.id !== session.id);
+    db.messages = db.messages.filter((message) => message.sessionId !== session.id);
+    db.permissions = db.permissions.filter((permission) => permission.sessionId !== session.id);
+    db.fileChanges = db.fileChanges.filter((file) => file.sessionId !== session.id);
+    audit(user.id, "session.deleted", "session", session.id);
+    await saveDb();
+    broadcast({ type: "session.deleted", sessionId: session.id });
+    return send(res, 200, { ok: true });
   }
 
   const messageMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/messages$/);
@@ -665,10 +685,13 @@ async function handleApi(req, res, pathname) {
     if (sessionHasClaudeRun(session.id) || ["completed", "failed", "stopped"].includes(session.status)) {
       return error(res, 409, "SESSION_ALREADY_RAN", "This session already ran Claude Code. Create a new session for another task.");
     }
-    db.messages.push({ id: id("msg"), sessionId: session.id, senderType: "user", senderId: user.id, content, createdAt: now() });
+    const turnId = id("turn");
+    if (session.title === "新会话") session.title = titleFromPrompt(content);
+    session.updatedAt = now();
+    db.messages.push({ id: id("msg"), sessionId: session.id, senderType: "user", senderId: user.id, content, metadata: { turnId }, createdAt: now() });
     audit(user.id, "session.message_sent", "session", session.id);
     if (needsApproval(content)) {
-      const permission = { id: id("perm"), sessionId: session.id, agentId: session.agentId, requestedByUserId: user.id, type: "platform_gate", risk: "medium", summary: "任务可能执行敏感操作，需要审批后再交给 Claude Code CLI", payload: content, status: "pending", expiresAt: now() + 1000 * 60 * 30, createdAt: now() };
+      const permission = { id: id("perm"), sessionId: session.id, agentId: session.agentId, requestedByUserId: user.id, type: "platform_gate", risk: "medium", summary: "任务可能执行敏感操作，需要审批后再交给 Claude Code CLI", payload: content, turnId, status: "pending", expiresAt: now() + 1000 * 60 * 30, createdAt: now() };
       db.permissions.push(permission);
       session.status = "waiting_permission";
       audit(user.id, "permission.created", "permission", permission.id);
@@ -676,7 +699,7 @@ async function handleApi(req, res, pathname) {
       broadcast({ type: "permission.created", sessionId: session.id, permissionId: permission.id });
     } else {
       await saveDb();
-      runClaudeSession(session, content);
+      runClaudeSession(session, content, turnId);
     }
     return send(res, 201, { ok: true });
   }
@@ -704,11 +727,11 @@ async function handleApi(req, res, pathname) {
     permission.decidedBy = user.id;
     permission.decidedAt = now();
     const session = db.sessions.find((item) => item.id === permission.sessionId);
-    db.messages.push({ id: id("msg"), sessionId: session.id, senderType: "system", senderId: null, content: `权限请求已${permission.status === "approved" ? "批准" : "拒绝"}：${permission.summary}`, createdAt: now() });
+    db.messages.push({ id: id("msg"), sessionId: session.id, senderType: "system", senderId: null, content: `权限请求已${permission.status === "approved" ? "批准" : "拒绝"}：${permission.summary}`, metadata: { turnId: permission.turnId }, createdAt: now() });
     audit(user.id, `permission.${permission.status}`, "permission", permission.id);
     await saveDb();
     broadcast({ type: "permission.updated", sessionId: session.id, permissionId: permission.id, status: permission.status });
-    if (permission.status === "approved") runClaudeSession(session, permission.payload);
+    if (permission.status === "approved") runClaudeSession(session, permission.payload, permission.turnId);
     else {
       session.status = "stopped";
       await saveDb();

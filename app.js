@@ -151,6 +151,14 @@ function applyRealtimeEvent(event) {
     return;
   }
 
+  if (event.type === "session.deleted") {
+    state.sessions = state.sessions.filter((session) => session.id !== event.sessionId);
+    state.messages = state.messages.filter((message) => message.sessionId !== event.sessionId);
+    if (state.selectedSessionId === event.sessionId) state.selectedSessionId = "";
+    scheduleRender();
+    return;
+  }
+
   scheduleRefresh();
 }
 
@@ -418,10 +426,13 @@ function renderSessionList(team, activeSession, embedded = false) {
       <div class="session-list">
         ${sessions
           .map((session) => `
-            <button class="session-item ${session.id === activeSession?.id ? "active" : ""}" data-session="${session.id}">
-              <strong>${escapeHtml(session.title)}</strong>
-              <div class="meta">${badge(session.status, statusTone(session.status))}<span>${fmt(session.updatedAt)}</span></div>
-            </button>
+            <div class="session-row">
+              <button class="session-item ${session.id === activeSession?.id ? "active" : ""}" data-session="${session.id}">
+                <strong>${escapeHtml(session.title)}</strong>
+                <div class="meta">${badge(session.status, statusTone(session.status))}<span>${fmt(session.updatedAt)}</span></div>
+              </button>
+              <button class="icon-button session-delete" title="删除会话" data-delete-session="${session.id}">${icons.close}</button>
+            </div>
           `)
           .join("") || '<div class="empty">还没有会话</div>'}
       </div>
@@ -434,6 +445,7 @@ function renderChat(team, session) {
     return `<section class="panel chat-panel"><div class="empty">创建一个 Claude Code 会话开始协作</div></section>`;
   }
   const messages = state.messages.filter((message) => message.sessionId === session.id);
+  const turns = buildMessageTurns(messages);
   const canSend = canWriteTeam(team.id) && session.status === "idle";
   const placeholder = composerPlaceholder(team, session);
   return `
@@ -446,7 +458,7 @@ function renderChat(team, session) {
         </div>
       </div>
       <div class="chat-stream" id="chat-stream">
-        ${messages.map(renderMessage).join("")}
+        ${turns.map(renderTurn).join("")}
       </div>
       <form class="composer" data-form="message">
         <textarea class="textarea" name="content" placeholder="${escapeHtml(placeholder)}" ${canSend ? "" : "disabled"}></textarea>
@@ -454,6 +466,46 @@ function renderChat(team, session) {
       </form>
     </section>
   `;
+}
+
+function buildMessageTurns(messages) {
+  const turns = [];
+  const byId = new Map();
+  const loose = [];
+  for (const message of messages) {
+    const turnId = message.metadata?.turnId;
+    if (message.senderType === "user") {
+      const turn = { id: turnId || message.id, user: message, messages: [] };
+      turns.push(turn);
+      if (turnId) byId.set(turnId, turn);
+      continue;
+    }
+    if (turnId && byId.has(turnId)) {
+      byId.get(turnId).messages.push(message);
+    } else {
+      loose.push(message);
+    }
+  }
+  return [...loose.map((message) => ({ id: message.id, messages: [message] })), ...turns];
+}
+
+function renderTurn(turn) {
+  const agentMessages = turn.messages.filter((message) => message.senderType === "agent");
+  const eventMessages = turn.messages.filter((message) => message.senderType !== "agent");
+  const hasAgentOutput = agentMessages.some((message) => String(message.content || "").trim());
+  return `
+    <section class="turn">
+      ${turn.user ? renderMessage(turn.user) : ""}
+      ${agentMessages.map(renderMessage).join("")}
+      ${eventMessages.length ? renderTurnEvents(eventMessages, hasAgentOutput) : ""}
+    </section>
+  `;
+}
+
+function renderTurnEvents(messages, collapsed) {
+  const content = messages.map(renderTimelineEvent).join("");
+  if (!collapsed) return `<div class="turn-events">${content}</div>`;
+  return `<details class="turn-events collapsed"><summary>${icons.terminal}<span>本轮运行记录</span><strong>${messages.length}</strong></summary>${content}</details>`;
 }
 
 function composerPlaceholder(team, session) {
@@ -772,9 +824,7 @@ async function createTeam(form) {
 
 async function createSession() {
   const team = state.teams.find((item) => item.id === state.selectedTeamId);
-  const title = prompt("会话标题", "新的 Claude Code 任务");
-  if (!title) return;
-  const result = await api(`/api/teams/${team.id}/sessions`, { method: "POST", body: JSON.stringify({ title }) });
+  const result = await api(`/api/teams/${team.id}/sessions`, { method: "POST", body: "{}" });
   state.selectedSessionId = result.session.id;
   await refresh();
 }
@@ -793,6 +843,18 @@ async function decidePermission(id, decision) {
   if (!permission || !canApprove(permission)) return;
   const action = decision === "approved" ? "approve" : "reject";
   await api(`/api/permissions/${id}/${action}`, { method: "POST", body: "{}" });
+  await refresh();
+}
+
+async function deleteSession(id) {
+  const session = sessionById(id);
+  if (!session) return;
+  if (!confirm(`删除会话「${session.title}」？此操作会同时删除消息和权限记录。`)) return;
+  await api(`/api/sessions/${id}`, { method: "DELETE" });
+  if (state.selectedSessionId === id) {
+    const next = state.sessions.find((item) => item.teamId === session.teamId && item.id !== id);
+    state.selectedSessionId = next?.id || "";
+  }
   await refresh();
 }
 
@@ -888,6 +950,7 @@ document.addEventListener("click", async (event) => {
     setState({ currentUserId: null });
   }
   if (target.dataset.action === "new-session") await createSession();
+  if (target.dataset.deleteSession) await deleteSession(target.dataset.deleteSession);
   if (target.dataset.action === "stop-session") {
     const session = sessionById(state.selectedSessionId);
     if (session) {
