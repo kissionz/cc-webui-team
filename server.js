@@ -455,86 +455,115 @@ async function updateSessionMessage(session, message, content, metadata = messag
   return message;
 }
 
-async function runClaudeSession(session, prompt, turnId) {
-  const agent = db.agents.find((item) => item.id === session.agentId);
-  session.status = "running";
-  session.updatedAt = now();
-  agent.status = "running";
-  await saveDb();
-  broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
-  const message = await appendAgentMessage(session, agent, "", { turnId });
+function getRuntime(sessionId) {
+  const runtime = running.get(sessionId);
+  if (!runtime) return null;
+  return runtime.child ? runtime : { child: runtime };
+}
 
-  const args = String(db.claudeConfig.args || "").split(" ").filter(Boolean);
-  await mkdir(session.cwd, { recursive: true });
-  await appendSessionMessage(
-    session,
-    "tool",
-    `启动 Claude Code\ncommand: ${db.claudeConfig.command}\nargs: ${args.join(" ") || "(none)"}\ncwd: ${session.cwd}`,
-    agent.id,
-    { type: "command", command: db.claudeConfig.command, args, cwd: session.cwd, turnId },
-  );
-  const child = spawnCli(db.claudeConfig.command, args, {
-    cwd: session.cwd,
-    env: { ...process.env, TERM: "xterm-256color" },
-  });
-  running.set(session.id, child);
-  child.stdin?.end(prompt);
-  let lastOutputAt = now();
-  let heartbeatCount = 0;
-  let heartbeatMessage = null;
-  const heartbeat = setInterval(() => {
-    if (now() - lastOutputAt < 10000) return;
-    heartbeatCount += 1;
-    const waitedSeconds = Math.round((now() - message.createdAt) / 1000);
+function clearRuntimeHeartbeat(runtime) {
+  if (runtime?.heartbeat) clearInterval(runtime.heartbeat);
+  if (runtime) runtime.heartbeat = null;
+}
+
+function startTurnHeartbeat(session, runtime) {
+  clearRuntimeHeartbeat(runtime);
+  runtime.lastOutputAt = now();
+  runtime.heartbeatCount = 0;
+  runtime.heartbeatMessage = null;
+  runtime.heartbeat = setInterval(() => {
+    if (!runtime.currentMessage || now() - runtime.lastOutputAt < 10000) return;
+    runtime.heartbeatCount += 1;
+    const waitedSeconds = Math.round((now() - runtime.currentMessage.createdAt) / 1000);
     const content = `Claude Code 仍在运行，已等待 ${waitedSeconds} 秒，最近暂无输出。`;
-    if (heartbeatMessage) {
-      updateSessionMessage(session, heartbeatMessage, content, { type: "heartbeat", count: heartbeatCount, waitedSeconds, turnId });
+    const metadata = { type: "heartbeat", count: runtime.heartbeatCount, waitedSeconds, turnId: runtime.turnId };
+    if (runtime.heartbeatMessage) {
+      updateSessionMessage(session, runtime.heartbeatMessage, content, metadata);
     } else {
-      appendSessionMessage(session, "tool", content, agent.id, { type: "heartbeat", count: heartbeatCount, waitedSeconds, turnId }).then((created) => {
-        heartbeatMessage = created;
+      appendSessionMessage(session, "tool", content, runtime.agent?.id, metadata).then((created) => {
+        runtime.heartbeatMessage = created;
       });
     }
-    lastOutputAt = now();
+    runtime.lastOutputAt = now();
   }, 5000);
+}
 
-  const append = async (text) => {
-    lastOutputAt = now();
-    message.content += text;
+async function submitClaudeTurn(session, prompt, turnId) {
+  const agent = db.agents.find((item) => item.id === session.agentId);
+  const message = await appendAgentMessage(session, agent, "", { turnId });
+  let runtime = getRuntime(session.id);
+
+  if (!runtime) {
+    session.status = "running";
     session.updatedAt = now();
+    agent.status = "running";
     await saveDb();
-    broadcast({ type: "session.message.delta", sessionId: session.id, messageId: message.id, text });
-  };
+    broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
 
-  child.stdout.on("data", (chunk) => append(chunk.toString()));
-  child.stderr.on("data", (chunk) => {
-    const text = chunk.toString();
-    if (/Warning: no stdin data received/i.test(text)) return;
-    append(text);
-  });
-  child.on("error", async (err) => {
-    clearInterval(heartbeat);
-    await append(`\n[agent error] ${err.message}\ncommand: ${db.claudeConfig.command}\ncwd: ${session.cwd}`);
-    session.status = "failed";
-    agent.status = "idle";
-    running.delete(session.id);
-    await saveDb();
-    broadcast({ type: "agent.error", sessionId: session.id, message: err.message });
-  });
-  child.on("close", async (code) => {
-    clearInterval(heartbeat);
-    session.status = code === 0 ? "completed" : "failed";
-    agent.status = "idle";
-    running.delete(session.id);
+    const args = String(db.claudeConfig.args || "").split(" ").filter(Boolean);
+    await mkdir(session.cwd, { recursive: true });
     await appendSessionMessage(
       session,
       "tool",
-      code === 0 ? "Claude Code 本轮任务已完成。CLI 进程回答完成后已正常退出。" : `Claude Code 本轮任务失败，退出码：${code}`,
+      `启动 Claude Code\ncommand: ${db.claudeConfig.command}\nargs: ${args.join(" ") || "(none)"}\ncwd: ${session.cwd}`,
       agent.id,
-      { type: "exit", code, turnId },
+      { type: "command", command: db.claudeConfig.command, args, cwd: session.cwd, turnId },
     );
-    await saveDb();
-    broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
-  });
+    const child = spawnCli(db.claudeConfig.command, args, {
+      cwd: session.cwd,
+      env: { ...process.env, TERM: "xterm-256color" },
+    });
+    runtime = { child, agent, currentMessage: message, turnId, lastOutputAt: now(), heartbeat: null, heartbeatCount: 0, heartbeatMessage: null };
+    running.set(session.id, runtime);
+
+    const append = async (text) => {
+      runtime.lastOutputAt = now();
+      if (!runtime.currentMessage) return;
+      runtime.currentMessage.content += text;
+      session.updatedAt = now();
+      await saveDb();
+      broadcast({ type: "session.message.delta", sessionId: session.id, messageId: runtime.currentMessage.id, text });
+    };
+
+    child.stdout.on("data", (chunk) => append(chunk.toString()));
+    child.stderr.on("data", (chunk) => {
+      const text = chunk.toString();
+      if (/Warning: no stdin data received/i.test(text)) return;
+      append(text);
+    });
+    child.on("error", async (err) => {
+      clearRuntimeHeartbeat(runtime);
+      await append(`\n[agent error] ${err.message}\ncommand: ${db.claudeConfig.command}\ncwd: ${session.cwd}`);
+      session.status = "failed";
+      agent.status = "idle";
+      running.delete(session.id);
+      await saveDb();
+      broadcast({ type: "agent.error", sessionId: session.id, message: err.message });
+    });
+    child.on("close", async (code) => {
+      clearRuntimeHeartbeat(runtime);
+      if (session.status !== "stopped") session.status = code === 0 ? "completed" : "failed";
+      agent.status = "idle";
+      running.delete(session.id);
+      await appendSessionMessage(
+        session,
+        "tool",
+        code === 0 ? "Claude Code 进程已退出。当前会话连接已断开，需要重新连接后才能继续同一进程上下文。" : `Claude Code 进程异常退出，退出码：${code}`,
+        agent.id,
+        { type: "exit", code, turnId: runtime.turnId },
+      );
+      await saveDb();
+      broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
+    });
+  } else {
+    await appendSessionMessage(session, "tool", "发送到现有 Claude Code 进程。", agent.id, { type: "input", turnId });
+  }
+
+  runtime.agent = agent;
+  runtime.currentMessage = message;
+  runtime.turnId = turnId;
+  startTurnHeartbeat(session, runtime);
+  runtime.child.stdin?.write(`${prompt}\n`);
 }
 
 async function handleApi(req, res, pathname) {
@@ -655,8 +684,8 @@ async function handleApi(req, res, pathname) {
   if (deleteSessionMatch && req.method === "DELETE") {
     const session = db.sessions.find((item) => item.id === deleteSessionMatch[1]);
     if (!session || !canWriteTeam(user, session.teamId)) return error(res, 403, "PERMISSION_DENIED", "Cannot delete this session.");
-    const child = running.get(session.id);
-    if (child) child.kill("SIGINT");
+    const runtime = getRuntime(session.id);
+    if (runtime?.child) runtime.child.kill("SIGINT");
     running.delete(session.id);
     db.sessions = db.sessions.filter((item) => item.id !== session.id);
     db.messages = db.messages.filter((message) => message.sessionId !== session.id);
@@ -675,9 +704,9 @@ async function handleApi(req, res, pathname) {
     const body = await readBody(req);
     const content = String(body.content || "").trim();
     if (!content) return error(res, 400, "MESSAGE_EMPTY", "Message cannot be empty.");
-    if (["running", "waiting_permission"].includes(session.status)) {
-      return error(res, 409, "SESSION_BUSY", "This session is already running. Wait for it to finish or stop it first.");
-    }
+    if (session.status === "waiting_permission") return error(res, 409, "SESSION_BUSY", "This session is waiting for permission.");
+    if (["completed", "failed", "stopped"].includes(session.status)) return error(res, 409, "SESSION_DISCONNECTED", "Claude Code process is no longer connected. Create a new session.");
+    if (session.status === "running" && !getRuntime(session.id)) return error(res, 409, "SESSION_DISCONNECTED", "Claude Code process is no longer connected. Create a new session.");
     const turnId = id("turn");
     if (session.title === "新会话") session.title = titleFromPrompt(content);
     session.updatedAt = now();
@@ -692,7 +721,7 @@ async function handleApi(req, res, pathname) {
       broadcast({ type: "permission.created", sessionId: session.id, permissionId: permission.id });
     } else {
       await saveDb();
-      runClaudeSession(session, content, turnId);
+      submitClaudeTurn(session, content, turnId);
     }
     return send(res, 201, { ok: true });
   }
@@ -701,8 +730,8 @@ async function handleApi(req, res, pathname) {
   if (stopMatch && req.method === "POST") {
     const session = db.sessions.find((item) => item.id === stopMatch[1]);
     if (!session || !canWriteTeam(user, session.teamId)) return error(res, 403, "PERMISSION_DENIED", "Cannot stop sessions.");
-    const child = running.get(session.id);
-    if (child) child.kill("SIGINT");
+    const runtime = getRuntime(session.id);
+    if (runtime?.child) runtime.child.kill("SIGINT");
     session.status = "stopped";
     const agent = db.agents.find((item) => item.id === session.agentId);
     if (agent) agent.status = "idle";
@@ -724,7 +753,7 @@ async function handleApi(req, res, pathname) {
     audit(user.id, `permission.${permission.status}`, "permission", permission.id);
     await saveDb();
     broadcast({ type: "permission.updated", sessionId: session.id, permissionId: permission.id, status: permission.status });
-    if (permission.status === "approved") runClaudeSession(session, permission.payload, permission.turnId);
+    if (permission.status === "approved") submitClaudeTurn(session, permission.payload, permission.turnId);
     else {
       session.status = "stopped";
       await saveDb();

@@ -446,7 +446,7 @@ function renderChat(team, session) {
   }
   const messages = state.messages.filter((message) => message.sessionId === session.id);
   const turns = buildMessageTurns(messages);
-  const canSend = canWriteTeam(team.id) && !["running", "waiting_permission"].includes(session.status);
+  const canSend = canWriteTeam(team.id) && ["idle", "running"].includes(session.status);
   const placeholder = composerPlaceholder(team, session);
   return `
     <section class="panel chat-panel">
@@ -511,9 +511,9 @@ function renderTurnEvents(messages, collapsed) {
 function composerPlaceholder(team, session) {
   if (!canWriteTeam(team.id)) return "viewer 角色只能查看会话";
   if (session.status === "idle") return "向 Claude Code 发送任务";
-  if (session.status === "running") return "Claude Code 正在运行，等待输出或停止后再继续";
+  if (session.status === "running") return "继续向同一个 Claude Code 进程发送下一轮消息";
   if (session.status === "waiting_permission") return "当前任务等待审批";
-  return "继续向 Claude Code 发送下一轮任务";
+  return "Claude Code 进程已断开，请创建新会话";
 }
 
 function renderMessage(message) {
@@ -551,6 +551,7 @@ function renderTimelineEvent(message) {
 function timelineEventMeta(message) {
   const type = message.metadata?.type || (message.senderType === "system" ? "system" : "tool");
   if (type === "command") return { title: "已运行 Claude Code", detail: message.content, icon: icons.terminal, tone: "tool" };
+  if (type === "input") return { title: "已发送到现有进程", detail: message.content, icon: icons.terminal, tone: "tool" };
   if (type === "heartbeat") return { title: "正在思考", detail: message.content, icon: icons.activity, tone: "pending" };
   if (type === "thinking") return { title: "正在思考", detail: message.content, icon: icons.activity, tone: "pending" };
   if (type === "exit") {
