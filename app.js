@@ -8,6 +8,9 @@ const icons = {
   check: '<svg class="icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>',
   close: '<svg class="icon" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>',
   logout: '<svg class="icon" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></svg>',
+  terminal: '<svg class="icon" viewBox="0 0 24 24"><path d="m4 17 6-6-6-6"/><path d="M12 19h8"/></svg>',
+  activity: '<svg class="icon" viewBox="0 0 24 24"><path d="M22 12h-4l-3 8L9 4l-3 8H2"/></svg>',
+  info: '<svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>',
 };
 
 const now = () => Date.now();
@@ -462,6 +465,10 @@ function composerPlaceholder(team, session) {
 }
 
 function renderMessage(message) {
+  if (message.senderType === "tool" || message.senderType === "system") return renderTimelineEvent(message);
+  if (message.senderType === "agent" && !String(message.content || "").trim()) {
+    return renderTimelineEvent({ ...message, senderType: "tool", metadata: { type: "thinking" }, content: "Claude Code 正在思考，等待首个输出。" });
+  }
   const sender =
     message.senderType === "user"
       ? userName(message.senderId)
@@ -474,6 +481,32 @@ function renderMessage(message) {
       <div class="bubble">${escapeHtml(message.content)}</div>
     </article>
   `;
+}
+
+function renderTimelineEvent(message) {
+  const event = timelineEventMeta(message);
+  return `
+    <article class="timeline-event ${event.tone}">
+      <span class="event-icon">${event.icon}</span>
+      <div class="event-body">
+        <div class="event-head"><strong>${escapeHtml(event.title)}</strong><span>${fmt(message.updatedAt || message.createdAt)}</span></div>
+        ${event.detail ? `<pre class="event-detail">${escapeHtml(event.detail)}</pre>` : ""}
+      </div>
+    </article>
+  `;
+}
+
+function timelineEventMeta(message) {
+  const type = message.metadata?.type || (message.senderType === "system" ? "system" : "tool");
+  if (type === "command") return { title: "已运行 Claude Code", detail: message.content, icon: icons.terminal, tone: "tool" };
+  if (type === "heartbeat") return { title: "正在思考", detail: message.content, icon: icons.activity, tone: "pending" };
+  if (type === "thinking") return { title: "正在思考", detail: message.content, icon: icons.activity, tone: "pending" };
+  if (type === "exit") {
+    const ok = message.metadata?.code === 0;
+    return { title: ok ? "任务完成" : "任务失败", detail: message.content, icon: ok ? icons.check : icons.close, tone: ok ? "done" : "error" };
+  }
+  if (message.senderType === "system") return { title: "系统提示", detail: message.content, icon: icons.info, tone: "system" };
+  return { title: "工具事件", detail: message.content, icon: icons.terminal, tone: "tool" };
 }
 
 function renderRightRail(team, session) {
