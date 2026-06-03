@@ -390,13 +390,14 @@ function bootstrapFor(user) {
 async function healthCheck() {
   const started = now();
   return new Promise((resolveHealth) => {
+    const probe = describeCliLaunch(db.claudeConfig.command, ["--version"]);
     const child = spawnCli(db.claudeConfig.command, ["--version"], { env: process.env });
     let out = "";
     let err = "";
     child.stdout.on("data", (chunk) => (out += chunk));
     child.stderr.on("data", (chunk) => (err += chunk));
     child.on("error", (spawnError) => {
-      resolveHealth({ available: false, version: "not found", latencyMs: now() - started, authenticated: false, message: spawnError.message });
+      resolveHealth({ available: false, version: "not found", latencyMs: now() - started, authenticated: false, message: `${spawnError.message}\n${probe}` });
     });
     child.on("close", (code) => {
       const output = (out || err || "unknown").trim();
@@ -405,10 +406,17 @@ async function healthCheck() {
         version: output.split("\n")[0],
         latencyMs: now() - started,
         authenticated: code === 0,
-        message: code === 0 ? "Claude Code CLI is available." : output || `Claude Code exited with code ${code}.`,
+        message: code === 0 ? `Claude Code CLI is available.\n${probe}` : `${output || `Claude Code exited with code ${code}.`}\n${probe}`,
       });
     });
   });
+}
+
+function describeCliLaunch(command, args) {
+  if (!IS_WINDOWS) return `launch: ${command} ${args.join(" ")}`;
+  const resolved = resolveWindowsCli(command, args);
+  if (resolved) return `launch: ${resolved.command} ${resolved.args.join(" ")}`;
+  return `launch: ${windowsShellPath()} /d /s /c ${[command, ...args].map(cmdQuote).join(" ")}`;
 }
 
 function needsApproval(content) {
@@ -433,6 +441,7 @@ async function runClaudeSession(session, prompt) {
   broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
 
   const args = [...String(db.claudeConfig.args || "").split(" ").filter(Boolean), prompt];
+  await mkdir(session.cwd, { recursive: true });
   const child = spawnCli(db.claudeConfig.command, args, {
     cwd: session.cwd,
     env: { ...process.env, TERM: "xterm-256color" },
@@ -449,7 +458,7 @@ async function runClaudeSession(session, prompt) {
   child.stdout.on("data", (chunk) => append(chunk.toString()));
   child.stderr.on("data", (chunk) => append(chunk.toString()));
   child.on("error", async (err) => {
-    await append(`\n[agent error] ${err.message}`);
+    await append(`\n[agent error] ${err.message}\ncommand: ${db.claudeConfig.command}\ncwd: ${session.cwd}`);
     session.status = "failed";
     agent.status = "idle";
     running.delete(session.id);
