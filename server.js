@@ -87,14 +87,14 @@ function resolveWindowsCli(command, args) {
   if (!commandPath) return null;
   const cmdSibling = `${commandPath}.cmd`;
   if (!extname(commandPath) && existsSync(cmdSibling)) {
-    const cliPath = resolveClaudeCliFromCmd(cmdSibling);
-    if (cliPath) return { command: process.execPath, args: [cliPath, ...args] };
+    const target = resolveClaudeTargetFromCmd(cmdSibling);
+    if (target) return { command: target.command, args: [...target.args, ...args] };
     return { command: windowsShellPath(), args: ["/d", "/s", "/c", [cmdSibling, ...args].map(cmdQuote).join(" ")] };
   }
   const lower = commandPath.toLowerCase();
   if (lower.endsWith(".cmd") || lower.endsWith(".bat")) {
-    const cliPath = resolveClaudeCliFromCmd(commandPath);
-    if (cliPath) return { command: process.execPath, args: [cliPath, ...args] };
+    const target = resolveClaudeTargetFromCmd(commandPath);
+    if (target) return { command: target.command, args: [...target.args, ...args] };
     return { command: windowsShellPath(), args: ["/d", "/s", "/c", [commandPath, ...args].map(cmdQuote).join(" ")] };
   }
   if (!extname(commandPath)) return null;
@@ -136,25 +136,36 @@ function preferWindowsCommandMatch(matches) {
   );
 }
 
-function resolveClaudeCliFromCmd(cmdPath) {
+function resolveClaudeTargetFromCmd(cmdPath) {
   const candidates = [
+    join(dirname(cmdPath), "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe"),
+    join(dirname(dirname(cmdPath)), "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe"),
     join(dirname(cmdPath), "node_modules", "@anthropic-ai", "claude-code", "cli.js"),
     join(dirname(dirname(cmdPath)), "node_modules", "@anthropic-ai", "claude-code", "cli.js"),
   ];
   for (const candidate of candidates) {
-    if (existsSync(candidate)) return candidate;
+    const target = commandTargetForPath(candidate);
+    if (target) return target;
   }
 
   try {
     const cmdText = readFileSync(cmdPath, "utf8");
-    const match = cmdText.match(/(["']?)([^"'\r\n]*node_modules[\\/]+@anthropic-ai[\\/]+claude-code[\\/]+cli\.js)\1/i);
+    const match = cmdText.match(/(["']?)([^"'\r\n]*node_modules[\\/]+@anthropic-ai[\\/]+claude-code[\\/]+(?:cli\.js|bin[\\/]claude\.exe))\1/i);
     if (!match) return null;
-    const raw = match[2].replaceAll("%~dp0", dirname(cmdPath));
+    const raw = match[2]
+      .replaceAll("%~dp0", dirname(cmdPath))
+      .replaceAll("%dp0%", dirname(cmdPath));
     const normalized = resolve(raw);
-    return existsSync(normalized) ? normalized : null;
+    return commandTargetForPath(normalized);
   } catch {
     return null;
   }
+}
+
+function commandTargetForPath(filePath) {
+  if (!existsSync(filePath)) return null;
+  if (filePath.toLowerCase().endsWith(".js")) return { command: process.execPath, args: [filePath] };
+  return { command: filePath, args: [] };
 }
 
 function seedDb() {
