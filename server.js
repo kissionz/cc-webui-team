@@ -195,14 +195,14 @@ function seedDb() {
     sessionsByToken: {},
     users,
     teams: [
-      { id: "team_platform", name: "Claude Code Platform", workspacePath: join(WORKSPACE_ROOT, "claude-code-webui"), workspaceMode: "shared", createdBy: "user_admin", createdAt, updatedAt: createdAt },
+      { id: "team_platform", name: "Claude Code Platform", workspacePath: WORKSPACE_ROOT, workspaceMode: "shared", createdBy: "user_admin", createdAt, updatedAt: createdAt },
     ],
     members,
     agents: [
       { id: "agent_claude", teamId: "team_platform", name: "Claude Code", type: "claude_code", command: CLAUDE_COMMAND, enabled: true, status: "idle", createdAt, updatedAt: createdAt },
     ],
     sessions: [
-      { id: "session_welcome", teamId: "team_platform", agentId: "agent_claude", createdBy: "user_admin", title: "部署后的第一条 Claude Code 会话", status: "idle", cwd: join(WORKSPACE_ROOT, "claude-code-webui"), createdAt, updatedAt: createdAt },
+      { id: "session_welcome", teamId: "team_platform", agentId: "agent_claude", createdBy: "user_admin", title: "部署后的第一条 Claude Code 会话", status: "idle", cwd: WORKSPACE_ROOT, createdAt, updatedAt: createdAt },
     ],
     messages: [
       { id: "msg_welcome", sessionId: "session_welcome", senderType: "system", senderId: null, content: "服务端已启动。发送消息后，后端会在团队 workspace 中调用 Claude Code CLI。", createdAt },
@@ -266,7 +266,7 @@ async function syncRuntimeConfigFromEnv() {
   if (process.env.RESET_DEFAULT_TEAM_WORKSPACE === "true" && process.env.WORKSPACE_ROOT) {
     const defaultTeam = db.teams.find((team) => team.id === "team_platform");
     const defaultSession = db.sessions.find((session) => session.id === "session_welcome");
-    const workspacePath = join(process.env.WORKSPACE_ROOT, "claude-code-webui");
+    const workspacePath = process.env.WORKSPACE_ROOT;
     if (defaultTeam) {
       defaultTeam.workspacePath = workspacePath;
       defaultTeam.updatedAt = now();
@@ -440,13 +440,14 @@ async function runClaudeSession(session, prompt) {
   await saveDb();
   broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
 
-  const args = [...String(db.claudeConfig.args || "").split(" ").filter(Boolean), prompt];
+  const args = String(db.claudeConfig.args || "").split(" ").filter(Boolean);
   await mkdir(session.cwd, { recursive: true });
   const child = spawnCli(db.claudeConfig.command, args, {
     cwd: session.cwd,
     env: { ...process.env, TERM: "xterm-256color" },
   });
   running.set(session.id, child);
+  child.stdin?.end(prompt);
 
   const append = async (text) => {
     message.content += text;
@@ -456,7 +457,11 @@ async function runClaudeSession(session, prompt) {
   };
 
   child.stdout.on("data", (chunk) => append(chunk.toString()));
-  child.stderr.on("data", (chunk) => append(chunk.toString()));
+  child.stderr.on("data", (chunk) => {
+    const text = chunk.toString();
+    if (/Warning: no stdin data received/i.test(text)) return;
+    append(text);
+  });
   child.on("error", async (err) => {
     await append(`\n[agent error] ${err.message}\ncommand: ${db.claudeConfig.command}\ncwd: ${session.cwd}`);
     session.status = "failed";
@@ -527,6 +532,33 @@ async function handleApi(req, res, pathname) {
       await saveDb();
       broadcast({ type: "team.created", teamId: team.id });
       return send(res, 201, { team });
+    } catch (err) {
+      return error(res, 400, err.code || "WORKSPACE_PATH_INVALID", "Workspace path must be inside the configured allowlist.");
+    }
+  }
+
+  const teamMatch = pathname.match(/^\/api\/teams\/([^/]+)$/);
+  if (teamMatch && req.method === "PATCH") {
+    const teamId = teamMatch[1];
+    if (!canManageTeam(user, teamId)) return error(res, 403, "PERMISSION_DENIED", "Cannot update this team.");
+    const team = db.teams.find((item) => item.id === teamId);
+    if (!team) return error(res, 404, "TEAM_NOT_FOUND", "Team not found.");
+    const body = await readBody(req);
+    try {
+      if (body.name) team.name = String(body.name);
+      if (body.workspacePath) {
+        const workspacePath = assertWorkspaceAllowed(body.workspacePath);
+        team.workspacePath = workspacePath;
+        for (const session of db.sessions.filter((item) => item.teamId === teamId && item.status === "idle")) {
+          session.cwd = workspacePath;
+          session.updatedAt = now();
+        }
+      }
+      team.updatedAt = now();
+      audit(user.id, "team.updated", "team", teamId, { workspacePath: team.workspacePath });
+      await saveDb();
+      broadcast({ type: "team.updated", teamId });
+      return send(res, 200, { team });
     } catch (err) {
       return error(res, 400, err.code || "WORKSPACE_PATH_INVALID", "Workspace path must be inside the configured allowlist.");
     }

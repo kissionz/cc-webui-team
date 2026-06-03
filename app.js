@@ -166,7 +166,7 @@ function badge(text, tone = "") {
 function appRoot(inner) {
   const user = currentUser();
   return `
-    <div class="app-shell">
+    <div class="app-shell ${state.activeView === "team" ? "team-mode" : ""}">
       <aside class="sidebar">
         <div class="brand">
           <div class="brand-mark">CC</div>
@@ -265,6 +265,7 @@ function renderTeamDetail() {
   const actions = `
     <button class="button" data-back-teams>团队列表</button>
     <button class="button" data-modal="members" data-team="${team.id}">成员</button>
+    <button class="button" data-modal="workspace" data-team="${team.id}">工作区</button>
     <button class="button primary" data-action="new-session" ${canWriteTeam(team.id) ? "" : "disabled"}>${icons.plus}新会话</button>
   `;
 
@@ -272,7 +273,7 @@ function renderTeamDetail() {
     ${topbar(team.name, `${team.workspacePath} · 我的角色 ${role}`, actions)}
     <section class="content">
       <div class="team-layout">
-        ${renderSessionList(team, session)}
+        ${renderTeamRail(team, session)}
         ${renderChat(team, session)}
         ${renderRightRail(team, session)}
       </div>
@@ -280,10 +281,33 @@ function renderTeamDetail() {
   `);
 }
 
-function renderSessionList(team, activeSession) {
+function renderTeamRail(team, activeSession) {
+  return `
+    <aside class="panel team-rail">
+      <div class="team-rail-top">
+        <div class="brand rail-brand">
+          <div class="brand-mark">CC</div>
+          <div>
+            <div class="brand-title">Claude Code</div>
+            <div class="brand-subtitle">Team Platform</div>
+          </div>
+        </div>
+        <nav class="nav-group rail-nav">
+          ${navButton("teams", icons.teams, "团队工作台")}
+          ${navButton("settings", icons.settings, "Agent 设置")}
+          ${currentUser()?.role === "admin" ? navButton("users", icons.users, "用户管理") : ""}
+          ${navButton("audit", icons.check, "审计日志")}
+        </nav>
+      </div>
+      ${renderSessionList(team, activeSession, true)}
+    </aside>
+  `;
+}
+
+function renderSessionList(team, activeSession, embedded = false) {
   const sessions = state.sessions.filter((session) => session.teamId === team.id);
   return `
-    <aside class="panel">
+    <section class="${embedded ? "session-section" : "panel"}">
       <div class="panel-header"><h2 class="panel-title">会话</h2>${badge(`${sessions.length}`)}</div>
       <div class="session-list">
         ${sessions
@@ -295,7 +319,7 @@ function renderSessionList(team, activeSession) {
           `)
           .join("") || '<div class="empty">还没有会话</div>'}
       </div>
-    </aside>
+    </section>
   `;
 }
 
@@ -492,6 +516,7 @@ function renderModal(kind, teamId = state.selectedTeamId) {
       </div>
     `;
   }
+  if (kind === "workspace") return renderWorkspaceModal(teamId);
   const team = state.teams.find((item) => item.id === teamId);
   const memberRows = state.members
     .filter((member) => member.teamId === teamId)
@@ -518,6 +543,22 @@ function renderModal(kind, teamId = state.selectedTeamId) {
         </div>
         <div class="modal-actions"><button class="button" data-close-modal>关闭</button></div>
       </div>
+    </div>
+  `;
+}
+
+function renderWorkspaceModal(teamId) {
+  const team = state.teams.find((item) => item.id === teamId);
+  return `
+    <div class="modal-backdrop" data-close-modal>
+      <form class="modal" data-form="workspace" data-team="${teamId}">
+        <div class="modal-head"><h3>团队工作区</h3></div>
+        <div class="modal-body">
+          <div class="field"><label>工作区目录</label><input class="input" name="workspacePath" value="${escapeHtml(team?.workspacePath || state.claudeConfig.workspaceRoot || "")}" required /></div>
+          <div class="helper">目录必须位于系统 allowlist 内：${escapeHtml(state.claudeConfig.workspaceRoot || "")}</div>
+        </div>
+        <div class="modal-actions"><button class="button" type="button" data-close-modal>取消</button><button class="button primary" type="submit" ${canManageTeam(teamId) ? "" : "disabled"}>保存</button></div>
+      </form>
     </div>
   `;
 }
@@ -628,6 +669,17 @@ async function saveConfig(form) {
   await refresh();
 }
 
+async function saveWorkspace(form) {
+  const teamId = form.dataset.team;
+  const data = new FormData(form);
+  await api(`/api/teams/${teamId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ workspacePath: String(data.get("workspacePath")).trim() }),
+  });
+  activeModal = "";
+  await refresh();
+}
+
 document.addEventListener("submit", async (event) => {
   const form = event.target.closest("form");
   if (!form) return;
@@ -640,6 +692,7 @@ document.addEventListener("submit", async (event) => {
     if (kind === "user") await createUser(form);
     if (kind === "member") await addMember(form);
     if (kind === "config") await saveConfig(form);
+    if (kind === "workspace") await saveWorkspace(form);
   } catch (err) {
     alert(err.message || "操作失败");
   }
