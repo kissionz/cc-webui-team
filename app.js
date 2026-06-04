@@ -213,6 +213,107 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function renderInlineMarkdown(value) {
+  return String(value)
+    .split(/(`[^`]*`)/g)
+    .map((part) => {
+      if (part.startsWith("`") && part.endsWith("`")) return `<code>${escapeHtml(part.slice(1, -1))}</code>`;
+      return escapeHtml(part).replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    })
+    .join("");
+}
+
+function splitMarkdownRow(line) {
+  return line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+}
+
+function isMarkdownTableSeparator(line) {
+  const cells = splitMarkdownRow(line);
+  return cells.length > 1 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function renderMarkdownTable(lines) {
+  const header = splitMarkdownRow(lines[0]);
+  const rows = lines.slice(2).map(splitMarkdownRow).filter((row) => row.some(Boolean));
+  return `
+    <div class="markdown-table-wrap">
+      <table class="markdown-table">
+        <thead><tr>${header.map((cell) => `<th>${renderInlineMarkdown(cell)}</th>`).join("")}</tr></thead>
+        <tbody>
+          ${rows.map((row) => `<tr>${header.map((_, index) => `<td>${renderInlineMarkdown(row[index] || "")}</td>`).join("")}</tr>`).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderMarkdownBlocks(text) {
+  const lines = String(text || "").split(/\r?\n/);
+  const blocks = [];
+  for (let i = 0; i < lines.length;) {
+    if (!lines[i].trim()) {
+      i += 1;
+      continue;
+    }
+    if (lines[i].includes("|") && lines[i + 1] && isMarkdownTableSeparator(lines[i + 1])) {
+      const tableLines = [lines[i], lines[i + 1]];
+      i += 2;
+      while (i < lines.length && lines[i].includes("|") && lines[i].trim()) {
+        tableLines.push(lines[i]);
+        i += 1;
+      }
+      blocks.push(renderMarkdownTable(tableLines));
+      continue;
+    }
+    if (/^\s*[-*]\s+/.test(lines[i])) {
+      const items = [];
+      while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
+        items.push(lines[i].replace(/^\s*[-*]\s+/, ""));
+        i += 1;
+      }
+      blocks.push(`<ul>${items.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join("")}</ul>`);
+      continue;
+    }
+    if (/^\s*\d+\.\s+/.test(lines[i])) {
+      const items = [];
+      while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
+        items.push(lines[i].replace(/^\s*\d+\.\s+/, ""));
+        i += 1;
+      }
+      blocks.push(`<ol>${items.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join("")}</ol>`);
+      continue;
+    }
+    const paragraph = [];
+    while (
+      i < lines.length &&
+      lines[i].trim() &&
+      !(lines[i].includes("|") && lines[i + 1] && isMarkdownTableSeparator(lines[i + 1])) &&
+      !/^\s*[-*]\s+/.test(lines[i]) &&
+      !/^\s*\d+\.\s+/.test(lines[i])
+    ) {
+      paragraph.push(lines[i]);
+      i += 1;
+    }
+    blocks.push(`<p>${paragraph.map(renderInlineMarkdown).join("<br>")}</p>`);
+  }
+  return blocks.join("");
+}
+
+function renderMarkdown(text) {
+  const chunks = String(text || "").split(/```([a-zA-Z0-9_-]*)\n?([\s\S]*?)```/g);
+  let html = "";
+  for (let index = 0; index < chunks.length; index += 1) {
+    if (index % 3 === 0) html += renderMarkdownBlocks(chunks[index]);
+    if (index % 3 === 2) html += `<pre class="markdown-code"><code>${escapeHtml(chunks[index])}</code></pre>`;
+  }
+  return html;
+}
+
 function badge(text, tone = "") {
   return `<span class="badge ${tone}">${escapeHtml(text)}</span>`;
 }
@@ -549,10 +650,12 @@ function renderMessage(message) {
       : message.senderType === "agent"
         ? agentById(message.senderId)?.name || "Agent"
         : message.senderType;
+  const rich = message.senderType === "agent";
+  const content = rich ? renderMarkdown(message.content) : escapeHtml(message.content);
   return `
     <article class="message ${message.senderType}">
       <div class="message-meta"><span>${escapeHtml(sender)}</span><span>${fmt(message.createdAt)}</span></div>
-      <div class="bubble">${escapeHtml(message.content)}</div>
+      <div class="bubble ${rich ? "markdown" : ""}">${content}</div>
     </article>
   `;
 }
