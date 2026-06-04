@@ -217,6 +217,20 @@ function badge(text, tone = "") {
   return `<span class="badge ${tone}">${escapeHtml(text)}</span>`;
 }
 
+function titleText(value) {
+  return String(value || "新会话").replace(/\s+/g, " ").trim().slice(0, 50) || "新会话";
+}
+
+function compactText(value, max = 900) {
+  const text = typeof value === "string" ? value : JSON.stringify(value ?? "", null, 2);
+  const normalized = String(text || "").trim();
+  return normalized.length > max ? `${normalized.slice(0, max)}...` : normalized;
+}
+
+function permissionById(id) {
+  return state.permissions.find((permission) => permission.id === id);
+}
+
 function appRoot(inner) {
   const user = currentUser();
   return `
@@ -434,7 +448,7 @@ function renderSessionList(team, activeSession, embedded = false) {
           .map((session) => `
             <div class="session-row">
               <button class="session-item ${session.id === activeSession?.id ? "active" : ""}" data-session="${session.id}">
-                <strong>${escapeHtml(session.title)}</strong>
+                <strong class="truncate-title" title="${escapeHtml(titleText(session.title))}">${escapeHtml(titleText(session.title))}</strong>
                 <div class="meta">${badge(session.status, statusTone(session.status))}<span>${fmt(session.updatedAt)}</span></div>
               </button>
               <button class="icon-button session-delete" title="删除会话" data-delete-session="${session.id}">${icons.close}</button>
@@ -458,7 +472,7 @@ function renderChat(team, session) {
   return `
     <section class="panel chat-panel">
       <div class="panel-header">
-        <h2 class="panel-title">${escapeHtml(session.title)}</h2>
+        <h2 class="panel-title truncate-title" title="${escapeHtml(titleText(session.title))}">${escapeHtml(titleText(session.title))}</h2>
         <div class="toolbar">
           ${badge(session.status, statusTone(session.status))}
           <button class="icon-button" title="停止会话" data-action="stop-session" ${session.status === "running" ? "" : "disabled"}>${icons.stop}</button>
@@ -565,7 +579,12 @@ function timelineEventMeta(message) {
     return { title: `${running ? "正在调用" : "已调用"} ${message.metadata?.name || "工具"}`, detail: message.content, icon: icons.terminal, tone: running ? "pending" : "done", spinner: running };
   }
   if (type === "permission_request") {
-    return { title: `等待授权 ${message.metadata?.serverName ? `${message.metadata.serverName} / ` : ""}${message.metadata?.toolName || ""}`, detail: message.content, icon: icons.info, tone: "pending", spinner: true };
+    const permission = permissionById(message.metadata?.permissionId);
+    const label = `${message.metadata?.serverName ? `${message.metadata.serverName} / ` : ""}${message.metadata?.toolName || ""}`.trim();
+    const detail = permission ? [permission.summary, permission.reason].filter(Boolean).join("\n") : message.content;
+    if (permission?.status === "approved") return { title: `已授权 ${label}`, detail, icon: icons.check, tone: "done" };
+    if (permission?.status === "rejected") return { title: `已拒绝 ${label}`, detail, icon: icons.close, tone: "error" };
+    return { title: `等待授权 ${label}`, detail, icon: icons.info, tone: "pending", spinner: true };
   }
   if (type === "heartbeat" || type === "thinking") {
     const done = message.metadata?.status === "done";
@@ -591,6 +610,8 @@ function timelineEventMeta(message) {
 function renderRightRail(team, session) {
   const agents = state.agents.filter((agent) => agent.teamId === team.id);
   const permissions = session ? state.permissions.filter((permission) => permission.sessionId === session.id) : [];
+  const pendingPermissions = permissions.filter((permission) => permission.status === "pending");
+  const decidedPermissions = permissions.filter((permission) => permission.status !== "pending").slice(-6).reverse();
   const files = session ? state.fileChanges.filter((file) => file.sessionId === session.id) : [];
   return `
     <aside class="panel">
@@ -609,7 +630,12 @@ function renderRightRail(team, session) {
         </div>
         <div class="side-card">
           <h4>权限请求</h4>
-          ${permissions.map(renderPermission).join("") || "<p>当前没有待处理权限。MCP 工具请求会在这里出现，可选择允许一次、总是允许工具或总是允许 server。</p>"}
+          ${pendingPermissions.map(renderPermission).join("") || "<p>当前没有待处理权限。MCP 工具请求会在这里出现，可选择允许一次、总是允许工具或总是允许 server。</p>"}
+          ${
+            decidedPermissions.length
+              ? `<details class="permission-history"><summary>已处理记录 ${badge(decidedPermissions.length)}</summary>${decidedPermissions.map(renderPermission).join("")}</details>`
+              : ""
+          }
         </div>
         <div class="side-card">
           <h4>文件变更</h4>
@@ -637,10 +663,10 @@ function renderPermission(permission) {
   const canAct = permission.status === "pending" && canApprove(permission);
   if (permission.type === "mcp_tool") return renderMcpPermission(permission, canAct);
   return `
-    <div class="side-card">
+    <div class="permission-card">
       <div class="meta">${badge(permission.type, "amber")} ${badge(permission.risk, permission.risk === "high" ? "red" : "amber")}</div>
       <h4>${escapeHtml(permission.summary)}</h4>
-      <p class="workspace">${escapeHtml(permission.payload)}</p>
+      ${renderPermissionInput(permission)}
       <div class="meta">过期 ${fmt(permission.expiresAt)} · ${escapeHtml(permission.status)}</div>
       <div class="toolbar">
         <button class="button primary" data-permission="${permission.id}" data-decision="approved" ${canAct ? "" : "disabled"}>${icons.check}批准</button>
@@ -655,46 +681,16 @@ function pendingSelectedPermission() {
 }
 
 function renderPermissionOverlay() {
-  const permission = pendingSelectedPermission();
-  if (!permission || activeModal) return "";
-  const input = permission.toolInput ? JSON.stringify(permission.toolInput, null, 2) : permission.payload;
-  const isMcp = permission.type === "mcp_tool";
-  return `
-    <div class="permission-backdrop">
-      <section class="permission-modal" role="dialog" aria-modal="true">
-        <div class="permission-modal-head">
-          <div>
-            <div class="meta">${badge(isMcp ? "MCP 工具授权" : "平台审批", "amber")} ${permission.serverName ? badge(permission.serverName, "blue") : ""}</div>
-            <h3>${escapeHtml(permission.summary)}</h3>
-          </div>
-          <span class="status-dot waiting" title="等待审批"></span>
-        </div>
-        <div class="permission-modal-body">
-          <p>${escapeHtml(permission.reason || "Claude Code 请求继续执行需要授权。")}</p>
-          <pre class="workspace">${escapeHtml(input || "")}</pre>
-          <div class="meta">请求时间 ${fmt(permission.createdAt)} · 过期 ${fmt(permission.expiresAt)}</div>
-        </div>
-        <div class="permission-modal-actions">
-          ${isMcp ? `
-            <button class="button primary" data-permission="${permission.id}" data-decision="allow_once">允许一次</button>
-            <button class="button" data-permission="${permission.id}" data-decision="allow_always_tool">总是允许工具</button>
-            <button class="button" data-permission="${permission.id}" data-decision="allow_always_server" ${permission.serverName ? "" : "disabled"}>总是允许 server</button>
-          ` : `<button class="button primary" data-permission="${permission.id}" data-decision="approved">${icons.check}批准</button>`}
-          <button class="button danger" data-permission="${permission.id}" data-decision="rejected">${icons.close}拒绝</button>
-        </div>
-      </section>
-    </div>
-  `;
+  return "";
 }
 
 function renderMcpPermission(permission, canAct) {
-  const input = permission.toolInput ? JSON.stringify(permission.toolInput, null, 2) : permission.payload;
   return `
-    <div class="side-card permission-card">
+    <div class="permission-card">
       <div class="meta">${badge("MCP 工具", "amber")} ${permission.serverName ? badge(permission.serverName, "blue") : ""}</div>
       <h4>${escapeHtml(permission.summary)}</h4>
       <p>${escapeHtml(permission.reason || "Claude Code 请求使用该工具。")}</p>
-      <pre class="workspace">${escapeHtml(input || "")}</pre>
+      ${renderPermissionInput(permission)}
       <div class="meta">过期 ${fmt(permission.expiresAt)} · ${escapeHtml(permission.status)}</div>
       <div class="permission-actions">
         <button class="button primary" data-permission="${permission.id}" data-decision="allow_once" ${canAct ? "" : "disabled"}>允许一次</button>
@@ -704,6 +700,79 @@ function renderMcpPermission(permission, canAct) {
       </div>
     </div>
   `;
+}
+
+function renderPermissionInput(permission) {
+  const input = permission.toolInput && typeof permission.toolInput === "object" ? permission.toolInput : {};
+  const primary = [];
+  const secondary = [];
+  const used = new Set();
+  const addField = (key, label, tone = "") => {
+    if (input[key] === undefined || input[key] === null || input[key] === "") return;
+    primary.push({ key, label, value: input[key], tone });
+    used.add(key);
+  };
+
+  if (Array.isArray(input.questions)) {
+    primary.push({ key: "questions", label: "问题", value: renderQuestionSummary(input.questions), html: true });
+    used.add("questions");
+  }
+  addField("sql", "SQL", "code");
+  addField("query", "查询");
+  addField("command", "命令", "code");
+  addField("path", "路径");
+  addField("file_path", "文件");
+  addField("pattern", "匹配模式");
+  addField("url", "URL");
+  addField("description", "说明");
+
+  Object.entries(input).forEach(([key, value]) => {
+    if (used.has(key)) return;
+    secondary.push({ key, label: key, value });
+  });
+
+  if (!primary.length && permission.payload) {
+    primary.push({ key: "payload", label: "请求内容", value: permission.payload });
+  }
+
+  return `
+    <div class="permission-fields">
+      ${primary.map(renderPermissionField).join("")}
+      ${
+        secondary.length
+          ? `<details class="permission-extra"><summary>查看次要参数</summary>${secondary.map(renderPermissionField).join("")}</details>`
+          : ""
+      }
+    </div>
+  `;
+}
+
+function renderPermissionField(field) {
+  const value = field.html ? field.value : escapeHtml(compactText(field.value));
+  const valueHtml = field.tone === "code" ? `<pre class="permission-code">${value}</pre>` : `<div class="permission-value">${value}</div>`;
+  return `
+    <div class="permission-field">
+      <div class="permission-label">${escapeHtml(field.label)}</div>
+      ${valueHtml}
+    </div>
+  `;
+}
+
+function renderQuestionSummary(questions) {
+  return questions
+    .map((question, index) => {
+      const options = Array.isArray(question.options)
+        ? question.options.map((option) => `<li><strong>${escapeHtml(option.label || "")}</strong>${option.description ? `<span>${escapeHtml(option.description)}</span>` : ""}</li>`).join("")
+        : "";
+      return `
+        <div class="question-summary">
+          <strong>${escapeHtml(question.header || `问题 ${index + 1}`)}</strong>
+          <p>${escapeHtml(question.question || "")}</p>
+          ${options ? `<ul>${options}</ul>` : ""}
+        </div>
+      `;
+    })
+    .join("");
 }
 
 function renderSettings() {

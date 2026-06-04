@@ -543,7 +543,7 @@ function writeClaudeInput(runtime, payload) {
 }
 
 function titleFromPrompt(content) {
-  return String(content || "").replace(/\s+/g, " ").trim().slice(0, 10) || "新会话";
+  return String(content || "").replace(/\s+/g, " ").trim().slice(0, 50) || "新会话";
 }
 
 async function appendAgentMessage(session, agent, content = "", metadata = {}) {
@@ -840,7 +840,7 @@ async function createToolPermissionRequest(session, runtime, event) {
   await appendSessionMessage(
     session,
     "tool",
-    `${permission.summary}\n${permission.reason}\n${JSON.stringify(permission.toolInput || {}, null, 2)}`,
+    `${permission.summary}\n${permission.reason}`,
     runtime.agent.id,
     { type: "permission_request", permissionId: permission.id, toolName: permission.toolName, serverName: permission.serverName, turnId: runtime.turnId },
   );
@@ -852,6 +852,15 @@ async function createToolPermissionRequest(session, runtime, event) {
 }
 
 async function createSdkToolPermissionRequest(session, runtime, toolName, input = {}, options = {}) {
+  if (toolName === "AskUserQuestion") {
+    return {
+      behavior: "allow",
+      updatedInput: input,
+      toolUseID: options.toolUseID,
+      decisionClassification: "user_temporary",
+    };
+  }
+
   const info = normalizeToolPermissionRequest({
     tool_name: toolName,
     input,
@@ -893,7 +902,7 @@ async function createSdkToolPermissionRequest(session, runtime, toolName, input 
   await appendSessionMessage(
     session,
     "tool",
-    `${permission.summary}\n${permission.reason}\n${JSON.stringify(permission.toolInput || {}, null, 2)}`,
+    `${permission.summary}\n${permission.reason}`,
     runtime.agent.id,
     { type: "permission_request", permissionId: permission.id, toolName: permission.toolName, serverName: permission.serverName, turnId: runtime.turnId },
   );
