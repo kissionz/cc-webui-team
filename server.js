@@ -315,6 +315,12 @@ function getCurrentUser(req) {
   return user;
 }
 
+function revokeSessionsForUser(userId, exceptToken = null) {
+  for (const [token, session] of Object.entries(db.sessionsByToken || {})) {
+    if (session.userId === userId && token !== exceptToken) delete db.sessionsByToken[token];
+  }
+}
+
 async function readBody(req) {
   let body = "";
   for await (const chunk of req) body += chunk;
@@ -335,9 +341,31 @@ function audit(userId, action, targetType, targetId, metadata = {}) {
   db.auditLogs.push({ id: id("audit"), userId, action, targetType, targetId, metadata, createdAt: now() });
 }
 
+function canManageTeamSessions(user, teamId) {
+  return user.role === "admin" || ["owner", "admin"].includes(getTeamRole(teamId, user.id));
+}
+
+function canSeeSession(user, session) {
+  return Boolean(session) && canSeeTeam(user, session.teamId) && (canManageTeamSessions(user, session.teamId) || session.createdBy === user.id);
+}
+
+function canWriteSession(user, session) {
+  return Boolean(session) && canWriteTeam(user, session.teamId) && (canManageTeamSessions(user, session.teamId) || session.createdBy === user.id);
+}
+
+function eventVisibleToUser(event, user) {
+  if (!user || user.status !== "active") return false;
+  if (event.sessionId) return canSeeSession(user, db.sessions.find((session) => session.id === event.sessionId));
+  if (event.teamId) return canSeeTeam(user, event.teamId);
+  return true;
+}
+
 function broadcast(event) {
   const data = `data: ${JSON.stringify(event)}\n\n`;
-  for (const client of clients) client.write(data);
+  for (const client of clients) {
+    const user = db.users.find((item) => item.id === client.userId);
+    if (eventVisibleToUser(event, user)) client.res.write(data);
+  }
 }
 
 function getTeamRole(teamId, userId) {
@@ -375,7 +403,8 @@ function assertWorkspaceAllowed(workspacePath) {
 
 function bootstrapFor(user) {
   const teamIds = new Set(db.teams.filter((team) => canSeeTeam(user, team.id)).map((team) => team.id));
-  const sessionIds = new Set(db.sessions.filter((session) => teamIds.has(session.teamId)).map((session) => session.id));
+  const visibleSessions = db.sessions.filter((session) => teamIds.has(session.teamId) && canSeeSession(user, session));
+  const sessionIds = new Set(visibleSessions.map((session) => session.id));
   const auditLogs = user.role === "admin" ? db.auditLogs : db.auditLogs.filter((log) => log.userId === user.id);
   return {
     currentUserId: user.id,
@@ -383,7 +412,7 @@ function bootstrapFor(user) {
     teams: db.teams.filter((team) => teamIds.has(team.id)),
     members: db.members.filter((member) => teamIds.has(member.teamId)),
     agents: db.agents.filter((agent) => !agent.teamId || teamIds.has(agent.teamId)),
-    sessions: db.sessions.filter((session) => teamIds.has(session.teamId)),
+    sessions: visibleSessions,
     messages: recentMessagesForSessions(sessionIds, BOOTSTRAP_MESSAGES_PER_SESSION),
     permissions: db.permissions.filter((permission) => sessionIds.has(permission.sessionId)),
     fileChanges: db.fileChanges.filter((file) => sessionIds.has(file.sessionId)),
@@ -1199,13 +1228,28 @@ async function handleApi(req, res, pathname) {
     return send(res, 200, { ok: true }, { "Set-Cookie": "cc_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0" });
   }
 
+  if (pathname === "/api/auth/password" && req.method === "PATCH") {
+    const body = await readBody(req);
+    const currentPassword = String(body.currentPassword || "");
+    const newPassword = String(body.newPassword || "");
+    if (!verifyPassword(currentPassword, user.passwordHash)) return error(res, 400, "PASSWORD_CURRENT_INVALID", "Current password is incorrect.");
+    if (newPassword.trim().length < 6) return error(res, 400, "PASSWORD_WEAK", "Password must be at least 6 characters.");
+    user.passwordHash = hashPassword(newPassword);
+    user.updatedAt = now();
+    revokeSessionsForUser(user.id, parseCookies(req).cc_session);
+    audit(user.id, "user.password_changed", "user", user.id);
+    await saveDb();
+    return send(res, 200, { ok: true });
+  }
+
   if (pathname === "/api/bootstrap") return send(res, 200, bootstrapFor(user));
 
   if (pathname === "/api/events") {
     res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
     res.write("data: {\"type\":\"connected\"}\n\n");
-    clients.add(res);
-    req.on("close", () => clients.delete(res));
+    const client = { res, userId: user.id };
+    clients.add(client);
+    req.on("close", () => clients.delete(client));
     return;
   }
 
@@ -1286,7 +1330,7 @@ async function handleApi(req, res, pathname) {
   const deleteSessionMatch = pathname.match(/^\/api\/sessions\/([^/]+)$/);
   if (deleteSessionMatch && req.method === "DELETE") {
     const session = db.sessions.find((item) => item.id === deleteSessionMatch[1]);
-    if (!session || !canWriteTeam(user, session.teamId)) return error(res, 403, "PERMISSION_DENIED", "Cannot delete this session.");
+    if (!canWriteSession(user, session)) return error(res, 403, "PERMISSION_DENIED", "Cannot delete this session.");
     const runtime = getRuntime(session.id);
     if (runtime) stopRuntime(session.id);
     db.sessions = db.sessions.filter((item) => item.id !== session.id);
@@ -1302,7 +1346,7 @@ async function handleApi(req, res, pathname) {
   const messageMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/messages$/);
   if (messageMatch && req.method === "POST") {
     const session = db.sessions.find((item) => item.id === messageMatch[1]);
-    if (!session || !canWriteTeam(user, session.teamId)) return error(res, 403, "PERMISSION_DENIED", "Cannot send messages.");
+    if (!canWriteSession(user, session)) return error(res, 403, "PERMISSION_DENIED", "Cannot send messages.");
     const body = await readBody(req);
     const content = String(body.content || "").trim();
     if (!content) return error(res, 400, "MESSAGE_EMPTY", "Message cannot be empty.");
@@ -1329,7 +1373,7 @@ async function handleApi(req, res, pathname) {
   const stopMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/stop$/);
   if (stopMatch && req.method === "POST") {
     const session = db.sessions.find((item) => item.id === stopMatch[1]);
-    if (!session || !canWriteTeam(user, session.teamId)) return error(res, 403, "PERMISSION_DENIED", "Cannot stop sessions.");
+    if (!canWriteSession(user, session)) return error(res, 403, "PERMISSION_DENIED", "Cannot stop sessions.");
     stopRuntime(session.id);
     session.status = "stopped";
     const agent = db.agents.find((item) => item.id === session.agentId);
@@ -1446,6 +1490,22 @@ async function handleApi(req, res, pathname) {
     target.status = target.status === "active" ? "disabled" : "active";
     target.updatedAt = now();
     audit(user.id, "user.status_changed", "user", target.id);
+    await saveDb();
+    return send(res, 200, { user: publicUser(target) });
+  }
+
+  const userPasswordMatch = pathname.match(/^\/api\/users\/([^/]+)\/password$/);
+  if (userPasswordMatch && req.method === "PATCH") {
+    if (user.role !== "admin") return error(res, 403, "PERMISSION_DENIED", "Admin required.");
+    const target = db.users.find((item) => item.id === userPasswordMatch[1]);
+    if (!target) return error(res, 404, "USER_NOT_FOUND", "User not found.");
+    const body = await readBody(req);
+    const newPassword = String(body.newPassword || "");
+    if (newPassword.trim().length < 6) return error(res, 400, "PASSWORD_WEAK", "Password must be at least 6 characters.");
+    target.passwordHash = hashPassword(newPassword);
+    target.updatedAt = now();
+    revokeSessionsForUser(target.id, target.id === user.id ? parseCookies(req).cc_session : null);
+    audit(user.id, "user.password_reset", "user", target.id);
     await saveDb();
     return send(res, 200, { user: publicUser(target) });
   }

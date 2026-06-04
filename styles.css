@@ -1065,6 +1065,20 @@ select:disabled {
   background: #fff;
 }
 
+.user-actions,
+.inline-password-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.compact-input {
+  width: min(180px, 100%);
+  min-height: 34px;
+  padding: 7px 10px;
+}
+
 .agent-row {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;

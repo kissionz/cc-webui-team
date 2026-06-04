@@ -355,6 +355,7 @@ function appRoot(inner) {
               <div class="brand-subtitle">${escapeHtml(user?.role || "")}</div>
             </div>
           </div>
+          <button class="nav-button" style="margin-top:12px" data-modal="password">${icons.settings}<span>改密码</span></button>
           <button class="nav-button" style="margin-top:12px" data-action="logout">${icons.logout}<span>退出</span></button>
         </div>
       </aside>
@@ -923,7 +924,15 @@ function renderUsers() {
         <td>${escapeHtml(user.username)}</td>
         <td>${badge(user.role, user.role === "admin" ? "blue" : "")}</td>
         <td>${badge(user.status, user.status === "active" ? "green" : "red")}</td>
-        <td><button class="button" data-toggle-user="${user.id}">${user.status === "active" ? "禁用" : "启用"}</button></td>
+        <td>
+          <div class="user-actions">
+            <form class="inline-password-form" data-form="admin-password" data-user-id="${user.id}">
+              <input class="input compact-input" name="newPassword" type="password" autocomplete="new-password" placeholder="新密码" required />
+              <button class="button" type="submit">改密码</button>
+            </form>
+            <button class="button" data-toggle-user="${user.id}" ${user.id === state.currentUserId ? "disabled" : ""}>${user.status === "active" ? "禁用" : "启用"}</button>
+          </div>
+        </td>
       </tr>
     `)
     .join("");
@@ -957,6 +966,22 @@ function statusTone(status) {
 
 function renderModal(kind, teamId = state.selectedTeamId) {
   if (!kind) return "";
+  if (kind === "password") {
+    return `
+      <div class="modal-backdrop" data-close-modal>
+        <form class="modal" data-form="password">
+          <div class="modal-head"><h3>修改密码</h3></div>
+          <div class="modal-body grid">
+            <div class="field"><label>当前密码</label><input class="input" name="currentPassword" type="password" autocomplete="current-password" required /></div>
+            <div class="field"><label>新密码</label><input class="input" name="newPassword" type="password" autocomplete="new-password" required /></div>
+            <div class="field"><label>确认新密码</label><input class="input" name="confirmPassword" type="password" autocomplete="new-password" required /></div>
+            <div class="helper">修改后，除当前浏览器外的其他登录态会失效。</div>
+          </div>
+          <div class="modal-actions"><button class="button" type="button" data-close-modal>取消</button><button class="button primary" type="submit">保存</button></div>
+        </form>
+      </div>
+    `;
+  }
   if (kind === "team") {
     return `
       <div class="modal-backdrop" data-close-modal>
@@ -1118,6 +1143,33 @@ async function createUser(form) {
   await refresh();
 }
 
+async function changeOwnPassword(form) {
+  const data = new FormData(form);
+  const newPassword = String(data.get("newPassword") || "");
+  const confirmPassword = String(data.get("confirmPassword") || "");
+  if (newPassword !== confirmPassword) throw new Error("两次输入的新密码不一致");
+  await api("/api/auth/password", {
+    method: "PATCH",
+    body: JSON.stringify({
+      currentPassword: String(data.get("currentPassword") || ""),
+      newPassword,
+    }),
+  });
+  activeModal = "";
+  form.reset();
+  await refresh();
+}
+
+async function resetUserPassword(form) {
+  const data = new FormData(form);
+  await api(`/api/users/${form.dataset.userId}/password`, {
+    method: "PATCH",
+    body: JSON.stringify({ newPassword: String(data.get("newPassword") || "") }),
+  });
+  form.reset();
+  await refresh();
+}
+
 async function addMember(form) {
   const data = new FormData(form);
   const teamId = form.dataset.team;
@@ -1159,6 +1211,8 @@ document.addEventListener("submit", async (event) => {
     if (kind === "team") await createTeam(form);
     if (kind === "message") await sendMessage(form);
     if (kind === "user") await createUser(form);
+    if (kind === "password") await changeOwnPassword(form);
+    if (kind === "admin-password") await resetUserPassword(form);
     if (kind === "member") await addMember(form);
     if (kind === "config") await saveConfig(form);
     if (kind === "workspace") await saveWorkspace(form);
