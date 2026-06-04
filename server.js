@@ -3,7 +3,8 @@ import { createReadStream, existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, writeFile, stat } from "node:fs/promises";
 import { delimiter, dirname, extname, isAbsolute, join, normalize, resolve } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
-import { randomBytes, randomUUID, pbkdf2Sync, timingSafeEqual } from "node:crypto";
+import { randomBytes, pbkdf2Sync, timingSafeEqual } from "node:crypto";
+import { query } from "@anthropic-ai/claude-agent-sdk";
 
 const root = process.cwd();
 
@@ -487,11 +488,6 @@ function approvedToolSpecs(session) {
   return [...specs];
 }
 
-function buildToolPolicyArgs(session) {
-  const specs = approvedToolSpecs(session);
-  return specs.length ? ["--allowedTools", specs.join(",")] : [];
-}
-
 function isToolApprovedByPolicy(session, toolName) {
   const approvals = ensureToolApprovals(session);
   const parsed = parseMcpToolName(toolName);
@@ -519,6 +515,25 @@ function applyToolApproval(session, permission, decision) {
 function clearOnceToolApprovals(session) {
   const approvals = ensureToolApprovals(session);
   if (approvals.onceTools.length) approvals.onceTools = [];
+}
+
+function permissionUpdatesForDecision(permission, decision, suggestions = []) {
+  if (decision === "allow_once") return [];
+  if (decision === "allow_always_tool" && Array.isArray(suggestions) && suggestions.length) return suggestions;
+  const toolName = permission.toolName || permission.metadata?.toolName;
+  const serverName = permission.serverName || permission.metadata?.serverName;
+  const rules = [];
+  if (decision === "allow_always_server" && serverName) {
+    rules.push({ toolName: `mcp__${serverName}__*` });
+  } else if (toolName) {
+    rules.push({ toolName });
+  }
+  return rules.length ? [{ type: "addRules", rules, behavior: "allow", destination: "session" }] : [];
+}
+
+function permissionClassification(decision, approved) {
+  if (!approved) return "user_reject";
+  return decision === "allow_once" ? "user_temporary" : "user_permanent";
 }
 
 function writeClaudeInput(runtime, payload) {
@@ -578,6 +593,13 @@ function stopRuntime(sessionId) {
   runtime.stoppedForRestart = true;
   runtime.exited = true;
   clearRuntimeHeartbeat(runtime);
+  if (runtime.abortController) runtime.abortController.abort();
+  if (runtime.pendingPermissionResolvers) {
+    for (const resolver of runtime.pendingPermissionResolvers.values()) {
+      resolver({ behavior: "deny", message: "Session stopped.", decisionClassification: "user_reject" });
+    }
+    runtime.pendingPermissionResolvers.clear();
+  }
   if (runtime.child && !runtime.child.killed) runtime.child.kill("SIGINT");
   running.delete(sessionId);
 }
@@ -641,9 +663,32 @@ function extractClaudeTextPart(part) {
   return part.text || part.content || part.delta?.text || part.delta?.content || "";
 }
 
+async function handleClaudeSdkStreamEvent(session, runtime, event) {
+  const raw = event?.event || {};
+  if (!raw || typeof raw !== "object") return;
+  if (raw.type === "content_block_start" && raw.content_block?.type === "tool_use") {
+    await upsertToolStreamMessage(session, runtime, raw.content_block, "running");
+    return;
+  }
+  if (raw.type !== "content_block_delta") return;
+  const delta = raw.delta || {};
+  if (delta.type === "text_delta" && delta.text) {
+    runtime.usedPartialText = true;
+    runtime.finalText += delta.text;
+    await appendMessageDelta(session, runtime.currentMessage, delta.text, { ...runtime.currentMessage.metadata, claudeSessionId: session.claudeSessionId || null });
+  } else if ((delta.type === "thinking_delta" || delta.type === "signature_delta") && delta.thinking) {
+    await appendThinkingDelta(session, runtime, delta.thinking, "正在分析");
+  }
+}
+
 async function handleClaudeStreamEvent(session, runtime, event) {
   if (!event || typeof event !== "object") return;
   if (event.session_id) session.claudeSessionId = event.session_id;
+
+  if (event.type === "stream_event") {
+    await handleClaudeSdkStreamEvent(session, runtime, event);
+    return;
+  }
 
   if (event.type === "control_request") {
     if (event.request?.subtype === "can_use_tool") {
@@ -675,6 +720,7 @@ async function handleClaudeStreamEvent(session, runtime, event) {
       const partType = part?.type || "text";
       const key = `${messageId}:${index}:${partType}`;
       if (partType === "text") {
+        if (runtime.usedPartialText) continue;
         const delta = streamPartDelta(runtime, key, extractClaudeTextPart(part));
         runtime.finalText += delta;
         await appendMessageDelta(session, runtime.currentMessage, delta, { ...runtime.currentMessage.metadata, claudeSessionId: session.claudeSessionId || null });
@@ -706,7 +752,7 @@ async function handleClaudeStreamEvent(session, runtime, event) {
       runtime.finalText = String(event.result);
       await appendMessageDelta(session, runtime.currentMessage, runtime.finalText, { ...runtime.currentMessage.metadata, claudeSessionId: session.claudeSessionId || null });
     }
-    if (!runtime.completionScheduled) {
+    if (!runtime.sdk && !runtime.completionScheduled) {
       runtime.completionScheduled = true;
       setTimeout(() => {
         completeClaudeTurn(session, runtime, 0).catch((err) => {
@@ -805,6 +851,72 @@ async function createToolPermissionRequest(session, runtime, event) {
   return permission;
 }
 
+async function createSdkToolPermissionRequest(session, runtime, toolName, input = {}, options = {}) {
+  const info = normalizeToolPermissionRequest({
+    tool_name: toolName,
+    input,
+    reason: options.title || options.decisionReason || options.description,
+  });
+  if (isToolApprovedByPolicy(session, info.toolName)) {
+    return {
+      behavior: "allow",
+      updatedInput: input,
+      toolUseID: options.toolUseID,
+      decisionClassification: "user_permanent",
+    };
+  }
+
+  const permission = {
+    id: id("perm"),
+    sessionId: session.id,
+    agentId: session.agentId,
+    requestedByUserId: session.createdBy,
+    type: "mcp_tool",
+    risk: info.toolName.startsWith("mcp__") ? "medium" : "low",
+    summary: options.title || `Claude Code 请求使用 ${info.serverName ? `${info.serverName} / ` : ""}${info.displayName}`,
+    payload: runtime.prompt || "",
+    turnId: runtime.turnId,
+    status: "pending",
+    toolName: info.toolName,
+    serverName: info.serverName,
+    toolInput: input || {},
+    reason: options.description || options.decisionReason || "Claude Code 请求使用该工具。",
+    toolUseId: options.toolUseID,
+    permissionSuggestions: options.suggestions || [],
+    sdkPermission: true,
+    expiresAt: now() + 1000 * 60 * 30,
+    createdAt: now(),
+  };
+  db.permissions.push(permission);
+  session.status = "waiting_permission";
+  runtime.agent.status = "waiting";
+  await appendSessionMessage(
+    session,
+    "tool",
+    `${permission.summary}\n${permission.reason}\n${JSON.stringify(permission.toolInput || {}, null, 2)}`,
+    runtime.agent.id,
+    { type: "permission_request", permissionId: permission.id, toolName: permission.toolName, serverName: permission.serverName, turnId: runtime.turnId },
+  );
+  audit(session.createdBy, "permission.created", "permission", permission.id, { type: permission.type, toolName: permission.toolName, serverName: permission.serverName, sdkPermission: true });
+  await saveDb();
+  broadcast({ type: "permission.created", sessionId: session.id, permissionId: permission.id });
+  broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
+
+  return new Promise((resolvePermission) => {
+    runtime.pendingPermissionResolvers.set(permission.id, resolvePermission);
+    options.signal?.addEventListener?.("abort", () => {
+      if (!runtime.pendingPermissionResolvers.has(permission.id)) return;
+      runtime.pendingPermissionResolvers.delete(permission.id);
+      resolvePermission({
+        behavior: "deny",
+        message: "Permission request was aborted.",
+        toolUseID: permission.toolUseId,
+        decisionClassification: "user_reject",
+      });
+    }, { once: true });
+  });
+}
+
 async function createFallbackToolPermission(session, runtime, request) {
   const info = normalizeToolPermissionRequest(request);
   if (db.permissions.some((permission) => permission.sessionId === session.id && permission.turnId === runtime.turnId && permission.status === "pending" && permission.toolName === info.toolName)) return null;
@@ -863,8 +975,8 @@ async function completeClaudeTurn(session, runtime, code = 0) {
   if (!runtime.currentMessage || runtime.turnCompleted) return;
   runtime.turnCompleted = true;
   clearRuntimeHeartbeat(runtime);
-  await runtime.streamQueue;
-  await flushClaudeStreamBuffer(session, runtime);
+  if (runtime.streamQueue) await runtime.streamQueue;
+  if (runtime.streamBuffer !== undefined) await flushClaudeStreamBuffer(session, runtime);
   await finishTurnThinking(session, runtime);
   const resultText = runtime.finalText || runtime.result?.result || runtime.result?.message || "";
   if (!String(runtime.currentMessage.content || "").trim()) {
@@ -892,6 +1004,7 @@ async function completeClaudeTurn(session, runtime, code = 0) {
   runtime.stderr = "";
   runtime.streamParts = new Map();
   runtime.toolMessages = new Map();
+  runtime.pendingPermissionResolvers?.clear();
   await saveDb();
   broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
 }
@@ -922,6 +1035,52 @@ async function flushClaudeStreamBuffer(session, runtime) {
   }
 }
 
+function resolvePosixCommandPath(command) {
+  if (!command) return null;
+  if ((isAbsolute(command) || command.includes("/")) && existsSync(command)) return command;
+  try {
+    return execFileSync("which", [command], { encoding: "utf8" }).trim().split(/\r?\n/)[0] || command;
+  } catch {
+    return command;
+  }
+}
+
+function claudeSdkLaunchOptions(command) {
+  if (IS_WINDOWS) {
+    const resolved = resolveWindowsCli(command, []);
+    if (resolved?.command === process.execPath && resolved.args?.[0]) {
+      return { pathToClaudeCodeExecutable: resolved.args[0], executable: "node" };
+    }
+    return { pathToClaudeCodeExecutable: resolved?.command || command };
+  }
+  const resolved = resolvePosixCommandPath(command);
+  return resolved?.endsWith(".js")
+    ? { pathToClaudeCodeExecutable: resolved, executable: "node" }
+    : { pathToClaudeCodeExecutable: resolved || command };
+}
+
+function cliArgsToExtraArgs(args) {
+  const extraArgs = {};
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg.startsWith("--")) continue;
+    const eq = arg.indexOf("=");
+    if (eq > 2) {
+      extraArgs[arg.slice(2, eq)] = arg.slice(eq + 1);
+      continue;
+    }
+    const key = arg.slice(2);
+    const next = args[index + 1];
+    if (!next || next.startsWith("-")) {
+      extraArgs[key] = null;
+    } else {
+      extraArgs[key] = next;
+      index += 1;
+    }
+  }
+  return extraArgs;
+}
+
 async function submitClaudeTurn(session, prompt, turnId) {
   const agent = db.agents.find((item) => item.id === session.agentId);
   const message = await appendAgentMessage(session, agent, "", { turnId });
@@ -931,95 +1090,74 @@ async function submitClaudeTurn(session, prompt, turnId) {
   await saveDb();
   broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
 
-  let runtime = getRuntime(session.id);
-  if (!runtime || runtime.exited || runtime.child?.killed) {
-    runtime = await startClaudeRuntime(session, agent);
-  }
-  runtime.agent = agent;
-  runtime.currentMessage = message;
-  runtime.turnId = turnId;
-  runtime.prompt = prompt;
-  runtime.lastOutputAt = now();
-  runtime.heartbeatCount = 0;
-  runtime.heartbeatMessage = await appendSessionMessage(session, "tool", "", agent.id, { type: "thinking", status: "thinking", subject: "正在分析", waitedSeconds: 0, turnId });
-  runtime.streamParts = new Map();
-  runtime.toolMessages = new Map();
-  runtime.result = null;
-  runtime.finalText = "";
-  runtime.stderr = "";
-  runtime.completionScheduled = false;
-  runtime.turnCompleted = false;
+  const abortController = new AbortController();
+  const runtime = {
+    sdk: true,
+    abortController,
+    agent,
+    currentMessage: message,
+    turnId,
+    prompt,
+    lastOutputAt: now(),
+    heartbeat: null,
+    heartbeatCount: 0,
+    heartbeatMessage: await appendSessionMessage(session, "tool", "", agent.id, { type: "thinking", status: "thinking", subject: "正在分析", waitedSeconds: 0, turnId }),
+    streamParts: new Map(),
+    toolMessages: new Map(),
+    pendingPermissionResolvers: new Map(),
+    result: null,
+    finalText: "",
+    stderr: "",
+    exited: false,
+    turnCompleted: false,
+    usedPartialText: false,
+  };
+  running.set(session.id, runtime);
   startTurnHeartbeat(session, runtime);
 
-  const ok = writeClaudeInput(runtime, {
-    type: "user",
-    uuid: randomUUID(),
-    session_id: session.claudeSessionId || runtime.localSessionId,
-    parent_tool_use_id: null,
-    message: { role: "user", content: prompt },
-  });
-  if (!ok) {
-    await updateSessionMessage(session, message, "[agent error] Claude Code stdin is not available.", { ...message.metadata, error: "stdin unavailable" });
-    await completeClaudeTurn(session, runtime, 1);
-  }
-}
-
-async function startClaudeRuntime(session, agent) {
   const extraArgs = sanitizeClaudeExtraArgs(String(db.claudeConfig.args || "").split(" ").filter(Boolean));
-  const args = ["-p", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json", "--include-partial-messages", "--replay-user-messages", ...buildToolPolicyArgs(session), ...extraArgs];
-  if (session.claudeSessionId) args.push("--resume", session.claudeSessionId);
+  const sdkLaunch = claudeSdkLaunchOptions(db.claudeConfig.command);
+  const sdkOptions = {
+    abortController,
+    cwd: session.cwd,
+    env: { ...process.env, TERM: "xterm-256color" },
+    includePartialMessages: true,
+    allowedTools: approvedToolSpecs(session),
+    extraArgs: cliArgsToExtraArgs(extraArgs),
+    ...(session.claudeSessionId ? { resume: session.claudeSessionId } : {}),
+    ...sdkLaunch,
+    canUseTool: (toolName, input, options) => createSdkToolPermissionRequest(session, runtime, toolName, input, options),
+  };
   await mkdir(session.cwd, { recursive: true });
   await appendSessionMessage(
     session,
     "tool",
-    `${session.claudeSessionId ? "恢复 Claude Code 流式会话" : "启动 Claude Code 流式会话"}\ncommand: ${db.claudeConfig.command}\nargs: ${args.join(" ")}\ncwd: ${session.cwd}`,
+    `${session.claudeSessionId ? "恢复 Claude Code SDK 会话" : "启动 Claude Code SDK 会话"}\ncommand: ${sdkLaunch.pathToClaudeCodeExecutable || db.claudeConfig.command}\nallowedTools: ${sdkOptions.allowedTools.length ? sdkOptions.allowedTools.join(", ") : "(none)"}\ncwd: ${session.cwd}`,
     agent.id,
-    { type: "command", command: db.claudeConfig.command, args, cwd: session.cwd, claudeSessionId: session.claudeSessionId || null },
+    { type: "command", command: sdkLaunch.pathToClaudeCodeExecutable || db.claudeConfig.command, args: sdkOptions.allowedTools, cwd: session.cwd, claudeSessionId: session.claudeSessionId || null, runtime: "sdk" },
   );
 
-  const child = spawnCli(db.claudeConfig.command, args, {
-    cwd: session.cwd,
-    env: { ...process.env, TERM: "xterm-256color" },
-  });
-  const runtime = { child, agent, currentMessage: null, turnId: null, prompt: "", localSessionId: randomUUID(), lastOutputAt: now(), heartbeat: null, heartbeatCount: 0, heartbeatMessage: null, streamBuffer: "", streamParts: new Map(), streamQueue: Promise.resolve(), toolMessages: new Map(), result: null, finalText: "", stderr: "", exited: false };
-  running.set(session.id, runtime);
-
-  child.stdout.on("data", (chunk) => {
-    runtime.lastOutputAt = now();
-    runtime.streamQueue = runtime.streamQueue.then(() => consumeClaudeStreamChunk(session, runtime, chunk));
-  });
-  child.stderr.on("data", (chunk) => {
-    const text = chunk.toString();
-    if (/Warning: no stdin data received/i.test(text)) return;
-    runtime.lastOutputAt = now();
-    runtime.stderr += text;
-  });
-  child.on("error", async (err) => {
-    clearRuntimeHeartbeat(runtime);
-    if (runtime.currentMessage) {
-      await finishTurnThinking(session, runtime);
-      await updateSessionMessage(session, runtime.currentMessage, `[agent error] ${err.message}`, { ...runtime.currentMessage.metadata, error: err.message });
+  try {
+    for await (const event of query({ prompt, options: sdkOptions })) {
+      runtime.lastOutputAt = now();
+      await handleClaudeStreamEvent(session, runtime, event);
     }
-    session.status = "failed";
-    agent.status = "idle";
-    if (getRuntime(session.id) === runtime) running.delete(session.id);
-    await saveDb();
-    broadcast({ type: "agent.error", sessionId: session.id, message: err.message });
-  });
-  child.on("close", async (code) => {
+    await completeClaudeTurn(session, runtime, 0);
+  } catch (err) {
+    runtime.stderr += `\n${err.message || String(err)}`;
+    if (runtime.currentMessage && !runtime.turnCompleted) {
+      await updateSessionMessage(session, runtime.currentMessage, `[agent error] ${err.message || String(err)}`, { ...runtime.currentMessage.metadata, error: err.message || String(err) });
+      await completeClaudeTurn(session, runtime, 1);
+    }
+    broadcast({ type: "agent.error", sessionId: session.id, message: err.message || String(err) });
+  } finally {
     runtime.exited = true;
     clearRuntimeHeartbeat(runtime);
-    if (runtime.stoppedForRestart) return;
     if (getRuntime(session.id) === runtime) running.delete(session.id);
-    await runtime.streamQueue;
-    await flushClaudeStreamBuffer(session, runtime);
-    if (runtime.currentMessage && !runtime.turnCompleted) await completeClaudeTurn(session, runtime, code || 0);
-    if (session.status === "running" || session.status === "waiting_permission") session.status = code === 0 ? "completed" : "failed";
     agent.status = "idle";
     await saveDb();
     broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
-  });
-  return runtime;
+  }
 }
 
 async function handleApi(req, res, pathname) {
@@ -1141,8 +1279,7 @@ async function handleApi(req, res, pathname) {
     const session = db.sessions.find((item) => item.id === deleteSessionMatch[1]);
     if (!session || !canWriteTeam(user, session.teamId)) return error(res, 403, "PERMISSION_DENIED", "Cannot delete this session.");
     const runtime = getRuntime(session.id);
-    if (runtime?.child) runtime.child.kill("SIGINT");
-    running.delete(session.id);
+    if (runtime) stopRuntime(session.id);
     db.sessions = db.sessions.filter((item) => item.id !== session.id);
     db.messages = db.messages.filter((message) => message.sessionId !== session.id);
     db.permissions = db.permissions.filter((permission) => permission.sessionId !== session.id);
@@ -1184,8 +1321,7 @@ async function handleApi(req, res, pathname) {
   if (stopMatch && req.method === "POST") {
     const session = db.sessions.find((item) => item.id === stopMatch[1]);
     if (!session || !canWriteTeam(user, session.teamId)) return error(res, 403, "PERMISSION_DENIED", "Cannot stop sessions.");
-    const runtime = getRuntime(session.id);
-    if (runtime?.child) runtime.child.kill("SIGINT");
+    stopRuntime(session.id);
     session.status = "stopped";
     const agent = db.agents.find((item) => item.id === session.agentId);
     if (agent) agent.status = "idle";
@@ -1209,21 +1345,53 @@ async function handleApi(req, res, pathname) {
     const runtime = session ? getRuntime(session.id) : null;
     if (permission.status === "approved" && permission.type === "mcp_tool") {
       if (!permission.controlRequestId || decision !== "allow_once") applyToolApproval(session, permission, decision);
-      if (permission.controlRequestId && (!runtime || !writePermissionResponse(runtime, permission.controlRequestId, "allow", permission.toolInput || {}, permission.toolUseId))) {
+      if (permission.sdkPermission) {
+        const resolver = runtime?.pendingPermissionResolvers?.get(permission.id);
+        if (!resolver) {
+          permission.status = "pending";
+          permission.decidedBy = undefined;
+          permission.decidedAt = undefined;
+          permission.decision = undefined;
+          return error(res, 409, "PERMISSION_RUNTIME_MISSING", "Claude Code is no longer waiting for this permission.");
+        }
+        runtime.pendingPermissionResolvers.delete(permission.id);
+        resolver({
+          behavior: "allow",
+          updatedInput: permission.toolInput || {},
+          updatedPermissions: permissionUpdatesForDecision(permission, decision, permission.permissionSuggestions || []),
+          toolUseID: permission.toolUseId,
+          decisionClassification: permissionClassification(decision, true),
+        });
+        session.status = "running";
+        runtime.agent.status = "running";
+      } else if (permission.controlRequestId && (!runtime || !writePermissionResponse(runtime, permission.controlRequestId, "allow", permission.toolInput || {}, permission.toolUseId))) {
         permission.status = "pending";
         permission.decidedBy = undefined;
         permission.decidedAt = undefined;
         permission.decision = undefined;
         return error(res, 409, "PERMISSION_RUNTIME_MISSING", "Claude Code is no longer waiting for this permission.");
       }
-      if (permission.controlRequestId) {
+      if (permission.controlRequestId && !permission.sdkPermission) {
         session.status = "running";
         runtime.agent.status = "running";
       }
     }
     if (permission.status === "rejected" && permission.type === "mcp_tool") {
-      if (runtime && permission.controlRequestId) writePermissionResponse(runtime, permission.controlRequestId, "deny", undefined, permission.toolUseId, "User denied permission");
-      if (permission.controlRequestId) {
+      if (permission.sdkPermission) {
+        const resolver = runtime?.pendingPermissionResolvers?.get(permission.id);
+        if (resolver) {
+          runtime.pendingPermissionResolvers.delete(permission.id);
+          resolver({
+            behavior: "deny",
+            message: "User denied permission",
+            toolUseID: permission.toolUseId,
+            decisionClassification: permissionClassification(decision, false),
+          });
+        }
+        session.status = "running";
+        if (runtime?.agent) runtime.agent.status = "running";
+      } else if (runtime && permission.controlRequestId) writePermissionResponse(runtime, permission.controlRequestId, "deny", undefined, permission.toolUseId, "User denied permission");
+      if (permission.controlRequestId || permission.sdkPermission) {
         session.status = "running";
         if (runtime?.agent) runtime.agent.status = "running";
       } else {
@@ -1235,7 +1403,7 @@ async function handleApi(req, res, pathname) {
     await saveDb();
     broadcast({ type: "permission.updated", sessionId: session.id, permissionId: permission.id, status: permission.status });
     if (permission.type === "platform_gate" && permission.status === "approved") submitClaudeTurn(session, permission.payload, permission.turnId);
-    else if (permission.type === "mcp_tool" && permission.status === "approved" && !permission.controlRequestId) {
+    else if (permission.type === "mcp_tool" && permission.status === "approved" && !permission.controlRequestId && !permission.sdkPermission) {
       const nextTurnId = id("turn");
       const payload = permission.payload || "继续上一轮任务。";
       stopRuntime(session.id);

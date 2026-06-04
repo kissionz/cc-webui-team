@@ -97,7 +97,7 @@ docker compose -f docker-compose.yml -f docker-compose.host-claude.yml up -d --b
 
 ```text
 CLAUDE_COMMAND=/opt/claude-code/cli.js
-CLAUDE_ARGS=-p
+CLAUDE_ARGS=
 ```
 
 生产环境不要把 `~/.claude`、`.env`、`.host-claude/` 暴露给前端或提交到仓库。
@@ -158,7 +158,7 @@ $env:CLAUDE_ARGS=""
 npm start
 ```
 
-后端会自动使用 `claude -p --output-format json` 调用 Claude Code，并保存返回的 `session_id`。同一个 Web 会话后续消息会自动追加 `--resume <session_id>`，从而恢复 Claude Code 上下文。`CLAUDE_ARGS` 只用于额外参数，不要填写 `-p` 或 `--output-format`。
+后端通过官方 `@anthropic-ai/claude-agent-sdk` 调用宿主机 Claude Code，并保存返回的 `session_id`。同一个 Web 会话后续消息会自动用 `resume` 恢复 Claude Code 上下文。`CLAUDE_ARGS` 只用于额外参数，不要填写 `-p`、`--output-format`、`--input-format`、`--resume` 或 `--allowedTools`。
 
 访问：
 
@@ -247,9 +247,9 @@ Remove-Item Env:\RESET_DEFAULT_TEAM_WORKSPACE
 
 ## MCP / 工具授权说明
 
-当前版本只实现了 Web 平台自己的敏感任务审批，尚未接入 Claude Code CLI 的 MCP 工具授权确认通道。因此如果 Claude Code 返回“需要授权 MCP 工具”的提示，页面里目前不会出现可点击的 MCP 授权弹窗。
+后端使用 Claude Agent SDK 的 `canUseTool` 回调接入 Claude Code 原生工具授权。Claude Code 请求使用 MCP 工具或受限工具时，后端会暂停在该工具调用节点，生成待审批记录，通过 SSE 推给前端。用户选择“允许一次 / 总是允许工具 / 总是允许 server / 拒绝”后，审批结果会回传给 SDK，Claude Code 在同一轮任务中继续执行。
 
-要做成 AionUi 那种体验，需要后端接入 Claude Code 的权限请求机制，把工具名、MCP server、参数摘要和确认选项存成待处理授权，再通过 SSE 推给前端确认。不要只在前端做一个假确认按钮；真正的授权结果必须能回传给 Claude Code 运行流程。
+如果某些旧版 CLI 或特殊权限路径没有触发 `canUseTool`，后端仍保留 `allowedTools + resume` 兜底逻辑；这种情况下续跑 prompt 会静默发送，不会显示成用户聊天气泡。
 
 ## 生产建议
 
