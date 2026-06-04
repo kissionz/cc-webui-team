@@ -734,6 +734,13 @@ async function createToolPermissionRequest(session, runtime, event) {
   db.permissions.push(permission);
   session.status = "waiting_permission";
   runtime.agent.status = "waiting";
+  await appendSessionMessage(
+    session,
+    "tool",
+    `${permission.summary}\n${permission.reason}\n${JSON.stringify(permission.toolInput || {}, null, 2)}`,
+    runtime.agent.id,
+    { type: "permission_request", permissionId: permission.id, toolName: permission.toolName, serverName: permission.serverName, turnId: runtime.turnId },
+  );
   audit(session.createdBy, "permission.created", "permission", permission.id, { type: permission.type, toolName: permission.toolName, serverName: permission.serverName });
   await saveDb();
   broadcast({ type: "permission.created", sessionId: session.id, permissionId: permission.id });

@@ -160,6 +160,11 @@ function applyRealtimeEvent(event) {
     return;
   }
 
+  if (event.type === "permission.created" || event.type === "permission.updated") {
+    scheduleRefresh();
+    return;
+  }
+
   scheduleRefresh();
 }
 
@@ -559,6 +564,9 @@ function timelineEventMeta(message) {
     const running = message.metadata?.status === "running";
     return { title: `${running ? "正在调用" : "已调用"} ${message.metadata?.name || "工具"}`, detail: message.content, icon: icons.terminal, tone: running ? "pending" : "done", spinner: running };
   }
+  if (type === "permission_request") {
+    return { title: `等待授权 ${message.metadata?.serverName ? `${message.metadata.serverName} / ` : ""}${message.metadata?.toolName || ""}`, detail: message.content, icon: icons.info, tone: "pending", spinner: true };
+  }
   if (type === "heartbeat" || type === "thinking") {
     const done = message.metadata?.status === "done";
     const durationMs = Number(message.metadata?.durationMs || 0);
@@ -638,6 +646,43 @@ function renderPermission(permission) {
         <button class="button primary" data-permission="${permission.id}" data-decision="approved" ${canAct ? "" : "disabled"}>${icons.check}批准</button>
         <button class="button danger" data-permission="${permission.id}" data-decision="rejected" ${canAct ? "" : "disabled"}>${icons.close}拒绝</button>
       </div>
+    </div>
+  `;
+}
+
+function pendingSelectedPermission() {
+  return state.permissions.find((permission) => permission.sessionId === state.selectedSessionId && permission.status === "pending" && canApprove(permission));
+}
+
+function renderPermissionOverlay() {
+  const permission = pendingSelectedPermission();
+  if (!permission || activeModal) return "";
+  const input = permission.toolInput ? JSON.stringify(permission.toolInput, null, 2) : permission.payload;
+  const isMcp = permission.type === "mcp_tool";
+  return `
+    <div class="permission-backdrop">
+      <section class="permission-modal" role="dialog" aria-modal="true">
+        <div class="permission-modal-head">
+          <div>
+            <div class="meta">${badge(isMcp ? "MCP 工具授权" : "平台审批", "amber")} ${permission.serverName ? badge(permission.serverName, "blue") : ""}</div>
+            <h3>${escapeHtml(permission.summary)}</h3>
+          </div>
+          <span class="status-dot waiting" title="等待审批"></span>
+        </div>
+        <div class="permission-modal-body">
+          <p>${escapeHtml(permission.reason || "Claude Code 请求继续执行需要授权。")}</p>
+          <pre class="workspace">${escapeHtml(input || "")}</pre>
+          <div class="meta">请求时间 ${fmt(permission.createdAt)} · 过期 ${fmt(permission.expiresAt)}</div>
+        </div>
+        <div class="permission-modal-actions">
+          ${isMcp ? `
+            <button class="button primary" data-permission="${permission.id}" data-decision="allow_once">允许一次</button>
+            <button class="button" data-permission="${permission.id}" data-decision="allow_always_tool">总是允许工具</button>
+            <button class="button" data-permission="${permission.id}" data-decision="allow_always_server" ${permission.serverName ? "" : "disabled"}>总是允许 server</button>
+          ` : `<button class="button primary" data-permission="${permission.id}" data-decision="approved">${icons.check}批准</button>`}
+          <button class="button danger" data-permission="${permission.id}" data-decision="rejected">${icons.close}拒绝</button>
+        </div>
+      </section>
     </div>
   `;
 }
@@ -819,7 +864,7 @@ function render() {
   else if (state.activeView === "audit") html = renderAudit();
   else if (state.activeView === "team") html = renderTeamDetail();
   else html = renderTeams();
-  document.querySelector("#app").innerHTML = html + renderModal(activeModal, modalTeamId);
+  document.querySelector("#app").innerHTML = html + renderModal(activeModal, modalTeamId) + renderPermissionOverlay();
   const stream = document.querySelector("#chat-stream");
   if (stream) stream.scrollTop = stream.scrollHeight;
 }
