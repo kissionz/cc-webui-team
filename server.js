@@ -1239,7 +1239,6 @@ async function handleApi(req, res, pathname) {
       const nextTurnId = id("turn");
       const payload = permission.payload || "继续上一轮任务。";
       stopRuntime(session.id);
-      db.messages.push({ id: id("msg"), sessionId: session.id, senderType: "user", senderId: user.id, content: payload, metadata: { turnId: nextTurnId, fromPermissionId: permission.id }, createdAt: now() });
       await saveDb();
       submitClaudeTurn(session, payload, nextTurnId);
     }
