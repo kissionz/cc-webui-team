@@ -408,10 +408,10 @@ function renderLogin(error = "") {
         <form class="login-box" data-form="login">
           <h2>登录工作台</h2>
           <p>管理员账号为 admin，密码来自部署环境变量 ADMIN_PASSWORD。</p>
-          <div class="field"><label>用户名</label><input class="input" name="username" value="admin" autocomplete="username" /></div>
-          <div class="field"><label>密码</label><input class="input" name="password" type="password" autocomplete="current-password" /></div>
+          <div class="field"><label for="login-username">用户名</label><input class="input" id="login-username" name="username" value="admin" autocomplete="username" /></div>
+          <div class="field"><label for="login-password">密码</label><input class="input" id="login-password" name="password" type="password" autocomplete="current-password" /></div>
           ${error ? `<div class="error">${escapeHtml(error)}</div>` : ""}
-          <button class="button primary" style="width:100%" type="submit">登录</button>
+          <button class="button primary" style="width:100%" type="submit">登录工作台</button>
           <div class="helper">数据由服务端持久化。首次部署请立刻修改默认管理员密码。</div>
         </form>
       </section>
@@ -421,6 +421,7 @@ function renderLogin(error = "") {
 
 function renderTeams() {
   const user = currentUser();
+  const cli = cliStatus();
   const teams = user.role === "admin" ? state.teams : state.teams.filter((team) => teamRole(team.id));
   const actions = `<button class="button primary" data-modal="team">${icons.plus}创建团队</button>`;
   const visibleTeamIds = new Set(teams.map((team) => team.id));
@@ -461,9 +462,9 @@ function renderTeams() {
           <h2>统一管理 Claude Code 工作区</h2>
           <p>查看团队、运行会话、待审批动作和 CLI 健康状态。进入团队后可以直接发送任务、观察输出和调整工作区。</p>
         </div>
-        <div class="health-pill ${state.claudeConfig.available ? "ok" : "down"}">
-          <span class="status-dot ${state.claudeConfig.available ? "ready" : "error"}"></span>
-          <div><strong>${state.claudeConfig.available ? "CLI 可用" : "CLI 未就绪"}</strong><span>${escapeHtml(state.claudeConfig.version || "未检测")}</span></div>
+        <div class="health-pill ${cli.available ? "ok" : "down"}">
+          ${badge(cli.label, cli.tone)}
+          <span>${escapeHtml(cli.detail)}</span>
         </div>
       </div>
       <div class="metric-row">
@@ -499,6 +500,28 @@ function metricCard(label, value, caption) {
   return `<div class="metric card"><div class="metric-label">${escapeHtml(label)}</div><div class="metric-value">${escapeHtml(value)}</div><div class="metric-caption">${escapeHtml(caption)}</div></div>`;
 }
 
+function cliStatus() {
+  const cfg = state.claudeConfig;
+  if (cfg.available) {
+    return {
+      available: true,
+      dot: "ready",
+      tone: "blue",
+      label: "CLI 可用",
+      detail: `${cfg.version || "unknown"} · ${cfg.latencyMs ?? "-"}ms`,
+      message: `可用，版本 ${cfg.version || "unknown"}，延迟 ${cfg.latencyMs ?? "-"}ms`,
+    };
+  }
+  return {
+    available: false,
+    dot: "error",
+    tone: "red",
+    label: "CLI 未就绪",
+    detail: cfg.version || "unknown",
+    message: cfg.message || "不可用，请到 Agent 设置检查命令路径",
+  };
+}
+
 function renderTeamDetail() {
   const team = state.teams.find((item) => item.id === state.selectedTeamId) || state.teams[0];
   if (!team) return renderTeams();
@@ -515,7 +538,7 @@ function renderTeamDetail() {
 
   return appRoot(`
     ${topbar(team.name, `${team.workspacePath} · 我的角色 ${role}`, actions)}
-    <section class="content">
+    <section class="content team-content">
       <div class="team-layout">
         ${renderTeamRail(team, session)}
         ${renderChat(team, session)}
@@ -712,6 +735,7 @@ function timelineEventMeta(message) {
 }
 
 function renderRightRail(team, session) {
+  const cli = cliStatus();
   const agents = state.agents.filter((agent) => agent.teamId === team.id);
   const permissions = session ? state.permissions.filter((permission) => permission.sessionId === session.id) : [];
   const pendingPermissions = permissions.filter((permission) => permission.status === "pending");
@@ -719,11 +743,11 @@ function renderRightRail(team, session) {
   const files = session ? state.fileChanges.filter((file) => file.sessionId === session.id) : [];
   return `
     <aside class="panel">
-      <div class="panel-header"><h2 class="panel-title">运行侧栏</h2>${badge("SSE ready", "blue")}</div>
+      <div class="panel-header"><h2 class="panel-title">运行侧栏</h2>${badge(cli.label, cli.tone)}</div>
       <div class="side-stack">
         <div class="side-card">
           <h4>Claude Code CLI</h4>
-          <p>${state.claudeConfig.available ? `可用，版本 ${state.claudeConfig.version}，延迟 ${state.claudeConfig.latencyMs}ms` : "不可用，请到 Agent 设置检查命令路径"}</p>
+          <p>${escapeHtml(cli.message)}</p>
         </div>
         <div class="side-card">
           <h4>Agent 状态</h4>
