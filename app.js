@@ -228,7 +228,9 @@ function renderInlineMarkdown(value) {
     .split(/(`[^`]*`)/g)
     .map((part) => {
       if (part.startsWith("`") && part.endsWith("`")) return `<code>${escapeHtml(part.slice(1, -1))}</code>`;
-      return escapeHtml(part).replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+      return escapeHtml(part)
+        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+        .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
     })
     .join("");
 }
@@ -280,6 +282,33 @@ function renderMarkdownBlocks(text) {
       blocks.push(renderMarkdownTable(tableLines));
       continue;
     }
+    if (/^#{1,4}\s+/.test(lines[i])) {
+      const match = lines[i].match(/^(#{1,4})\s+(.+)$/);
+      const level = Math.min(match[1].length + 2, 5);
+      blocks.push(`<h${level}>${renderInlineMarkdown(match[2])}</h${level}>`);
+      i += 1;
+      continue;
+    }
+    if (/^>\s?/.test(lines[i])) {
+      const quote = [];
+      while (i < lines.length && /^>\s?/.test(lines[i])) {
+        quote.push(lines[i].replace(/^>\s?/, ""));
+        i += 1;
+      }
+      blocks.push(`<blockquote>${quote.map(renderInlineMarkdown).join("<br>")}</blockquote>`);
+      continue;
+    }
+    if (/^\s*[-*]\s+\[[ xX]\]\s+/.test(lines[i])) {
+      const items = [];
+      while (i < lines.length && /^\s*[-*]\s+\[[ xX]\]\s+/.test(lines[i])) {
+        const done = /\[[xX]\]/.test(lines[i]);
+        const text = lines[i].replace(/^\s*[-*]\s+\[[ xX]\]\s+/, "");
+        items.push(`<li><input type="checkbox" disabled ${done ? "checked" : ""}>${renderInlineMarkdown(text)}</li>`);
+        i += 1;
+      }
+      blocks.push(`<ul class="task-list">${items.join("")}</ul>`);
+      continue;
+    }
     if (/^\s*[-*]\s+/.test(lines[i])) {
       const items = [];
       while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
@@ -319,7 +348,7 @@ function renderMarkdown(text) {
   let html = "";
   for (let index = 0; index < chunks.length; index += 1) {
     if (index % 3 === 0) html += renderMarkdownBlocks(chunks[index]);
-    if (index % 3 === 2) html += `<pre class="markdown-code"><code>${escapeHtml(chunks[index])}</code></pre>`;
+    if (index % 3 === 2) html += `<div class="markdown-code-wrap"><button class="code-copy" data-copy-code="${escapeHtml(encodeURIComponent(chunks[index]))}">复制</button><pre class="markdown-code"><code>${escapeHtml(chunks[index])}</code></pre></div>`;
   }
   return html;
 }
@@ -614,11 +643,14 @@ function renderChat(team, session) {
           <div class="meta"><span>创建人 ${escapeHtml(userName(session.createdBy))}</span>${badge(visibility === "team" ? "团队可见" : "私有", visibility === "team" ? "green" : "")}</div>
         </div>
         <div class="toolbar">
+          <button class="button" data-action="summarize-session">生成摘要</button>
+          <button class="button" data-action="summary-as-title" ${session.summary ? "" : "disabled"}>摘要作标题</button>
           <button class="button" data-action="toggle-session-visibility" ${canManageSession(session) ? "" : "disabled"}>${visibility === "team" ? "设为私有" : "共享给团队"}</button>
           ${badge(session.status, statusTone(session.status))}
           <button class="icon-button" title="停止会话" data-action="stop-session" ${session.status === "running" ? "" : "disabled"}>${icons.stop}</button>
         </div>
       </div>
+      ${renderSessionSummary(session)}
       <div class="chat-stream" id="chat-stream">
         ${allMessages.length > messages.length ? `<div class="history-notice">已隐藏更早的 ${allMessages.length - messages.length} 条本地记录，保持页面流畅。</div>` : ""}
         ${turns.map(renderTurn).join("")}
@@ -628,6 +660,18 @@ function renderChat(team, session) {
         <button class="button primary" type="submit" ${canSend ? "" : "disabled"}>${icons.send}发送</button>
       </form>
     </section>
+  `;
+}
+
+function renderSessionSummary(session) {
+  return `
+    <div class="session-summary">
+      <div>
+        <strong>会话摘要</strong>
+        <p>${escapeHtml(session.summary || "还没有摘要。点击“生成摘要”后，会从本会话最近消息本地抽取，不调用 Claude。")}</p>
+      </div>
+      ${session.summaryUpdatedAt ? `<span>${fmt(session.summaryUpdatedAt)}</span>` : ""}
+    </div>
   `;
 }
 
@@ -694,7 +738,13 @@ function renderMessage(message) {
   const content = rich ? renderMarkdown(message.content) : escapeHtml(message.content);
   return `
     <article class="message ${message.senderType}">
-      <div class="message-meta"><span>${escapeHtml(sender)}</span><span>${fmt(message.createdAt)}</span></div>
+      <div class="message-meta">
+        <span>${escapeHtml(sender)}</span><span>${fmt(message.createdAt)}</span>
+        <span class="message-actions">
+          <button class="text-button" data-copy-message="${message.id}">复制</button>
+          ${message.senderType === "user" ? `<button class="text-button" data-action="retry-session" data-retry-message="${message.id}">重试</button>` : ""}
+        </span>
+      </div>
       <div class="bubble ${rich ? "markdown" : ""}">${content}</div>
     </article>
   `;
@@ -1224,6 +1274,35 @@ async function removeToolApproval(scope, value) {
   await refresh();
 }
 
+async function summarizeSession(replaceTitle = false) {
+  const session = sessionById(state.selectedSessionId);
+  if (!session) return;
+  await api(`/api/sessions/${session.id}/summary`, { method: "POST", body: JSON.stringify({ replaceTitle }) });
+  await refresh();
+}
+
+async function retrySession() {
+  const session = sessionById(state.selectedSessionId);
+  if (!session) return;
+  await api(`/api/sessions/${session.id}/retry`, { method: "POST", body: "{}" });
+  await refresh();
+}
+
+async function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.style.position = "fixed";
+  area.style.opacity = "0";
+  document.body.appendChild(area);
+  area.select();
+  document.execCommand("copy");
+  area.remove();
+}
+
 async function createUser(form) {
   const data = new FormData(form);
   const username = String(data.get("username")).trim();
@@ -1352,6 +1431,18 @@ document.addEventListener("click", async (event) => {
     if (target.dataset.action === "new-session") return await createSession();
     if (target.dataset.deleteSession) return await deleteSession(target.dataset.deleteSession);
     if (target.dataset.action === "toggle-session-visibility") return await toggleSessionVisibility();
+    if (target.dataset.action === "summarize-session") return await summarizeSession(false);
+    if (target.dataset.action === "summary-as-title") return await summarizeSession(true);
+    if (target.dataset.action === "retry-session") return await retrySession();
+    if (target.dataset.copyMessage) {
+      const message = state.messages.find((item) => item.id === target.dataset.copyMessage);
+      if (message) await copyText(message.content || "");
+      return;
+    }
+    if (target.dataset.copyCode) {
+      await copyText(decodeURIComponent(target.dataset.copyCode));
+      return;
+    }
     if (target.dataset.removeApprovalScope) return await removeToolApproval(target.dataset.removeApprovalScope, target.dataset.removeApprovalValue);
     if (target.dataset.action === "stop-session") {
       const session = sessionById(state.selectedSessionId);

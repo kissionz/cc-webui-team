@@ -761,8 +761,37 @@ select:disabled {
 
 .chat-panel {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   min-height: 0;
+}
+
+.session-summary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  background: #f8fafc;
+}
+
+.session-summary strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+
+.session-summary p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.session-summary span {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .chat-stream {
@@ -812,6 +841,28 @@ select:disabled {
   font-weight: 700;
 }
 
+.message-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+
+.message:hover .message-actions,
+.message:focus-within .message-actions {
+  opacity: 1;
+}
+
+.text-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 760;
+}
+
 .bubble {
   padding: 11px 13px;
   border-radius: var(--radius-lg);
@@ -840,15 +891,23 @@ select:disabled {
 
 .bubble.markdown p,
 .bubble.markdown ul,
-.bubble.markdown ol {
+.bubble.markdown ol,
+.bubble.markdown blockquote,
+.bubble.markdown h3,
+.bubble.markdown h4,
+.bubble.markdown h5 {
   margin: 0 0 12px;
 }
 
 .bubble.markdown p:last-child,
 .bubble.markdown ul:last-child,
 .bubble.markdown ol:last-child,
+.bubble.markdown blockquote:last-child,
+.bubble.markdown h3:last-child,
+.bubble.markdown h4:last-child,
+.bubble.markdown h5:last-child,
 .bubble.markdown .markdown-table-wrap:last-child,
-.bubble.markdown .markdown-code:last-child {
+.bubble.markdown .markdown-code-wrap:last-child {
   margin-bottom: 0;
 }
 
@@ -861,6 +920,35 @@ select:disabled {
   margin-top: 4px;
 }
 
+.bubble.markdown blockquote {
+  padding: 8px 12px;
+  border-left: 3px solid var(--brand);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  background: #f8fafc;
+  color: var(--muted);
+}
+
+.bubble.markdown h3,
+.bubble.markdown h4,
+.bubble.markdown h5 {
+  color: var(--text);
+  line-height: 1.35;
+}
+
+.bubble.markdown a {
+  color: var(--blue);
+  text-decoration: none;
+}
+
+.task-list {
+  list-style: none;
+  padding-left: 0 !important;
+}
+
+.task-list input {
+  margin-right: 8px;
+}
+
 .bubble.markdown code {
   padding: 1px 5px;
   border: 1px solid var(--line);
@@ -871,8 +959,27 @@ select:disabled {
   font-size: 0.92em;
 }
 
-.markdown-code {
+.markdown-code-wrap {
+  position: relative;
   margin: 0 0 12px;
+}
+
+.code-copy {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  min-height: 26px;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.markdown-code {
+  margin: 0;
   padding: 12px;
   overflow: auto;
   border: 1px solid var(--line);

@@ -616,6 +616,34 @@ function titleFromPrompt(content) {
   return String(content || "").replace(/\s+/g, " ").trim().slice(0, 50) || "新会话";
 }
 
+function plainTextFromMessage(content = "") {
+  return String(content || "")
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/[#*_`>|[\]()]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function clipText(content, max = 120) {
+  const text = plainTextFromMessage(content);
+  return text.length > max ? `${text.slice(0, max)}...` : text;
+}
+
+function buildSessionSummary(session) {
+  const messages = db.messages.filter((message) => message.sessionId === session.id && ["user", "agent"].includes(message.senderType));
+  const userMessages = messages.filter((message) => message.senderType === "user");
+  const agentMessages = messages.filter((message) => message.senderType === "agent" && plainTextFromMessage(message.content));
+  const firstAsk = userMessages[0]?.content || "";
+  const lastAsk = userMessages.at(-1)?.content || "";
+  const lastAnswer = agentMessages.at(-1)?.content || "";
+  const parts = [];
+  if (firstAsk) parts.push(`目标：${clipText(firstAsk, 70)}`);
+  if (lastAsk && lastAsk !== firstAsk) parts.push(`最新问题：${clipText(lastAsk, 60)}`);
+  if (lastAnswer) parts.push(`进展：${clipText(lastAnswer, 90)}`);
+  return parts.join("；") || titleFromPrompt(session.title || "新会话");
+}
+
 async function appendAgentMessage(session, agent, content = "", metadata = {}) {
   const message = { id: id("msg"), sessionId: session.id, senderType: "agent", senderId: agent.id, content, metadata, createdAt: now() };
   db.messages.push(message);
@@ -1411,6 +1439,38 @@ async function handleApi(req, res, pathname) {
     await saveDb();
     broadcast({ type: "session.updated", sessionId: session.id });
     return send(res, 200, { session });
+  }
+
+  const summaryMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/summary$/);
+  if (summaryMatch && req.method === "POST") {
+    const session = db.sessions.find((item) => item.id === summaryMatch[1]);
+    if (!canSeeSession(user, session)) return error(res, 403, "PERMISSION_DENIED", "Cannot summarize this session.");
+    const body = await readBody(req);
+    const summary = buildSessionSummary(session);
+    session.summary = summary;
+    session.summaryUpdatedAt = now();
+    if (body.replaceTitle) session.title = titleFromPrompt(summary);
+    session.updatedAt = now();
+    audit(user.id, "session.summary_generated", "session", session.id, { replaceTitle: Boolean(body.replaceTitle) });
+    await saveDb();
+    broadcast({ type: "session.updated", sessionId: session.id });
+    return send(res, 200, { session, summary });
+  }
+
+  const retryMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/retry$/);
+  if (retryMatch && req.method === "POST") {
+    const session = db.sessions.find((item) => item.id === retryMatch[1]);
+    if (!canWriteSession(user, session)) return error(res, 403, "PERMISSION_DENIED", "Cannot retry this session.");
+    if (["running", "waiting_permission"].includes(session.status)) return error(res, 409, "SESSION_BUSY", "This conversation turn is already running.");
+    const source = [...db.messages].reverse().find((message) => message.sessionId === session.id && message.senderType === "user");
+    if (!source) return error(res, 404, "RETRY_SOURCE_MISSING", "No user message to retry.");
+    const turnId = id("turn");
+    db.messages.push({ id: id("msg"), sessionId: session.id, senderType: "user", senderId: user.id, content: source.content, metadata: { turnId, retryOf: source.id }, createdAt: now() });
+    session.updatedAt = now();
+    audit(user.id, "session.retry", "session", session.id, { sourceMessageId: source.id });
+    await saveDb();
+    submitClaudeTurn(session, source.content, turnId);
+    return send(res, 201, { ok: true });
   }
 
   const messageMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/messages$/);
