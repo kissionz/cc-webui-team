@@ -7,6 +7,7 @@ import { randomBytes, pbkdf2Sync, timingSafeEqual } from "node:crypto";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
 const root = process.cwd();
+const packageInfo = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 
 loadDotEnv(join(root, ".env"));
 
@@ -33,6 +34,7 @@ const mimeTypes = {
 
 const now = () => Date.now();
 const id = (prefix) => `${prefix}_${randomBytes(6).toString("hex")}`;
+const startedAt = now();
 
 let db = null;
 const clients = new Set();
@@ -345,17 +347,30 @@ function canManageTeamSessions(user, teamId) {
   return user.role === "admin" || ["owner", "admin"].includes(getTeamRole(teamId, user.id));
 }
 
+function isSharedSession(session) {
+  return session?.visibility === "team";
+}
+
 function canSeeSession(user, session) {
-  return Boolean(session) && canSeeTeam(user, session.teamId) && (canManageTeamSessions(user, session.teamId) || session.createdBy === user.id);
+  return Boolean(session) && canSeeTeam(user, session.teamId) && (canManageTeamSessions(user, session.teamId) || session.createdBy === user.id || isSharedSession(session));
 }
 
 function canWriteSession(user, session) {
   return Boolean(session) && canWriteTeam(user, session.teamId) && (canManageTeamSessions(user, session.teamId) || session.createdBy === user.id);
 }
 
+function canShareSession(user, session) {
+  return Boolean(session) && (canWriteSession(user, session) || canManageTeamSessions(user, session.teamId));
+}
+
 function eventVisibleToUser(event, user) {
   if (!user || user.status !== "active") return false;
-  if (event.sessionId) return canSeeSession(user, db.sessions.find((session) => session.id === event.sessionId));
+  if (event.sessionId) {
+    const session = db.sessions.find((item) => item.id === event.sessionId);
+    if (session) return canSeeSession(user, session);
+    if (event.teamId) return canSeeTeam(user, event.teamId);
+    return false;
+  }
   if (event.teamId) return canSeeTeam(user, event.teamId);
   return true;
 }
@@ -418,6 +433,18 @@ function bootstrapFor(user) {
     fileChanges: db.fileChanges.filter((file) => sessionIds.has(file.sessionId)),
     auditLogs: auditLogs.slice(-BOOTSTRAP_AUDIT_LIMIT),
     claudeConfig: db.claudeConfig,
+    serverInfo: serverInfo(),
+  };
+}
+
+function serverInfo() {
+  return {
+    appVersion: packageInfo.version,
+    nodeVersion: process.version,
+    startedAt,
+    dataDir: DATA_DIR,
+    workspaceRoot: db?.claudeConfig?.workspaceRoot || WORKSPACE_ROOT,
+    sdkPackage: packageInfo.dependencies?.["@anthropic-ai/claude-agent-sdk"] || "unknown",
   };
 }
 
@@ -544,6 +571,20 @@ function applyToolApproval(session, permission, decision) {
 function clearOnceToolApprovals(session) {
   const approvals = ensureToolApprovals(session);
   if (approvals.onceTools.length) approvals.onceTools = [];
+}
+
+function removeToolApproval(session, scope, value) {
+  const approvals = ensureToolApprovals(session);
+  if (scope === "tool") {
+    approvals.alwaysTools = approvals.alwaysTools.filter((item) => item !== value);
+    approvals.onceTools = approvals.onceTools.filter((item) => item !== value);
+    return true;
+  }
+  if (scope === "server") {
+    approvals.alwaysServers = approvals.alwaysServers.filter((item) => item !== value);
+    return true;
+  }
+  return false;
 }
 
 function permissionUpdatesForDecision(permission, decision, suggestions = []) {
@@ -1318,7 +1359,7 @@ async function handleApi(req, res, pathname) {
     if (!canWriteTeam(user, teamId)) return error(res, 403, "PERMISSION_DENIED", "Cannot create sessions.");
     const team = db.teams.find((item) => item.id === teamId);
     const agent = db.agents.find((item) => item.teamId === teamId && item.type === "claude_code");
-    const session = { id: id("session"), teamId, agentId: agent.id, createdBy: user.id, title: "新会话", status: "idle", cwd: team.workspacePath, createdAt: now(), updatedAt: now() };
+    const session = { id: id("session"), teamId, agentId: agent.id, createdBy: user.id, title: "新会话", visibility: "private", status: "idle", cwd: team.workspacePath, createdAt: now(), updatedAt: now() };
     db.sessions.unshift(session);
     db.messages.push({ id: id("msg"), sessionId: session.id, senderType: "system", senderId: null, content: "会话已创建，等待用户发送任务。", createdAt: now() });
     audit(user.id, "session.created", "session", session.id);
@@ -1339,8 +1380,37 @@ async function handleApi(req, res, pathname) {
     db.fileChanges = db.fileChanges.filter((file) => file.sessionId !== session.id);
     audit(user.id, "session.deleted", "session", session.id);
     await saveDb();
-    broadcast({ type: "session.deleted", sessionId: session.id });
+    broadcast({ type: "session.deleted", sessionId: session.id, teamId: session.teamId });
     return send(res, 200, { ok: true });
+  }
+
+  const sessionVisibilityMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/visibility$/);
+  if (sessionVisibilityMatch && req.method === "PATCH") {
+    const session = db.sessions.find((item) => item.id === sessionVisibilityMatch[1]);
+    if (!canShareSession(user, session)) return error(res, 403, "PERMISSION_DENIED", "Cannot update this session.");
+    const body = await readBody(req);
+    const visibility = String(body.visibility || "");
+    if (!["private", "team"].includes(visibility)) return error(res, 400, "VISIBILITY_INVALID", "Visibility must be private or team.");
+    session.visibility = visibility;
+    session.updatedAt = now();
+    audit(user.id, "session.visibility_changed", "session", session.id, { visibility });
+    await saveDb();
+    broadcast({ type: "session.updated", sessionId: session.id });
+    broadcast({ type: "team.sessions.changed", teamId: session.teamId });
+    return send(res, 200, { session });
+  }
+
+  const approvalPolicyMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/tool-approvals$/);
+  if (approvalPolicyMatch && req.method === "DELETE") {
+    const session = db.sessions.find((item) => item.id === approvalPolicyMatch[1]);
+    if (!canWriteSession(user, session)) return error(res, 403, "PERMISSION_DENIED", "Cannot update this session.");
+    const body = await readBody(req);
+    if (!removeToolApproval(session, String(body.scope || ""), String(body.value || ""))) return error(res, 400, "APPROVAL_SCOPE_INVALID", "Unsupported approval scope.");
+    session.updatedAt = now();
+    audit(user.id, "session.tool_approval_removed", "session", session.id, { scope: body.scope, value: body.value });
+    await saveDb();
+    broadcast({ type: "session.updated", sessionId: session.id });
+    return send(res, 200, { session });
   }
 
   const messageMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/messages$/);

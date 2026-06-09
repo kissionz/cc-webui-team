@@ -42,6 +42,7 @@ const seedState = () => ({
     authenticated: true,
     lastCheckAt: now() - 1000 * 60 * 16,
   },
+  serverInfo: {},
 });
 
 let state = loadState();
@@ -62,6 +63,7 @@ function loadState() {
     permissions: [],
     fileChanges: [],
     auditLogs: [],
+    serverInfo: {},
   };
 }
 
@@ -184,6 +186,14 @@ function canWriteTeam(teamId) {
 function canManageTeam(teamId) {
   const role = teamRole(teamId);
   return currentUser()?.role === "admin" || ["owner", "admin"].includes(role);
+}
+
+function canManageSession(session) {
+  return Boolean(session) && (canManageTeam(session.teamId) || session.createdBy === state.currentUserId);
+}
+
+function sessionVisibility(session) {
+  return session?.visibility === "team" ? "team" : "private";
 }
 
 function canApprove(permission) {
@@ -574,7 +584,8 @@ function renderSessionList(team, activeSession, embedded = false) {
             <div class="session-row">
               <button class="session-item ${session.id === activeSession?.id ? "active" : ""}" data-session="${session.id}">
                 <strong class="truncate-title" title="${escapeHtml(titleText(session.title))}">${escapeHtml(titleText(session.title))}</strong>
-                <div class="meta">${badge(session.status, statusTone(session.status))}<span>${fmt(session.updatedAt)}</span></div>
+                <div class="meta">${badge(session.status, statusTone(session.status))}${badge(sessionVisibility(session) === "team" ? "团队可见" : "私有", sessionVisibility(session) === "team" ? "green" : "")}</div>
+                <div class="meta"><span>${escapeHtml(userName(session.createdBy))}</span><span>${fmt(session.updatedAt)}</span></div>
               </button>
               <button class="icon-button session-delete" title="删除会话" data-delete-session="${session.id}">${icons.close}</button>
             </div>
@@ -594,11 +605,16 @@ function renderChat(team, session) {
   const turns = buildMessageTurns(messages);
   const canSend = canWriteTeam(team.id) && !["running", "waiting_permission"].includes(session.status);
   const placeholder = composerPlaceholder(team, session);
+  const visibility = sessionVisibility(session);
   return `
     <section class="panel chat-panel">
       <div class="panel-header">
-        <h2 class="panel-title truncate-title" title="${escapeHtml(titleText(session.title))}">${escapeHtml(titleText(session.title))}</h2>
+        <div class="title-stack">
+          <h2 class="panel-title truncate-title" title="${escapeHtml(titleText(session.title))}">${escapeHtml(titleText(session.title))}</h2>
+          <div class="meta"><span>创建人 ${escapeHtml(userName(session.createdBy))}</span>${badge(visibility === "team" ? "团队可见" : "私有", visibility === "team" ? "green" : "")}</div>
+        </div>
         <div class="toolbar">
+          <button class="button" data-action="toggle-session-visibility" ${canManageSession(session) ? "" : "disabled"}>${visibility === "team" ? "设为私有" : "共享给团队"}</button>
           ${badge(session.status, statusTone(session.status))}
           <button class="icon-button" title="停止会话" data-action="stop-session" ${session.status === "running" ? "" : "disabled"}>${icons.stop}</button>
         </div>
@@ -765,12 +781,41 @@ function renderRightRail(team, session) {
               : ""
           }
         </div>
+        ${renderToolApprovalPolicy(session)}
         <div class="side-card">
           <h4>文件变更</h4>
           ${files.map((file) => `<div class="file-row"><span>${badge(file.changeType, file.changeType === "deleted" ? "red" : "green")}</span><div><strong>${escapeHtml(file.path)}</strong><p>${fmt(file.createdAt)}</p></div></div>`).join("") || "<p>暂无文件变更。</p>"}
         </div>
       </div>
     </aside>
+  `;
+}
+
+function renderToolApprovalPolicy(session) {
+  if (!session) return "";
+  const approvals = session.toolApprovals || {};
+  const tools = [...(approvals.alwaysTools || [])];
+  const servers = [...(approvals.alwaysServers || [])];
+  const onceTools = [...(approvals.onceTools || [])];
+  const rows = [
+    ...servers.map((server) => ({ scope: "server", value: server, label: `server: ${server}`, tone: "blue" })),
+    ...tools.map((tool) => ({ scope: "tool", value: tool, label: `tool: ${tool}`, tone: "green" })),
+    ...onceTools.map((tool) => ({ scope: "tool", value: tool, label: `本轮: ${tool}`, tone: "amber" })),
+  ];
+  return `
+    <div class="side-card">
+      <h4>权限记忆</h4>
+      ${
+        rows.length
+          ? rows.map((row) => `
+            <div class="approval-row">
+              <div>${badge(row.scope, row.tone)}<strong>${escapeHtml(row.label)}</strong></div>
+              <button class="icon-button" title="撤销" data-remove-approval-scope="${row.scope}" data-remove-approval-value="${escapeHtml(row.value)}">${icons.close}</button>
+            </div>
+          `).join("")
+          : "<p>暂无已记住的工具授权。选择“总是允许工具/server”后会显示在这里。</p>"
+      }
+    </div>
   `;
 }
 
@@ -905,6 +950,7 @@ function renderQuestionSummary(questions) {
 
 function renderSettings() {
   const cfg = state.claudeConfig;
+  const info = state.serverInfo || {};
   const actions = `<button class="button primary" data-action="health-check">${icons.check}运行健康检查</button>`;
   return appRoot(`
     ${topbar("Agent 设置", "配置 Claude Code CLI、工作区 allowlist 和运行策略", actions)}
@@ -926,6 +972,17 @@ function renderSettings() {
           <div class="field"><label>Workspace allowlist 根目录</label><input class="input" name="workspaceRoot" value="${escapeHtml(cfg.workspaceRoot)}" /></div>
           <button class="button primary" type="submit">保存配置</button>
         </form>
+        <div class="card" style="padding:18px">
+          <h3 class="section-heading">运行信息</h3>
+          <div class="info-grid">
+            <div><span>WebUI</span><strong>${escapeHtml(info.appVersion || "unknown")}</strong></div>
+            <div><span>Node</span><strong>${escapeHtml(info.nodeVersion || "unknown")}</strong></div>
+            <div><span>Agent SDK</span><strong>${escapeHtml(info.sdkPackage || "unknown")}</strong></div>
+            <div><span>启动时间</span><strong>${info.startedAt ? fmt(info.startedAt) : "unknown"}</strong></div>
+            <div><span>数据目录</span><strong>${escapeHtml(info.dataDir || "")}</strong></div>
+            <div><span>Workspace Root</span><strong>${escapeHtml(info.workspaceRoot || "")}</strong></div>
+          </div>
+        </div>
       </div>
       <aside class="panel">
         <div class="panel-header"><h2 class="panel-title">能力状态</h2>${badge("server adapter", "blue")}</div>
@@ -1152,6 +1209,21 @@ async function deleteSession(id) {
   await refresh();
 }
 
+async function toggleSessionVisibility() {
+  const session = sessionById(state.selectedSessionId);
+  if (!session || !canManageSession(session)) return;
+  const nextVisibility = sessionVisibility(session) === "team" ? "private" : "team";
+  await api(`/api/sessions/${session.id}/visibility`, { method: "PATCH", body: JSON.stringify({ visibility: nextVisibility }) });
+  await refresh();
+}
+
+async function removeToolApproval(scope, value) {
+  const session = sessionById(state.selectedSessionId);
+  if (!session) return;
+  await api(`/api/sessions/${session.id}/tool-approvals`, { method: "DELETE", body: JSON.stringify({ scope, value }) });
+  await refresh();
+}
+
 async function createUser(form) {
   const data = new FormData(form);
   const username = String(data.get("username")).trim();
@@ -1279,6 +1351,8 @@ document.addEventListener("click", async (event) => {
     }
     if (target.dataset.action === "new-session") return await createSession();
     if (target.dataset.deleteSession) return await deleteSession(target.dataset.deleteSession);
+    if (target.dataset.action === "toggle-session-visibility") return await toggleSessionVisibility();
+    if (target.dataset.removeApprovalScope) return await removeToolApproval(target.dataset.removeApprovalScope, target.dataset.removeApprovalValue);
     if (target.dataset.action === "stop-session") {
       const session = sessionById(state.selectedSessionId);
       if (session) {

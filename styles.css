@@ -651,6 +651,12 @@ select:disabled {
   font-weight: 780;
 }
 
+.title-stack {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
 .truncate-title {
   min-width: 0;
   max-width: 100%;
@@ -1088,6 +1094,55 @@ select:disabled {
   font-size: 13px;
   line-height: 1.5;
   overflow-wrap: anywhere;
+}
+
+.approval-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #f8fafc;
+}
+
+.approval-row div {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.approval-row strong {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.info-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.info-grid div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #f8fafc;
+}
+
+.info-grid span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.info-grid strong {
+  overflow-wrap: anywhere;
+  font-size: 13px;
 }
 
 .team-layout > .panel:last-child {
