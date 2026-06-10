@@ -54,6 +54,10 @@ let state = loadState();
 let eventSource = null;
 let refreshTimer = null;
 let renderTimer = null;
+const uiMemory = {
+  composerDrafts: new Map(),
+  openTurnEvents: new Map(),
+};
 
 function loadState() {
   return {
@@ -641,6 +645,7 @@ function renderChat(team, session) {
   const canSend = canWriteTeam(team.id) && !["running", "waiting_permission"].includes(session.status);
   const placeholder = composerPlaceholder(team, session);
   const visibility = sessionVisibility(session);
+  const draft = uiMemory.composerDrafts.get(session.id) || "";
   return `
     <section class="panel chat-panel">
       <div class="panel-header">
@@ -662,7 +667,7 @@ function renderChat(team, session) {
         ${turns.map(renderTurn).join("")}
       </div>
       <form class="composer" data-form="message">
-        <textarea class="textarea" name="content" placeholder="${escapeHtml(placeholder)}" ${canSend ? "" : "disabled"}></textarea>
+        <textarea class="textarea" name="content" placeholder="${escapeHtml(placeholder)}" data-session-draft="${session.id}" ${canSend ? "" : "disabled"}>${escapeHtml(draft)}</textarea>
         <button class="button primary" type="submit" ${canSend ? "" : "disabled"}>${icons.send}发送</button>
       </form>
     </section>
@@ -719,7 +724,15 @@ function renderTurn(turn) {
 function renderTurnEvents(messages, collapsed) {
   const content = messages.map(renderTimelineEvent).join("");
   if (!collapsed) return `<div class="turn-events">${content}</div>`;
-  return `<details class="turn-events collapsed"><summary>${icons.terminal}<span>本轮运行记录</span><strong>${messages.length}</strong></summary>${content}</details>`;
+  const key = turnEventKey(messages);
+  const isOpen = uiMemory.openTurnEvents.get(key);
+  return `<details class="turn-events collapsed" data-turn-events="${escapeHtml(key)}" ${isOpen ? "open" : ""}><summary>${icons.terminal}<span>本轮运行记录</span><strong>${messages.length}</strong></summary>${content}</details>`;
+}
+
+function turnEventKey(messages) {
+  const first = messages[0];
+  const turnId = first?.metadata?.turnId || first?.id || "loose";
+  return `${first?.sessionId || "session"}:${turnId}`;
 }
 
 function composerPlaceholder(team, session) {
@@ -1214,8 +1227,7 @@ function showError(err) {
 }
 
 function render() {
-  const previousStream = document.querySelector("#chat-stream");
-  const shouldStickToBottom = previousStream ? previousStream.scrollHeight - previousStream.scrollTop - previousStream.clientHeight < 96 : true;
+  const snapshot = captureUiSnapshot();
   if (!state.currentUserId) {
     renderLogin();
     return;
@@ -1227,8 +1239,92 @@ function render() {
   else if (state.activeView === "team") html = renderTeamDetail();
   else html = renderTeams();
   document.querySelector("#app").innerHTML = html + renderModal(activeModal, modalTeamId) + renderPermissionOverlay();
+  restoreUiSnapshot(snapshot);
+}
+
+function captureUiSnapshot() {
+  const active = document.activeElement;
+  const activeInfo = active
+    ? {
+        selector: focusSelector(active),
+        start: typeof active.selectionStart === "number" ? active.selectionStart : null,
+        end: typeof active.selectionEnd === "number" ? active.selectionEnd : null,
+      }
+    : null;
+  document.querySelectorAll("[data-session-draft]").forEach((field) => {
+    uiMemory.composerDrafts.set(field.dataset.sessionDraft, field.value);
+  });
+  document.querySelectorAll("[data-turn-events]").forEach((details) => {
+    uiMemory.openTurnEvents.set(details.dataset.turnEvents, details.open);
+  });
   const stream = document.querySelector("#chat-stream");
-  if (stream && shouldStickToBottom) stream.scrollTop = stream.scrollHeight;
+  const streamDistanceFromBottom = stream ? stream.scrollHeight - stream.scrollTop - stream.clientHeight : 0;
+  const scrolls = scrollSnapshot();
+  return {
+    view: state.activeView,
+    sessionId: state.selectedSessionId,
+    activeInfo,
+    streamWasNearBottom: stream ? streamDistanceFromBottom < 96 : true,
+    scrolls,
+  };
+}
+
+function restoreUiSnapshot(snapshot = {}) {
+  restoreScrollSnapshot(snapshot);
+  restoreFocus(snapshot.activeInfo);
+}
+
+function scrollSnapshot() {
+  const selectors = ["#chat-stream", ".session-section .session-list", ".team-layout > .panel:last-child .side-stack", ".sidebar", ".main"];
+  const snapshot = {};
+  selectors.forEach((selector) => {
+    const element = document.querySelector(selector);
+    if (!element) return;
+    snapshot[selector] = {
+      top: element.scrollTop,
+      left: element.scrollLeft,
+      distanceFromBottom: element.scrollHeight - element.scrollTop - element.clientHeight,
+    };
+  });
+  return snapshot;
+}
+
+function restoreScrollSnapshot(snapshot = {}) {
+  Object.entries(snapshot.scrolls || {}).forEach(([selector, value]) => {
+    const element = document.querySelector(selector);
+    if (!element) return;
+    if (selector === "#chat-stream" && snapshot.view === state.activeView && snapshot.sessionId === state.selectedSessionId) {
+      element.scrollTop = snapshot.streamWasNearBottom ? element.scrollHeight : Math.max(0, element.scrollHeight - element.clientHeight - value.distanceFromBottom);
+      element.scrollLeft = value.left || 0;
+      return;
+    }
+    element.scrollTop = value.top || 0;
+    element.scrollLeft = value.left || 0;
+  });
+}
+
+function focusSelector(element) {
+  if (!element?.matches) return "";
+  if (element.matches("[data-session-draft]")) return `[data-session-draft="${cssEscape(element.dataset.sessionDraft)}"]`;
+  if (element.id) return `#${cssEscape(element.id)}`;
+  const name = element.getAttribute("name");
+  if (name && element.closest("form")?.dataset.form) return `form[data-form="${cssEscape(element.closest("form").dataset.form)}"] [name="${cssEscape(name)}"]`;
+  return "";
+}
+
+function restoreFocus(activeInfo) {
+  if (!activeInfo?.selector) return;
+  const element = document.querySelector(activeInfo.selector);
+  if (!element || element.disabled) return;
+  element.focus({ preventScroll: true });
+  if (typeof element.setSelectionRange === "function" && activeInfo.start !== null && activeInfo.end !== null) {
+    element.setSelectionRange(activeInfo.start, activeInfo.end);
+  }
+}
+
+function cssEscape(value) {
+  if (window.CSS?.escape) return CSS.escape(String(value));
+  return String(value).replaceAll("\\", "\\\\").replaceAll('"', '\\"');
 }
 
 async function login(form) {
@@ -1268,6 +1364,7 @@ async function sendMessage(form) {
   const session = sessionById(state.selectedSessionId);
   const content = String(new FormData(form).get("content") || "").trim();
   if (!session || !content) return;
+  uiMemory.composerDrafts.delete(session.id);
   form.reset();
   await api(`/api/sessions/${session.id}/messages`, { method: "POST", body: JSON.stringify({ content }) });
   await refresh();
@@ -1433,6 +1530,18 @@ document.addEventListener("submit", async (event) => {
     showError(err);
   }
 });
+
+document.addEventListener("input", (event) => {
+  const field = event.target.closest?.("[data-session-draft]");
+  if (!field) return;
+  uiMemory.composerDrafts.set(field.dataset.sessionDraft, field.value);
+});
+
+document.addEventListener("toggle", (event) => {
+  const details = event.target.closest?.("[data-turn-events]");
+  if (!details) return;
+  uiMemory.openTurnEvents.set(details.dataset.turnEvents, details.open);
+}, true);
 
 document.addEventListener("click", async (event) => {
   try {
