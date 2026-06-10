@@ -220,6 +220,10 @@ function seedDb() {
       command: CLAUDE_COMMAND,
       args: CLAUDE_ARGS.join(" "),
       workspaceRoot: WORKSPACE_ROOT,
+      modelContextTokens: Number(process.env.MODEL_CONTEXT_TOKENS || 256000),
+      autoCompactRatio: Number(process.env.AUTO_COMPACT_RATIO || 0.62),
+      autoCompactEnabled: process.env.AUTO_COMPACT_ENABLED !== "false",
+      mcpToolAllowlist: (process.env.MCP_TOOL_ALLOWLIST || "").split(",").map((item) => item.trim()).filter(Boolean),
       enabled: true,
       available: false,
       version: "unknown",
@@ -238,6 +242,15 @@ async function loadDb() {
     db = seedDb();
     await saveDb();
   }
+  normalizeRuntimeConfig();
+}
+
+function normalizeRuntimeConfig() {
+  db.claudeConfig ||= {};
+  db.claudeConfig.modelContextTokens ||= 256000;
+  db.claudeConfig.autoCompactRatio ||= 0.62;
+  if (db.claudeConfig.autoCompactEnabled === undefined) db.claudeConfig.autoCompactEnabled = true;
+  if (!Array.isArray(db.claudeConfig.mcpToolAllowlist)) db.claudeConfig.mcpToolAllowlist = [];
 }
 
 async function maybeResetAdminPassword() {
@@ -267,6 +280,20 @@ async function syncRuntimeConfigFromEnv() {
   if (process.env.WORKSPACE_ROOT && db.claudeConfig.workspaceRoot !== process.env.WORKSPACE_ROOT) {
     db.claudeConfig.workspaceRoot = process.env.WORKSPACE_ROOT;
     changed = true;
+  }
+
+  for (const [key, envName, parser] of [
+    ["modelContextTokens", "MODEL_CONTEXT_TOKENS", (value) => Number(value)],
+    ["autoCompactRatio", "AUTO_COMPACT_RATIO", (value) => Number(value)],
+    ["autoCompactEnabled", "AUTO_COMPACT_ENABLED", (value) => value !== "false"],
+    ["mcpToolAllowlist", "MCP_TOOL_ALLOWLIST", (value) => String(value).split(",").map((item) => item.trim()).filter(Boolean)],
+  ]) {
+    if (process.env[envName] === undefined) continue;
+    const next = parser(process.env[envName]);
+    if (JSON.stringify(db.claudeConfig[key]) !== JSON.stringify(next)) {
+      db.claudeConfig[key] = next;
+      changed = true;
+    }
   }
 
   if (process.env.RESET_DEFAULT_TEAM_WORKSPACE === "true" && process.env.WORKSPACE_ROOT) {
@@ -434,6 +461,7 @@ function bootstrapFor(user) {
     auditLogs: auditLogs.slice(-BOOTSTRAP_AUDIT_LIMIT),
     claudeConfig: db.claudeConfig,
     serverInfo: serverInfo(),
+    toolInventory: discoveredToolInventory(),
   };
 }
 
@@ -534,6 +562,9 @@ function toolSpecForServer(serverName) {
 function approvedToolSpecs(session) {
   const approvals = ensureToolApprovals(session);
   const specs = new Set();
+  for (const toolName of db.claudeConfig.mcpToolAllowlist || []) {
+    if (toolName) specs.add(toolName);
+  }
   for (const toolName of [...approvals.alwaysTools, ...approvals.onceTools]) {
     if (toolName) specs.add(toolName);
   }
@@ -547,7 +578,49 @@ function approvedToolSpecs(session) {
 function isToolApprovedByPolicy(session, toolName) {
   const approvals = ensureToolApprovals(session);
   const parsed = parseMcpToolName(toolName);
-  return approvals.onceTools.includes(toolName) || approvals.alwaysTools.includes(toolName) || (parsed.serverName && approvals.alwaysServers.includes(parsed.serverName));
+  return (db.claudeConfig.mcpToolAllowlist || []).includes(toolName) || approvals.onceTools.includes(toolName) || approvals.alwaysTools.includes(toolName) || (parsed.serverName && approvals.alwaysServers.includes(parsed.serverName));
+}
+
+function discoveredToolInventory() {
+  const tools = new Set(db.claudeConfig.mcpToolAllowlist || []);
+  const servers = new Set();
+  for (const session of db.sessions) {
+    const approvals = ensureToolApprovals(session);
+    for (const tool of [...approvals.onceTools, ...approvals.alwaysTools]) if (tool) tools.add(tool);
+    for (const server of approvals.alwaysServers) if (server) servers.add(server);
+  }
+  for (const permission of db.permissions) {
+    if (permission.toolName) tools.add(permission.toolName);
+    if (permission.serverName) servers.add(permission.serverName);
+  }
+  for (const tool of tools) {
+    const parsed = parseMcpToolName(tool);
+    if (parsed.serverName) servers.add(parsed.serverName);
+  }
+  return { tools: [...tools].sort(), servers: [...servers].sort() };
+}
+
+function autoCompactWindow() {
+  const contextTokens = Math.max(1000, Number(db.claudeConfig.modelContextTokens || 256000));
+  const ratio = Math.min(0.9, Math.max(0.1, Number(db.claudeConfig.autoCompactRatio || 0.62)));
+  return Math.floor(contextTokens * ratio);
+}
+
+function toolGuardPrompt(session) {
+  const allowedTools = approvedToolSpecs(session);
+  const discovered = discoveredToolInventory();
+  const lines = [
+    "WebUI 工具边界提醒：",
+    allowedTools.length ? `当前已允许的工具：${allowedTools.join(", ")}` : "当前没有预授权工具；如需使用 MCP/工具，必须先触发 WebUI 权限审批。",
+    discovered.tools.length ? `已接入/已发现的 MCP 工具候选：${discovered.tools.join(", ")}` : "尚未发现任何 MCP 工具候选。",
+    "不要假设存在未列出的 MCP 工具、数据库工具、文件工具或 shell 能力。",
+    "如果需要未列出的工具，明确说明当前 WebUI 未接入该工具，不要编造工具调用。",
+  ];
+  return lines.join("\n");
+}
+
+function promptWithRuntimeGuard(session, prompt) {
+  return `${toolGuardPrompt(session)}\n\n用户新消息：\n${prompt}`;
 }
 
 function applyToolApproval(session, permission, decision) {
@@ -779,9 +852,27 @@ async function handleClaudeSdkStreamEvent(session, runtime, event) {
   }
 }
 
+async function recordNativeCompact(session, runtime, metadata = {}, summary = "") {
+  session.contextState = {
+    ...(session.contextState || {}),
+    lastNativeCompactAt: now(),
+    lastNativeCompact: metadata || {},
+    nativeCompactSummary: summary || session.contextState?.nativeCompactSummary || "",
+  };
+  const detail = summary
+    ? `Claude Code 压缩摘要：\n${summary}`
+    : `Claude Code 已执行上下文压缩。\ntrigger: ${metadata?.trigger || "unknown"}\npre_tokens: ${metadata?.pre_tokens || "unknown"}\npost_tokens: ${metadata?.post_tokens || "unknown"}`;
+  await appendSessionMessage(session, "tool", detail, runtime.agent?.id, { type: "thinking", status: "done", subject: "上下文压缩", turnId: runtime.turnId });
+}
+
 async function handleClaudeStreamEvent(session, runtime, event) {
   if (!event || typeof event !== "object") return;
   if (event.session_id) session.claudeSessionId = event.session_id;
+
+  if (event.type === "system" && event.subtype === "compact_boundary") {
+    await recordNativeCompact(session, runtime, event.compact_metadata || {});
+    return;
+  }
 
   if (event.type === "stream_event") {
     await handleClaudeSdkStreamEvent(session, runtime, event);
@@ -801,6 +892,14 @@ async function handleClaudeStreamEvent(session, runtime, event) {
   }
 
   if (event.type === "system") {
+    if (event.subtype === "status" && event.status === "compacting") {
+      await appendThinkingDelta(session, runtime, "Claude Code 正在进行原生上下文压缩。\n", "上下文压缩");
+      return;
+    }
+    if (event.subtype === "hook_response" && event.input?.hook_event_name === "PostCompact") {
+      await recordNativeCompact(session, runtime, { trigger: event.input.trigger || "auto" }, event.input.compact_summary || "");
+      return;
+    }
     if (event.subtype === "init") {
       runtime.model = event.model || runtime.model;
       return;
@@ -1224,13 +1323,27 @@ async function submitClaudeTurn(session, prompt, turnId) {
 
   const extraArgs = sanitizeClaudeExtraArgs(String(db.claudeConfig.args || "").split(" ").filter(Boolean));
   const sdkLaunch = claudeSdkLaunchOptions(db.claudeConfig.command);
+  const guardedPrompt = promptWithRuntimeGuard(session, prompt);
   const sdkOptions = {
     abortController,
     cwd: session.cwd,
     env: { ...process.env, TERM: "xterm-256color" },
     includePartialMessages: true,
+    includeHookEvents: true,
     allowedTools: approvedToolSpecs(session),
     extraArgs: cliArgsToExtraArgs(extraArgs),
+    settings: {
+      autoCompactEnabled: db.claudeConfig.autoCompactEnabled !== false,
+      autoCompactWindow: autoCompactWindow(),
+    },
+    hooks: {
+      PostCompact: [{
+        hooks: [async (input) => {
+          await recordNativeCompact(session, runtime, { trigger: input.trigger || "auto" }, input.compact_summary || "");
+          return { continue: true, suppressOutput: true };
+        }],
+      }],
+    },
     ...(session.claudeSessionId ? { resume: session.claudeSessionId } : {}),
     ...sdkLaunch,
     canUseTool: (toolName, input, options) => createSdkToolPermissionRequest(session, runtime, toolName, input, options),
@@ -1239,13 +1352,13 @@ async function submitClaudeTurn(session, prompt, turnId) {
   await appendSessionMessage(
     session,
     "tool",
-    `${session.claudeSessionId ? "恢复 Claude Code SDK 会话" : "启动 Claude Code SDK 会话"}\ncommand: ${sdkLaunch.pathToClaudeCodeExecutable || db.claudeConfig.command}\nallowedTools: ${sdkOptions.allowedTools.length ? sdkOptions.allowedTools.join(", ") : "(none)"}\ncwd: ${session.cwd}`,
+    `${session.claudeSessionId ? "恢复 Claude Code SDK 会话" : "启动 Claude Code SDK 会话"}\ncommand: ${sdkLaunch.pathToClaudeCodeExecutable || db.claudeConfig.command}\nallowedTools: ${sdkOptions.allowedTools.length ? sdkOptions.allowedTools.join(", ") : "(none)"}\nautoCompact: ${sdkOptions.settings.autoCompactEnabled ? `${sdkOptions.settings.autoCompactWindow} tokens` : "disabled"}\ncwd: ${session.cwd}`,
     agent.id,
     { type: "command", command: sdkLaunch.pathToClaudeCodeExecutable || db.claudeConfig.command, args: sdkOptions.allowedTools, cwd: session.cwd, claudeSessionId: session.claudeSessionId || null, runtime: "sdk" },
   );
 
   try {
-    for await (const event of query({ prompt, options: sdkOptions })) {
+    for await (const event of query({ prompt: guardedPrompt, options: sdkOptions })) {
       runtime.lastOutputAt = now();
       await handleClaudeStreamEvent(session, runtime, event);
     }
@@ -1646,6 +1759,12 @@ async function handleApi(req, res, pathname) {
     db.claudeConfig.command = body.command || db.claudeConfig.command;
     db.claudeConfig.args = body.args || "";
     db.claudeConfig.workspaceRoot = body.workspaceRoot || db.claudeConfig.workspaceRoot;
+    db.claudeConfig.modelContextTokens = Math.max(1000, Number(body.modelContextTokens || db.claudeConfig.modelContextTokens || 256000));
+    db.claudeConfig.autoCompactRatio = Math.min(0.9, Math.max(0.1, Number(body.autoCompactRatio || db.claudeConfig.autoCompactRatio || 0.62)));
+    db.claudeConfig.autoCompactEnabled = body.autoCompactEnabled !== false;
+    db.claudeConfig.mcpToolAllowlist = Array.isArray(body.mcpToolAllowlist)
+      ? body.mcpToolAllowlist.map((item) => String(item).trim()).filter(Boolean)
+      : String(body.mcpToolAllowlist || "").split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean);
     audit(user.id, "claude.config_updated", "agent", "claude_code");
     await saveDb();
     return send(res, 200, { claudeConfig: db.claudeConfig });

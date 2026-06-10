@@ -1259,6 +1259,32 @@ select:disabled {
   font-size: 13px;
 }
 
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.inventory-list {
+  display: grid;
+  gap: 8px;
+}
+
+.inventory-list div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.inventory-list code {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 12px;
+}
+
 .team-layout > .panel:last-child {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);

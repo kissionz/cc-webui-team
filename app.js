@@ -35,6 +35,10 @@ const seedState = () => ({
     command: "claude",
     args: "",
     workspaceRoot: "/srv/workspaces",
+    modelContextTokens: 256000,
+    autoCompactRatio: 0.62,
+    autoCompactEnabled: true,
+    mcpToolAllowlist: [],
     enabled: true,
     available: true,
     version: "1.0.74",
@@ -43,6 +47,7 @@ const seedState = () => ({
     lastCheckAt: now() - 1000 * 60 * 16,
   },
   serverInfo: {},
+  toolInventory: { tools: [], servers: [] },
 });
 
 let state = loadState();
@@ -64,6 +69,7 @@ function loadState() {
     fileChanges: [],
     auditLogs: [],
     serverInfo: {},
+    toolInventory: { tools: [], servers: [] },
   };
 }
 
@@ -1002,6 +1008,8 @@ function renderQuestionSummary(questions) {
 function renderSettings() {
   const cfg = state.claudeConfig;
   const info = state.serverInfo || {};
+  const inventory = state.toolInventory || { tools: [], servers: [] };
+  const compactWindow = Math.floor(Number(cfg.modelContextTokens || 256000) * Number(cfg.autoCompactRatio || 0.62));
   const actions = `<button class="button primary" data-action="health-check">${icons.check}运行健康检查</button>`;
   return appRoot(`
     ${topbar("Agent 设置", "配置 Claude Code CLI、工作区 allowlist 和运行策略", actions)}
@@ -1021,6 +1029,16 @@ function renderSettings() {
             <div class="field"><label>启动参数</label><input class="input" name="args" value="${escapeHtml(cfg.args)}" /></div>
           </div>
           <div class="field"><label>Workspace allowlist 根目录</label><input class="input" name="workspaceRoot" value="${escapeHtml(cfg.workspaceRoot)}" /></div>
+          <div class="grid two">
+            <div class="field"><label>模型上下文窗口 tokens</label><input class="input" name="modelContextTokens" type="number" min="1000" step="1000" value="${escapeHtml(cfg.modelContextTokens || 256000)}" /></div>
+            <div class="field"><label>自动压缩阈值</label><input class="input" name="autoCompactRatio" type="number" min="0.1" max="0.9" step="0.01" value="${escapeHtml(cfg.autoCompactRatio || 0.62)}" /></div>
+          </div>
+          <label class="toggle-row"><input type="checkbox" name="autoCompactEnabled" ${cfg.autoCompactEnabled === false ? "" : "checked"} />启用 Claude Code SDK 原生 auto compact，当前约 ${compactWindow.toLocaleString()} tokens 触发</label>
+          <div class="field">
+            <label>MCP 工具 allowlist</label>
+            <textarea class="textarea" name="mcpToolAllowlist" placeholder="每行一个工具名，例如 mcp__data_connector__run_mc_query">${escapeHtml((cfg.mcpToolAllowlist || []).join("\n"))}</textarea>
+            <div class="helper">这里是 WebUI 护栏和预授权的权威工具清单。模型每轮都会收到该清单，并被要求不要幻想未列出的工具。</div>
+          </div>
           <button class="button primary" type="submit">保存配置</button>
         </form>
         <div class="card" style="padding:18px">
@@ -1039,6 +1057,7 @@ function renderSettings() {
         <div class="panel-header"><h2 class="panel-title">能力状态</h2>${badge("server adapter", "blue")}</div>
         <div class="side-stack">
           <div class="side-card"><h4>Health Check</h4><p>${escapeHtml(cfg.message || "运行健康检查后会显示 Claude Code CLI 状态。")}</p></div>
+          <div class="side-card"><h4>MCP 工具清单</h4>${renderToolInventory(inventory)}</div>
           <div class="side-card"><h4>Streaming</h4><p>统一为 message_delta / message_done 事件。</p></div>
           <div class="side-card"><h4>Permission Prompts</h4><p>文件写入、命令执行和越界访问会进入审批队列。</p></div>
           <div class="side-card"><h4>Process Isolation</h4><p>每个会话按 PRD 预留独立 CLI 进程模型。</p></div>
@@ -1046,6 +1065,18 @@ function renderSettings() {
       </aside>
     </section>
   `);
+}
+
+function renderToolInventory(inventory) {
+  const tools = inventory.tools || [];
+  const servers = inventory.servers || [];
+  if (!tools.length && !servers.length) return "<p>尚未发现 MCP 工具。可先在 allowlist 手动填写，或等首次权限请求后自动发现。</p>";
+  return `
+    <div class="inventory-list">
+      ${servers.map((server) => `<div>${badge("server", "blue")}<code>${escapeHtml(server)}</code></div>`).join("")}
+      ${tools.map((tool) => `<div>${badge("tool", "green")}<code>${escapeHtml(tool)}</code></div>`).join("")}
+    </div>
+  `;
 }
 
 function renderUsers() {
@@ -1363,6 +1394,10 @@ async function saveConfig(form) {
       command: String(data.get("command")).trim() || "claude",
       args: String(data.get("args")).trim(),
       workspaceRoot: String(data.get("workspaceRoot")).trim(),
+      modelContextTokens: Number(data.get("modelContextTokens") || 256000),
+      autoCompactRatio: Number(data.get("autoCompactRatio") || 0.62),
+      autoCompactEnabled: data.get("autoCompactEnabled") === "on",
+      mcpToolAllowlist: String(data.get("mcpToolAllowlist") || "").split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean),
     }),
   });
   await refresh();
