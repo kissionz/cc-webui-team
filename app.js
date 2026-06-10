@@ -700,11 +700,12 @@ function renderTurn(turn) {
   const agentMessages = turn.messages.filter((message) => message.senderType === "agent");
   const eventMessages = turn.messages.filter((message) => message.senderType !== "agent");
   const hasAgentOutput = agentMessages.some((message) => String(message.content || "").trim());
+  const hasNoisyEvents = eventMessages.length > 2 || eventMessages.some((message) => ["command", "input", "tool_call", "permission_request"].includes(message.metadata?.type));
   return `
     <section class="turn">
       ${turn.user ? renderMessage(turn.user) : ""}
       ${agentMessages.map(renderMessage).join("")}
-      ${eventMessages.length ? renderTurnEvents(eventMessages, hasAgentOutput) : ""}
+      ${eventMessages.length ? renderTurnEvents(eventMessages, hasAgentOutput || hasNoisyEvents) : ""}
     </section>
   `;
 }
@@ -1182,6 +1183,8 @@ function showError(err) {
 }
 
 function render() {
+  const previousStream = document.querySelector("#chat-stream");
+  const shouldStickToBottom = previousStream ? previousStream.scrollHeight - previousStream.scrollTop - previousStream.clientHeight < 96 : true;
   if (!state.currentUserId) {
     renderLogin();
     return;
@@ -1194,7 +1197,7 @@ function render() {
   else html = renderTeams();
   document.querySelector("#app").innerHTML = html + renderModal(activeModal, modalTeamId) + renderPermissionOverlay();
   const stream = document.querySelector("#chat-stream");
-  if (stream) stream.scrollTop = stream.scrollHeight;
+  if (stream && shouldStickToBottom) stream.scrollTop = stream.scrollHeight;
 }
 
 async function login(form) {

@@ -739,12 +739,16 @@ select:disabled {
 .session-delete {
   width: 34px;
   height: 34px;
+  visibility: hidden;
   opacity: 0;
+  pointer-events: none;
 }
 
 .session-row:hover .session-delete,
 .session-delete:focus-visible {
+  visibility: visible;
   opacity: 1;
+  pointer-events: auto;
 }
 
 .session-item:hover,
@@ -845,13 +849,16 @@ select:disabled {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  visibility: hidden;
   opacity: 0;
-  transition: opacity 150ms ease;
+  pointer-events: none;
 }
 
 .message:hover .message-actions,
 .message:focus-within .message-actions {
+  visibility: visible;
   opacity: 1;
+  pointer-events: auto;
 }
 
 .text-button {
