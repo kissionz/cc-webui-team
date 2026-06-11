@@ -57,6 +57,10 @@ let state = loadState();
 let eventSource = null;
 let refreshTimer = null;
 let renderTimer = null;
+let teamRenderTimer = null;
+let messagePatchTimer = null;
+const pendingTeamRender = { rail: false, chat: false, right: false };
+const pendingMessagePatches = new Set();
 const uiMemory = {
   composerDrafts: new Map(),
   openTurnEvents: new Map(),
@@ -124,6 +128,48 @@ function scheduleRender() {
   renderTimer = setTimeout(() => render(), 80);
 }
 
+function scheduleTeamRender(parts, delay = 120) {
+  if (state.activeView !== "team") {
+    scheduleRender();
+    return;
+  }
+  if (!parts.rail && !parts.chat && !parts.right) return;
+  pendingTeamRender.rail ||= Boolean(parts.rail);
+  pendingTeamRender.chat ||= Boolean(parts.chat);
+  pendingTeamRender.right ||= Boolean(parts.right);
+  clearTimeout(teamRenderTimer);
+  teamRenderTimer = setTimeout(() => {
+    const next = { ...pendingTeamRender };
+    pendingTeamRender.rail = false;
+    pendingTeamRender.chat = false;
+    pendingTeamRender.right = false;
+    renderTeamParts(next);
+  }, delay);
+}
+
+function scheduleSessionScopedRender(sessionId, selectedParts, otherParts = { rail: true }, delay = 120) {
+  if (state.activeView !== "team") {
+    scheduleRender();
+    return;
+  }
+  scheduleTeamRender(sessionId === state.selectedSessionId ? selectedParts : otherParts, delay);
+}
+
+function scheduleMessagePatch(messageId, delay = 90) {
+  if (state.activeView !== "team") {
+    scheduleRender();
+    return;
+  }
+  pendingMessagePatches.add(messageId);
+  clearTimeout(messagePatchTimer);
+  messagePatchTimer = setTimeout(() => {
+    const ids = [...pendingMessagePatches];
+    pendingMessagePatches.clear();
+    const needsChatRender = ids.some((id) => !patchVisibleMessage(id));
+    if (needsChatRender) scheduleTeamRender({ chat: true }, 90);
+  }, delay);
+}
+
 function connectEvents() {
   if (eventSource || !state.currentUserId) return;
   eventSource = new EventSource("/api/events");
@@ -145,25 +191,26 @@ function applyRealtimeEvent(event) {
   if (event.type === "session.message.created" && event.message) {
     const exists = state.messages.some((message) => message.id === event.message.id);
     if (!exists) state.messages = [...state.messages, event.message];
-    scheduleRender();
+    scheduleSessionScopedRender(event.message.sessionId || event.sessionId, { chat: true }, { rail: true }, 90);
     return;
   }
 
   if (event.type === "session.message.delta") {
     state.messages = state.messages.map((message) => (message.id === event.messageId ? { ...message, content: `${message.content || ""}${event.text || ""}`, createdAt: message.createdAt } : message));
-    scheduleRender();
+    if (event.sessionId === state.selectedSessionId) scheduleMessagePatch(event.messageId, 90);
     return;
   }
 
   if (event.type === "session.message.updated" && event.message) {
     state.messages = state.messages.map((message) => (message.id === event.message.id ? event.message : message));
-    scheduleRender();
+    if ((event.message.sessionId || event.sessionId) === state.selectedSessionId) scheduleMessagePatch(event.message.id, 90);
+    else scheduleSessionScopedRender(event.message.sessionId || event.sessionId, { chat: true }, { rail: true }, 90);
     return;
   }
 
   if (event.type === "session.status.changed") {
     state.sessions = state.sessions.map((session) => (session.id === event.sessionId ? { ...session, status: event.status, updatedAt: now() } : session));
-    scheduleRender();
+    scheduleSessionScopedRender(event.sessionId, { rail: true, chat: true, right: true }, { rail: true }, 120);
     return;
   }
 
@@ -605,7 +652,7 @@ function renderTeamRail(team, activeSession) {
   const members = state.members.filter((member) => member.teamId === team.id);
   const running = state.sessions.filter((session) => session.teamId === team.id && session.status === "running").length;
   return `
-    <aside class="panel team-rail">
+    <aside class="panel team-rail" id="team-rail">
       <div class="team-summary">
         <div class="section-title"><h3>${escapeHtml(team.name)}</h3>${badge(running ? `${running} running` : "idle", running ? "blue" : "")}</div>
         <p>${escapeHtml(team.workspacePath)}</p>
@@ -657,7 +704,7 @@ function renderSessionList(team, activeSession, embedded = false) {
 
 function renderChat(team, session) {
   if (!session) {
-    return `<section class="panel chat-panel"><div class="empty">创建一个 Claude Code 会话开始协作</div></section>`;
+    return `<section class="panel chat-panel" id="chat-panel"><div class="empty">创建一个 Claude Code 会话开始协作</div></section>`;
   }
   const allMessages = state.messages.filter((message) => message.sessionId === session.id);
   const messages = allMessages.slice(-CHAT_RENDER_LIMIT);
@@ -667,7 +714,7 @@ function renderChat(team, session) {
   const visibility = sessionVisibility(session);
   const draft = uiMemory.composerDrafts.get(session.id) || "";
   return `
-    <section class="panel chat-panel">
+    <section class="panel chat-panel" id="chat-panel">
       <div class="panel-header">
         <div class="title-stack">
           <h2 class="panel-title truncate-title" title="${escapeHtml(titleText(session.title))}">${escapeHtml(titleText(session.title))}</h2>
@@ -777,7 +824,7 @@ function renderMessage(message) {
   const rich = message.senderType === "agent";
   const content = rich ? renderMarkdown(message.content) : escapeHtml(message.content);
   return `
-    <article class="message ${message.senderType}">
+    <article class="message ${message.senderType}" data-message-id="${escapeHtml(message.id)}">
       <div class="message-meta">
         <span>${escapeHtml(sender)}</span><span>${fmt(message.createdAt)}</span>
         <span class="message-actions">
@@ -793,7 +840,7 @@ function renderMessage(message) {
 function renderTimelineEvent(message) {
   const event = timelineEventMeta(message);
   return `
-    <article class="timeline-event ${event.tone}">
+    <article class="timeline-event ${event.tone}" data-message-id="${escapeHtml(message.id)}">
       <span class="event-icon">${event.spinner ? '<span class="event-spinner" aria-hidden="true"></span>' : event.icon}</span>
       <div class="event-body">
         <div class="event-head"><strong>${escapeHtml(event.title)}</strong><span>${fmt(message.updatedAt || message.createdAt)}</span></div>
@@ -848,7 +895,7 @@ function renderRightRail(team, session) {
   const decidedPermissions = permissions.filter((permission) => permission.status !== "pending").slice(-6).reverse();
   const files = session ? state.fileChanges.filter((file) => file.sessionId === session.id) : [];
   return `
-    <aside class="panel">
+    <aside class="panel" id="right-rail">
       <div class="panel-header"><h2 class="panel-title">运行侧栏</h2>${badge(cli.label, cli.tone)}</div>
       <div class="side-stack">
         <div class="side-card">
@@ -1260,6 +1307,46 @@ function render() {
   else html = renderTeams();
   document.querySelector("#app").innerHTML = html + renderModal(activeModal, modalTeamId) + renderPermissionOverlay();
   restoreUiSnapshot(snapshot);
+}
+
+function renderTeamParts(parts = {}) {
+  if (!state.currentUserId || state.activeView !== "team") {
+    render();
+    return;
+  }
+  const team = state.teams.find((item) => item.id === state.selectedTeamId) || state.teams[0];
+  if (!team) {
+    render();
+    return;
+  }
+  const sessions = state.sessions.filter((session) => session.teamId === team.id);
+  const session = state.sessions.find((item) => item.id === state.selectedSessionId && item.teamId === team.id) || sessions[0];
+  if (session && state.selectedSessionId !== session.id) state.selectedSessionId = session.id;
+  const snapshot = captureUiSnapshot();
+  const rail = document.querySelector("#team-rail");
+  const chat = document.querySelector("#chat-panel");
+  const right = document.querySelector("#right-rail");
+  if (parts.rail && rail) rail.outerHTML = renderTeamRail(team, session);
+  if (parts.chat && chat) chat.outerHTML = renderChat(team, session);
+  if (parts.right && right) right.outerHTML = renderRightRail(team, session);
+  if ((parts.rail && !rail) || (parts.chat && !chat) || (parts.right && !right)) {
+    render();
+    return;
+  }
+  restoreUiSnapshot(snapshot);
+}
+
+function patchVisibleMessage(messageId) {
+  const message = state.messages.find((item) => item.id === messageId);
+  if (!message || state.activeView !== "team" || message.sessionId !== state.selectedSessionId) return false;
+  const element = document.querySelector(`[data-message-id="${cssEscape(messageId)}"]`);
+  if (!element) return false;
+  const snapshot = captureUiSnapshot();
+  const html = renderMessage(message).trim();
+  if (html) element.outerHTML = html;
+  else element.remove();
+  restoreUiSnapshot(snapshot);
+  return true;
 }
 
 function captureUiSnapshot() {
