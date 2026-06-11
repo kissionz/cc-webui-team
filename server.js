@@ -611,10 +611,10 @@ function toolGuardPrompt(session) {
   const discovered = discoveredToolInventory();
   const lines = [
     "WebUI 工具边界提醒：",
-    allowedTools.length ? `当前已允许的工具：${allowedTools.join(", ")}` : "当前没有预授权工具；如需使用 MCP/工具，必须先触发 WebUI 权限审批。",
-    discovered.tools.length ? `已接入/已发现的 MCP 工具候选：${discovered.tools.join(", ")}` : "尚未发现任何 MCP 工具候选。",
-    "不要假设存在未列出的 MCP 工具、数据库工具、文件工具或 shell 能力。",
-    "如果需要未列出的工具，明确说明当前 WebUI 未接入该工具，不要编造工具调用。",
+    allowedTools.length ? `当前已预授权的工具：${allowedTools.join(", ")}` : "当前没有 WebUI 预授权工具；这不代表 Claude Code 运行时没有 MCP 工具。",
+    discovered.tools.length ? `WebUI 已缓存/已发现的 MCP 工具候选：${discovered.tools.join(", ")}` : "WebUI 尚未缓存 MCP 工具清单；实际可用工具以 Claude Code 运行时暴露为准。",
+    "如果任务需要 MCP/工具，可以正常请求使用；未预授权的工具会触发 WebUI 权限审批。",
+    "不要编造工具调用结果；如果 Claude Code 运行时没有暴露所需工具，再明确说明当前运行时不可用。",
   ];
   return lines.join("\n");
 }
@@ -1352,7 +1352,7 @@ async function submitClaudeTurn(session, prompt, turnId) {
   await appendSessionMessage(
     session,
     "tool",
-    `${session.claudeSessionId ? "恢复 Claude Code SDK 会话" : "启动 Claude Code SDK 会话"}\ncommand: ${sdkLaunch.pathToClaudeCodeExecutable || db.claudeConfig.command}\nallowedTools: ${sdkOptions.allowedTools.length ? sdkOptions.allowedTools.join(", ") : "(none)"}\nautoCompact: ${sdkOptions.settings.autoCompactEnabled ? `${sdkOptions.settings.autoCompactWindow} tokens` : "disabled"}\ncwd: ${session.cwd}`,
+    `${session.claudeSessionId ? "恢复 Claude Code SDK 会话" : "启动 Claude Code SDK 会话"}\ncommand: ${sdkLaunch.pathToClaudeCodeExecutable || db.claudeConfig.command}\npreauthorizedTools: ${sdkOptions.allowedTools.length ? sdkOptions.allowedTools.join(", ") : "(none)"}\nautoCompact: ${sdkOptions.settings.autoCompactEnabled ? `${sdkOptions.settings.autoCompactWindow} tokens` : "disabled"}\ncwd: ${session.cwd}`,
     agent.id,
     { type: "command", command: sdkLaunch.pathToClaudeCodeExecutable || db.claudeConfig.command, args: sdkOptions.allowedTools, cwd: session.cwd, claudeSessionId: session.claudeSessionId || null, runtime: "sdk" },
   );

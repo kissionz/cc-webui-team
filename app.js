@@ -1150,7 +1150,7 @@ function renderSettings() {
 function renderToolInventory(inventory) {
   const tools = inventory.tools || [];
   const servers = inventory.servers || [];
-  if (!tools.length && !servers.length) return "<p>尚未发现 MCP 工具。可先在 allowlist 手动填写，或等首次权限请求后自动发现。</p>";
+  if (!tools.length && !servers.length) return "<p>WebUI 尚未缓存 MCP 工具清单。这不代表宿主机 Claude Code 没有 MCP；实际可用工具以 Claude Code 运行时为准，首次使用或审批后会显示在这里。</p>";
   return `
     <div class="inventory-list">
       ${servers.map((server) => `<div>${badge("server", "blue")}<code>${escapeHtml(server)}</code></div>`).join("")}
