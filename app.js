@@ -1117,7 +1117,7 @@ function renderSettings() {
           <div class="field">
             <label>MCP 工具 allowlist</label>
             <textarea class="textarea" name="mcpToolAllowlist" placeholder="每行一个工具名，例如 mcp__data_connector__run_mc_query">${escapeHtml((cfg.mcpToolAllowlist || []).join("\n"))}</textarea>
-            <div class="helper">这里是 WebUI 护栏和预授权的权威工具清单。模型每轮都会收到该清单，并被要求不要幻想未列出的工具。</div>
+            <div class="helper">这里仅用于 WebUI 预授权和审批识别，不会替代宿主机 Claude Code 的 MCP 配置。留空时仍以 Claude Code 运行时暴露的工具为准。</div>
           </div>
           <button class="button primary" type="submit">保存配置</button>
         </form>

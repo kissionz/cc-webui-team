@@ -611,10 +611,11 @@ function toolGuardPrompt(session) {
   const discovered = discoveredToolInventory();
   const lines = [
     "WebUI 工具边界提醒：",
-    allowedTools.length ? `当前已预授权的工具：${allowedTools.join(", ")}` : "当前没有 WebUI 预授权工具；这不代表 Claude Code 运行时没有 MCP 工具。",
-    discovered.tools.length ? `WebUI 已缓存/已发现的 MCP 工具候选：${discovered.tools.join(", ")}` : "WebUI 尚未缓存 MCP 工具清单；实际可用工具以 Claude Code 运行时暴露为准。",
-    "如果任务需要 MCP/工具，可以正常请求使用；未预授权的工具会触发 WebUI 权限审批。",
-    "不要编造工具调用结果；如果 Claude Code 运行时没有暴露所需工具，再明确说明当前运行时不可用。",
+    allowedTools.length ? `WebUI 已预授权的工具：${allowedTools.join(", ")}` : "WebUI 当前没有预授权工具；这不限制 Claude Code 运行时已有的 MCP 工具。",
+    discovered.tools.length ? `WebUI 缓存过的 MCP 工具名，仅供识别权限审批：${discovered.tools.join(", ")}` : "WebUI 尚未缓存 MCP 工具清单；这不代表运行时没有 MCP。",
+    "不要根据 WebUI 缓存清单判断工具是否可用；实际可用工具以 Claude Code 运行时暴露为准。",
+    "如果任务需要 MCP/工具，直接按 Claude Code 运行时能力尝试使用。未预授权的工具会触发 WebUI 权限审批。",
+    "不要编造工具调用结果；如果真实工具调用失败，再报告运行时返回的失败原因。",
   ];
   return lines.join("\n");
 }
@@ -1324,13 +1325,13 @@ async function submitClaudeTurn(session, prompt, turnId) {
   const extraArgs = sanitizeClaudeExtraArgs(String(db.claudeConfig.args || "").split(" ").filter(Boolean));
   const sdkLaunch = claudeSdkLaunchOptions(db.claudeConfig.command);
   const guardedPrompt = promptWithRuntimeGuard(session, prompt);
+  const preauthorizedTools = approvedToolSpecs(session);
   const sdkOptions = {
     abortController,
     cwd: session.cwd,
     env: { ...process.env, TERM: "xterm-256color" },
     includePartialMessages: true,
     includeHookEvents: true,
-    allowedTools: approvedToolSpecs(session),
     extraArgs: cliArgsToExtraArgs(extraArgs),
     settings: {
       autoCompactEnabled: db.claudeConfig.autoCompactEnabled !== false,
@@ -1345,6 +1346,7 @@ async function submitClaudeTurn(session, prompt, turnId) {
       }],
     },
     ...(session.claudeSessionId ? { resume: session.claudeSessionId } : {}),
+    ...(preauthorizedTools.length ? { allowedTools: preauthorizedTools } : {}),
     ...sdkLaunch,
     canUseTool: (toolName, input, options) => createSdkToolPermissionRequest(session, runtime, toolName, input, options),
   };
@@ -1352,9 +1354,9 @@ async function submitClaudeTurn(session, prompt, turnId) {
   await appendSessionMessage(
     session,
     "tool",
-    `${session.claudeSessionId ? "恢复 Claude Code SDK 会话" : "启动 Claude Code SDK 会话"}\ncommand: ${sdkLaunch.pathToClaudeCodeExecutable || db.claudeConfig.command}\npreauthorizedTools: ${sdkOptions.allowedTools.length ? sdkOptions.allowedTools.join(", ") : "(none)"}\nautoCompact: ${sdkOptions.settings.autoCompactEnabled ? `${sdkOptions.settings.autoCompactWindow} tokens` : "disabled"}\ncwd: ${session.cwd}`,
+    `${session.claudeSessionId ? "恢复 Claude Code SDK 会话" : "启动 Claude Code SDK 会话"}\ncommand: ${sdkLaunch.pathToClaudeCodeExecutable || db.claudeConfig.command}\npreauthorizedTools: ${preauthorizedTools.length ? preauthorizedTools.join(", ") : "(none)"}\nautoCompact: ${sdkOptions.settings.autoCompactEnabled ? `${sdkOptions.settings.autoCompactWindow} tokens` : "disabled"}\ncwd: ${session.cwd}`,
     agent.id,
-    { type: "command", command: sdkLaunch.pathToClaudeCodeExecutable || db.claudeConfig.command, args: sdkOptions.allowedTools, cwd: session.cwd, claudeSessionId: session.claudeSessionId || null, runtime: "sdk" },
+    { type: "command", command: sdkLaunch.pathToClaudeCodeExecutable || db.claudeConfig.command, args: preauthorizedTools, cwd: session.cwd, claudeSessionId: session.claudeSessionId || null, runtime: "sdk" },
   );
 
   try {
