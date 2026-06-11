@@ -1597,10 +1597,17 @@ select:disabled {
 
 .modal {
   width: min(560px, 100%);
+  max-height: calc(100dvh - 40px);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   background: var(--surface);
   box-shadow: 0 28px 70px rgba(10, 18, 23, 0.28);
+}
+
+.members-modal {
+  width: min(620px, 100%);
 }
 
 .modal-head,
@@ -1622,6 +1629,53 @@ select:disabled {
   justify-content: flex-end;
   gap: 10px;
   border-top: 1px solid var(--line);
+}
+
+.members-modal-body {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 14px;
+  overflow: hidden;
+}
+
+.members-modal-body .member-list {
+  min-height: 0;
+  overflow: auto;
+  padding: 0;
+  gap: 7px;
+}
+
+.members-modal-body .form-row {
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.compact-member-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+}
+
+.compact-member-row div {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.compact-member-row strong,
+.compact-member-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.compact-member-row span {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .permission-card {

@@ -1245,7 +1245,7 @@ function renderModal(kind, teamId = state.selectedTeamId) {
     .filter((member) => member.teamId === teamId)
     .map((member) => {
       const user = state.users.find((item) => item.id === member.userId);
-      return `<div class="member-row"><strong>${escapeHtml(user?.displayName || "")}</strong><div class="meta">${escapeHtml(user?.username || "")} ${badge(member.role, member.role === "viewer" ? "" : "green")}</div></div>`;
+      return `<div class="member-row compact-member-row"><div><strong>${escapeHtml(user?.displayName || "")}</strong><span>${escapeHtml(user?.username || "")}</span></div>${badge(member.role, member.role === "viewer" ? "" : "green")}</div>`;
     })
     .join("");
   const options = state.users
@@ -1254,10 +1254,12 @@ function renderModal(kind, teamId = state.selectedTeamId) {
     .join("");
   return `
     <div class="modal-backdrop" data-close-modal>
-      <div class="modal">
+      <div class="modal members-modal">
         <div class="modal-head"><h3>${escapeHtml(team?.name || "")} 成员</h3></div>
-        <div class="modal-body grid">
-          ${memberRows}
+        <div class="modal-body members-modal-body">
+          <div class="member-list">
+            ${memberRows || '<div class="empty">还没有成员</div>'}
+          </div>
           <form class="form-row" data-form="member" data-team="${teamId}">
             <div class="field"><label>用户</label><select class="select" name="userId">${options}</select></div>
             <div class="field"><label>角色</label><select class="select" name="role"><option value="member">member</option><option value="admin">admin</option><option value="viewer">viewer</option></select></div>
