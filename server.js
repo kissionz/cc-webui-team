@@ -220,7 +220,7 @@ function seedDb() {
       command: CLAUDE_COMMAND,
       args: CLAUDE_ARGS.join(" "),
       workspaceRoot: WORKSPACE_ROOT,
-      modelContextTokens: Number(process.env.MODEL_CONTEXT_TOKENS || 256000),
+      modelContextTokens: Number(process.env.MODEL_CONTEXT_TOKENS || 1000000),
       autoCompactRatio: Number(process.env.AUTO_COMPACT_RATIO || 0.62),
       autoCompactEnabled: process.env.AUTO_COMPACT_ENABLED !== "false",
       mcpToolAllowlist: (process.env.MCP_TOOL_ALLOWLIST || "").split(",").map((item) => item.trim()).filter(Boolean),
@@ -247,7 +247,7 @@ async function loadDb() {
 
 function normalizeRuntimeConfig() {
   db.claudeConfig ||= {};
-  db.claudeConfig.modelContextTokens ||= 256000;
+  db.claudeConfig.modelContextTokens ||= 1000000;
   db.claudeConfig.autoCompactRatio ||= 0.62;
   if (db.claudeConfig.autoCompactEnabled === undefined) db.claudeConfig.autoCompactEnabled = true;
   if (!Array.isArray(db.claudeConfig.mcpToolAllowlist)) db.claudeConfig.mcpToolAllowlist = [];
@@ -601,7 +601,7 @@ function discoveredToolInventory() {
 }
 
 function autoCompactWindow() {
-  const contextTokens = Math.max(1000, Number(db.claudeConfig.modelContextTokens || 256000));
+  const contextTokens = Math.max(1000, Number(db.claudeConfig.modelContextTokens || 1000000));
   const ratio = Math.min(0.9, Math.max(0.1, Number(db.claudeConfig.autoCompactRatio || 0.62)));
   return Math.floor(contextTokens * ratio);
 }
@@ -1759,7 +1759,7 @@ async function handleApi(req, res, pathname) {
     db.claudeConfig.command = body.command || db.claudeConfig.command;
     db.claudeConfig.args = body.args || "";
     db.claudeConfig.workspaceRoot = body.workspaceRoot || db.claudeConfig.workspaceRoot;
-    db.claudeConfig.modelContextTokens = Math.max(1000, Number(body.modelContextTokens || db.claudeConfig.modelContextTokens || 256000));
+    db.claudeConfig.modelContextTokens = Math.max(1000, Number(body.modelContextTokens || db.claudeConfig.modelContextTokens || 1000000));
     db.claudeConfig.autoCompactRatio = Math.min(0.9, Math.max(0.1, Number(body.autoCompactRatio || db.claudeConfig.autoCompactRatio || 0.62)));
     db.claudeConfig.autoCompactEnabled = body.autoCompactEnabled !== false;
     db.claudeConfig.mcpToolAllowlist = Array.isArray(body.mcpToolAllowlist)

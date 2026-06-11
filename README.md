@@ -160,7 +160,7 @@ npm start
 
 后端通过官方 `@anthropic-ai/claude-agent-sdk` 调用宿主机 Claude Code，并保存返回的 `session_id`。同一个 Web 会话后续消息会自动用 `resume` 恢复 Claude Code 上下文。`CLAUDE_ARGS` 只用于额外参数，不要填写 `-p`、`--output-format`、`--input-format`、`--resume` 或 `--allowedTools`。
 
-Agent 设置里可以配置模型上下文窗口大小、自动压缩阈值和 MCP 工具 allowlist。后端会把 `autoCompactEnabled` / `autoCompactWindow` 传给 Claude Agent SDK，优先使用 Claude Code 原生 auto compact。每轮调用还会注入 WebUI 工具边界提醒，明确当前已允许和已发现的 MCP 工具，避免模型幻想未接入工具。模型窗口默认按 256k、阈值 0.62 计算；如果换模型，应同步修改“模型上下文窗口 tokens”。
+Agent 设置里可以配置模型上下文窗口大小、自动压缩阈值和 MCP 工具 allowlist。后端会把 `autoCompactEnabled` / `autoCompactWindow` 传给 Claude Agent SDK，优先使用 Claude Code 原生 auto compact。每轮调用还会注入 WebUI 工具边界提醒，明确当前已允许和已发现的 MCP 工具，避免模型幻想未接入工具。模型窗口默认按 1M、阈值 0.62 计算；如果换模型，应同步修改“模型上下文窗口 tokens”。
 
 访问：
 

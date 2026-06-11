@@ -35,7 +35,7 @@ const seedState = () => ({
     command: "claude",
     args: "",
     workspaceRoot: "/srv/workspaces",
-    modelContextTokens: 256000,
+    modelContextTokens: 1000000,
     autoCompactRatio: 0.62,
     autoCompactEnabled: true,
     mcpToolAllowlist: [],
@@ -1022,7 +1022,7 @@ function renderSettings() {
   const cfg = state.claudeConfig;
   const info = state.serverInfo || {};
   const inventory = state.toolInventory || { tools: [], servers: [] };
-  const compactWindow = Math.floor(Number(cfg.modelContextTokens || 256000) * Number(cfg.autoCompactRatio || 0.62));
+  const compactWindow = Math.floor(Number(cfg.modelContextTokens || 1000000) * Number(cfg.autoCompactRatio || 0.62));
   const actions = `<button class="button primary" data-action="health-check">${icons.check}运行健康检查</button>`;
   return appRoot(`
     ${topbar("Agent 设置", "配置 Claude Code CLI、工作区 allowlist 和运行策略", actions)}
@@ -1043,7 +1043,7 @@ function renderSettings() {
           </div>
           <div class="field"><label>Workspace allowlist 根目录</label><input class="input" name="workspaceRoot" value="${escapeHtml(cfg.workspaceRoot)}" /></div>
           <div class="grid two">
-            <div class="field"><label>模型上下文窗口 tokens</label><input class="input" name="modelContextTokens" type="number" min="1000" step="1000" value="${escapeHtml(cfg.modelContextTokens || 256000)}" /></div>
+            <div class="field"><label>模型上下文窗口 tokens</label><input class="input" name="modelContextTokens" type="number" min="1000" step="1000" value="${escapeHtml(cfg.modelContextTokens || 1000000)}" /></div>
             <div class="field"><label>自动压缩阈值</label><input class="input" name="autoCompactRatio" type="number" min="0.1" max="0.9" step="0.01" value="${escapeHtml(cfg.autoCompactRatio || 0.62)}" /></div>
           </div>
           <label class="toggle-row"><input type="checkbox" name="autoCompactEnabled" ${cfg.autoCompactEnabled === false ? "" : "checked"} />启用 Claude Code SDK 原生 auto compact，当前约 ${compactWindow.toLocaleString()} tokens 触发</label>
@@ -1491,7 +1491,7 @@ async function saveConfig(form) {
       command: String(data.get("command")).trim() || "claude",
       args: String(data.get("args")).trim(),
       workspaceRoot: String(data.get("workspaceRoot")).trim(),
-      modelContextTokens: Number(data.get("modelContextTokens") || 256000),
+      modelContextTokens: Number(data.get("modelContextTokens") || 1000000),
       autoCompactRatio: Number(data.get("autoCompactRatio") || 0.62),
       autoCompactEnabled: data.get("autoCompactEnabled") === "on",
       mcpToolAllowlist: String(data.get("mcpToolAllowlist") || "").split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean),
