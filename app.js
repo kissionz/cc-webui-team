@@ -11,6 +11,7 @@ const icons = {
   terminal: '<svg class="icon" viewBox="0 0 24 24"><path d="m4 17 6-6-6-6"/><path d="M12 19h8"/></svg>',
   activity: '<svg class="icon" viewBox="0 0 24 24"><path d="M22 12h-4l-3 8L9 4l-3 8H2"/></svg>',
   info: '<svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>',
+  panel: '<svg class="icon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>',
 };
 
 const now = () => Date.now();
@@ -22,6 +23,8 @@ const seedState = () => ({
   activeView: "teams",
   selectedTeamId: "team_platform",
   selectedSessionId: "session_login",
+  sidebarCollapsed: localStorage.getItem("cc.sidebarCollapsed") === "true",
+  sessionMemberFilter: "all",
   users: [],
   teams: [],
   members: [],
@@ -384,14 +387,15 @@ function permissionById(id) {
 function appRoot(inner) {
   const user = currentUser();
   return `
-    <div class="app-shell">
+    <div class="app-shell ${state.sidebarCollapsed ? "sidebar-collapsed" : ""}">
       <aside class="sidebar">
         <div class="brand">
           <div class="brand-mark">CC</div>
-          <div>
+          <div class="brand-copy">
             <div class="brand-title">Claude Code</div>
             <div class="brand-subtitle">Team Platform</div>
           </div>
+          <button class="sidebar-toggle" title="${state.sidebarCollapsed ? "展开导航栏" : "收起导航栏"}" data-action="toggle-sidebar">${icons.panel}</button>
         </div>
         <nav class="nav-group">
           ${renderMainNav(user)}
@@ -404,8 +408,8 @@ function appRoot(inner) {
               <div class="brand-subtitle">${escapeHtml(user?.role || "")}</div>
             </div>
           </div>
-          <button class="nav-button" style="margin-top:12px" data-modal="password">${icons.settings}<span>改密码</span></button>
-          <button class="nav-button" style="margin-top:12px" data-action="logout">${icons.logout}<span>退出</span></button>
+          <button class="nav-button" style="margin-top:12px" title="改密码" data-modal="password">${icons.settings}<span>改密码</span></button>
+          <button class="nav-button" style="margin-top:12px" title="退出" data-action="logout">${icons.logout}<span>退出</span></button>
         </div>
       </aside>
       <main class="main">${inner}</main>
@@ -439,7 +443,7 @@ function renderUserPanel(user = currentUser()) {
 
 function navButton(view, icon, text) {
   const active = state.activeView === view || (view === "teams" && state.activeView === "team");
-  return `<button class="nav-button ${active ? "active" : ""}" data-view="${view}">${icon}<span>${text}</span></button>`;
+  return `<button class="nav-button ${active ? "active" : ""}" title="${escapeHtml(text)}" data-view="${view}">${icon}<span>${text}</span></button>`;
 }
 
 function topbar(title, subtitle, actions = "") {
@@ -533,7 +537,7 @@ function renderTeams() {
             ${recentSessions.map((session) => {
               const team = state.teams.find((item) => item.id === session.teamId);
               return `<button class="activity-item" data-open-team="${session.teamId}" data-session="${session.id}">
-                <strong>${escapeHtml(session.title)}</strong>
+                <strong title="${escapeHtml(titleText(session.title))}">${escapeHtml(titleText(session.title))}</strong>
                 <span>${escapeHtml(team?.name || "")}</span>
                 <div class="meta">${badge(session.status, statusTone(session.status))}<span>${fmt(session.updatedAt)}</span></div>
               </button>`;
@@ -613,10 +617,26 @@ function renderTeamRail(team, activeSession) {
 }
 
 function renderSessionList(team, activeSession, embedded = false) {
-  const sessions = state.sessions.filter((session) => session.teamId === team.id);
+  const allSessions = state.sessions.filter((session) => session.teamId === team.id);
+  const filter = state.sessionMemberFilter || "all";
+  const sessions = filter === "all" ? allSessions : allSessions.filter((session) => session.createdBy === filter);
+  const memberOptions = state.members
+    .filter((member) => member.teamId === team.id)
+    .map((member) => {
+      const count = allSessions.filter((session) => session.createdBy === member.userId).length;
+      return { userId: member.userId, label: `${userName(member.userId)} (${count})` };
+    })
+    .filter((option) => option.label);
   return `
     <section class="${embedded ? "session-section" : "panel"}">
-      <div class="panel-header"><h2 class="panel-title">会话</h2>${badge(`${sessions.length}`)}</div>
+      <div class="panel-header"><h2 class="panel-title">会话</h2>${badge(`${sessions.length}/${allSessions.length}`)}</div>
+      <div class="session-filter">
+        <label for="session-member-filter">成员</label>
+        <select class="select compact-select" id="session-member-filter" data-session-member-filter>
+          <option value="all" ${filter === "all" ? "selected" : ""}>全部成员</option>
+          ${memberOptions.map((option) => `<option value="${escapeHtml(option.userId)}" ${filter === option.userId ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}
+        </select>
+      </div>
       <div class="session-list">
         ${sessions
           .map((session) => `
@@ -629,7 +649,7 @@ function renderSessionList(team, activeSession, embedded = false) {
               <button class="icon-button session-delete" title="删除会话" data-delete-session="${session.id}">${icons.close}</button>
             </div>
           `)
-          .join("") || '<div class="empty">还没有会话</div>'}
+          .join("") || '<div class="empty">没有匹配的会话</div>'}
       </div>
     </section>
   `;
@@ -1543,6 +1563,19 @@ document.addEventListener("toggle", (event) => {
   uiMemory.openTurnEvents.set(details.dataset.turnEvents, details.open);
 }, true);
 
+document.addEventListener("change", (event) => {
+  const filter = event.target.closest?.("[data-session-member-filter]");
+  if (!filter) return;
+  const value = filter.value || "all";
+  const team = state.teams.find((item) => item.id === state.selectedTeamId);
+  const sessions = team ? state.sessions.filter((session) => session.teamId === team.id && (value === "all" || session.createdBy === value)) : [];
+  const selectedIsVisible = sessions.some((session) => session.id === state.selectedSessionId);
+  setState({
+    sessionMemberFilter: value,
+    selectedSessionId: selectedIsVisible ? state.selectedSessionId : sessions[0]?.id || state.selectedSessionId,
+  });
+});
+
 document.addEventListener("click", async (event) => {
   try {
     if (event.target.classList?.contains("modal-backdrop")) {
@@ -1554,9 +1587,14 @@ document.addEventListener("click", async (event) => {
     if (!target || target.disabled) return;
 
     if (target.dataset.view) return setState({ activeView: target.dataset.view });
-    if (target.dataset.openTeam) return setState({ activeView: "team", selectedTeamId: target.dataset.openTeam, selectedSessionId: target.dataset.session || state.selectedSessionId });
+    if (target.dataset.openTeam) return setState({ activeView: "team", selectedTeamId: target.dataset.openTeam, selectedSessionId: target.dataset.session || state.selectedSessionId, sessionMemberFilter: "all" });
     if (target.dataset.backTeams !== undefined) return setState({ activeView: "teams" });
     if (target.dataset.session) return setState({ selectedSessionId: target.dataset.session });
+    if (target.dataset.action === "toggle-sidebar") {
+      const collapsed = !state.sidebarCollapsed;
+      localStorage.setItem("cc.sidebarCollapsed", String(collapsed));
+      return setState({ sidebarCollapsed: collapsed });
+    }
     if (target.dataset.modal) {
       activeModal = target.dataset.modal;
       modalTeamId = target.dataset.team || state.selectedTeamId;

@@ -85,6 +85,11 @@ select:disabled {
   min-height: 100dvh;
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);
+  transition: grid-template-columns 180ms ease;
+}
+
+.app-shell.sidebar-collapsed {
+  grid-template-columns: 72px minmax(0, 1fr);
 }
 
 .sidebar {
@@ -111,6 +116,10 @@ select:disabled {
   padding: 0 8px;
 }
 
+.brand-copy {
+  min-width: 0;
+}
+
 .brand-mark {
   display: grid;
   place-items: center;
@@ -133,6 +142,26 @@ select:disabled {
   margin-top: 2px;
   color: #9fb0b8;
   font-size: 12px;
+}
+
+.sidebar-toggle {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  margin-left: auto;
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.06);
+  color: #dce8f2;
+  transition:
+    background 150ms ease,
+    color 150ms ease;
+}
+
+.sidebar-toggle:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
 }
 
 .nav-group {
@@ -166,6 +195,44 @@ select:disabled {
 
 .nav-button:active {
   transform: translateY(1px);
+}
+
+.sidebar-collapsed .sidebar {
+  padding: 18px 10px;
+  overflow-x: hidden;
+}
+
+.sidebar-collapsed .brand {
+  display: grid;
+  justify-items: center;
+  gap: 9px;
+  padding: 0;
+}
+
+.sidebar-collapsed .brand-copy,
+.sidebar-collapsed .nav-button span,
+.sidebar-collapsed .sidebar-footer .user-chip > div,
+.sidebar-collapsed .sidebar-footer .nav-button span {
+  display: none;
+}
+
+.sidebar-collapsed .brand-mark,
+.sidebar-collapsed .sidebar-toggle {
+  margin: 0;
+}
+
+.sidebar-collapsed .nav-button {
+  grid-template-columns: 1fr;
+  justify-items: center;
+  padding: 0;
+}
+
+.sidebar-collapsed .sidebar-footer {
+  padding: 10px 8px;
+}
+
+.sidebar-collapsed .user-chip {
+  justify-content: center;
 }
 
 .sidebar-footer {
@@ -307,6 +374,7 @@ select:disabled {
   grid-template-columns: minmax(0, 1fr) 360px;
   gap: 16px;
   align-items: start;
+  min-height: 0;
 }
 
 .section-title {
@@ -615,7 +683,7 @@ select:disabled {
 
 .team-layout {
   display: grid;
-  grid-template-columns: 220px minmax(0, 1fr) 260px;
+  grid-template-columns: 320px minmax(0, 1fr) 270px;
   gap: 12px;
   height: calc(100dvh - 92px);
   min-height: 620px;
@@ -699,7 +767,29 @@ select:disabled {
 .session-section {
   min-height: 0;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+.session-filter {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  background: #fbfdff;
+}
+
+.session-filter label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.compact-select {
+  min-height: 34px;
+  padding: 6px 9px;
+  font-size: 13px;
 }
 
 .session-section .session-list {
@@ -1298,7 +1388,21 @@ select:disabled {
   align-content: start;
 }
 
+.activity-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: min(620px, calc(100dvh - 332px));
+  min-height: 280px;
+}
+
+.activity-panel .side-stack {
+  min-height: 0;
+  overflow: auto;
+  overflow-x: hidden;
+}
+
 .activity-item {
+  min-width: 0;
   display: grid;
   gap: 6px;
   width: 100%;
@@ -1319,8 +1423,19 @@ select:disabled {
 }
 
 .activity-item span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--muted);
   font-size: 13px;
+}
+
+.activity-item strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .agent-row,
@@ -1654,6 +1769,11 @@ select:disabled {
     grid-template-columns: 1fr;
   }
 
+  .activity-panel {
+    height: auto;
+    max-height: 420px;
+  }
+
   .grid.teams {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1676,8 +1796,36 @@ select:disabled {
 
 @media (max-width: 760px) {
   .app-shell,
+  .app-shell.sidebar-collapsed,
   .login-page {
     grid-template-columns: 1fr;
+  }
+
+  .app-shell.sidebar-collapsed .sidebar {
+    padding: 18px 14px;
+  }
+
+  .app-shell.sidebar-collapsed .brand {
+    display: flex;
+    justify-content: flex-start;
+    padding: 0 8px;
+  }
+
+  .app-shell.sidebar-collapsed .brand-copy,
+  .app-shell.sidebar-collapsed .nav-button span,
+  .app-shell.sidebar-collapsed .sidebar-footer .user-chip > div,
+  .app-shell.sidebar-collapsed .sidebar-footer .nav-button span {
+    display: block;
+  }
+
+  .app-shell.sidebar-collapsed .nav-button {
+    grid-template-columns: 22px 1fr;
+    justify-items: start;
+    padding: 0 10px;
+  }
+
+  .app-shell.sidebar-collapsed .sidebar-toggle {
+    margin-left: auto;
   }
 
   .sidebar {
