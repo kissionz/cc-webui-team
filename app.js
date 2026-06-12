@@ -716,20 +716,17 @@ function renderChat(team, session) {
   const draft = uiMemory.composerDrafts.get(session.id) || "";
   return `
     <section class="panel chat-panel" id="chat-panel">
-      <div class="panel-header">
-        <div class="title-stack">
+      <div class="panel-header chat-header">
+        <div class="title-stack chat-title-stack">
           <h2 class="panel-title truncate-title" title="${escapeHtml(titleText(session.title))}">${escapeHtml(titleText(session.title))}</h2>
           <div class="meta"><span>创建人 ${escapeHtml(userName(session.createdBy))}</span>${badge(visibility === "team" ? "团队可见" : "私有", visibility === "team" ? "green" : "")}</div>
         </div>
-        <div class="toolbar">
-          <button class="button" data-action="summarize-session">生成摘要</button>
-          <button class="button" data-action="summary-as-title" ${session.summary ? "" : "disabled"}>摘要作标题</button>
+        <div class="toolbar chat-actions">
           <button class="button" data-action="toggle-session-visibility" ${canManageSession(session) ? "" : "disabled"}>${visibility === "team" ? "设为私有" : "共享给团队"}</button>
           ${badge(session.status, statusTone(session.status))}
           <button class="icon-button" title="停止会话" data-action="stop-session" ${canStop ? "" : "disabled"}>${icons.stop}</button>
         </div>
       </div>
-      ${renderSessionSummary(session)}
       <div class="chat-stream" id="chat-stream">
         ${allMessages.length > messages.length ? `<div class="history-notice">已隐藏更早的 ${allMessages.length - messages.length} 条本地记录，保持页面流畅。</div>` : ""}
         ${turns.map(renderTurn).join("")}
@@ -739,18 +736,6 @@ function renderChat(team, session) {
         <button class="button primary" type="submit" ${canSend ? "" : "disabled"}>${icons.send}发送</button>
       </form>
     </section>
-  `;
-}
-
-function renderSessionSummary(session) {
-  return `
-    <div class="session-summary">
-      <div>
-        <strong>会话摘要</strong>
-        <p>${escapeHtml(session.summary || "还没有摘要。点击“生成摘要”后，会从本会话最近消息本地抽取，不调用 Claude。")}</p>
-      </div>
-      ${session.summaryUpdatedAt ? `<span>${fmt(session.summaryUpdatedAt)}</span>` : ""}
-    </div>
   `;
 }
 
@@ -1515,13 +1500,6 @@ async function removeToolApproval(scope, value) {
   await refresh();
 }
 
-async function summarizeSession(replaceTitle = false) {
-  const session = sessionById(state.selectedSessionId);
-  if (!session) return;
-  await api(`/api/sessions/${session.id}/summary`, { method: "POST", body: JSON.stringify({ replaceTitle }) });
-  await refresh();
-}
-
 async function retrySession() {
   const session = sessionById(state.selectedSessionId);
   if (!session) return;
@@ -1706,8 +1684,6 @@ document.addEventListener("click", async (event) => {
     if (target.dataset.action === "new-session") return await createSession();
     if (target.dataset.deleteSession) return await deleteSession(target.dataset.deleteSession);
     if (target.dataset.action === "toggle-session-visibility") return await toggleSessionVisibility();
-    if (target.dataset.action === "summarize-session") return await summarizeSession(false);
-    if (target.dataset.action === "summary-as-title") return await summarizeSession(true);
     if (target.dataset.action === "retry-session") return await retrySession();
     if (target.dataset.copyMessage) {
       const message = state.messages.find((item) => item.id === target.dataset.copyMessage);
