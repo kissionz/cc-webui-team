@@ -762,6 +762,7 @@ function getRuntime(sessionId) {
 function stopRuntime(sessionId) {
   const runtime = getRuntime(sessionId);
   if (!runtime) return;
+  runtime.stopRequested = true;
   runtime.stoppedForRestart = true;
   runtime.exited = true;
   clearRuntimeHeartbeat(runtime);
@@ -1192,13 +1193,13 @@ async function completeClaudeTurn(session, runtime, code = 0) {
     await updateSessionMessage(session, runtime.currentMessage, runtime.currentMessage.content, { ...runtime.currentMessage.metadata, claudeSessionId: session.claudeSessionId || null });
   }
   const existingPendingPermission = db.permissions.find((permission) => permission.sessionId === session.id && permission.turnId === runtime.turnId && permission.status === "pending");
-  session.status = existingPendingPermission ? "waiting_permission" : code === 0 && !runtime.result?.is_error ? "completed" : "failed";
+  session.status = runtime.stopRequested ? "stopped" : existingPendingPermission ? "waiting_permission" : code === 0 && !runtime.result?.is_error ? "completed" : "failed";
   if (session.status !== "waiting_permission") clearOnceToolApprovals(session);
   runtime.agent.status = "idle";
   await appendSessionMessage(
     session,
     "tool",
-    session.status === "waiting_permission" ? "本轮等待用户确认后继续。" : session.status === "completed" ? "本轮完成，可继续发送下一轮。" : `本轮失败，退出码：${code}`,
+    session.status === "stopped" ? "本轮已手动停止。" : session.status === "waiting_permission" ? "本轮等待用户确认后继续。" : session.status === "completed" ? "本轮完成，可继续发送下一轮。" : `本轮失败，退出码：${code}`,
     runtime.agent.id,
     { type: "exit", code, claudeSessionId: session.claudeSessionId || null, turnId: runtime.turnId },
   );
@@ -1366,6 +1367,10 @@ async function submitClaudeTurn(session, prompt, turnId) {
     }
     await completeClaudeTurn(session, runtime, 0);
   } catch (err) {
+    if (runtime.stopRequested) {
+      await completeClaudeTurn(session, runtime, 130);
+      return;
+    }
     runtime.stderr += `\n${err.message || String(err)}`;
     if (runtime.currentMessage && !runtime.turnCompleted) {
       await updateSessionMessage(session, runtime.currentMessage, `[agent error] ${err.message || String(err)}`, { ...runtime.currentMessage.metadata, error: err.message || String(err) });

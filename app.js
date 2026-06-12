@@ -710,6 +710,7 @@ function renderChat(team, session) {
   const messages = allMessages.slice(-CHAT_RENDER_LIMIT);
   const turns = buildMessageTurns(messages);
   const canSend = canWriteTeam(team.id) && !["running", "waiting_permission"].includes(session.status);
+  const canStop = ["running", "waiting_permission"].includes(session.status);
   const placeholder = composerPlaceholder(team, session);
   const visibility = sessionVisibility(session);
   const draft = uiMemory.composerDrafts.get(session.id) || "";
@@ -725,7 +726,7 @@ function renderChat(team, session) {
           <button class="button" data-action="summary-as-title" ${session.summary ? "" : "disabled"}>摘要作标题</button>
           <button class="button" data-action="toggle-session-visibility" ${canManageSession(session) ? "" : "disabled"}>${visibility === "team" ? "设为私有" : "共享给团队"}</button>
           ${badge(session.status, statusTone(session.status))}
-          <button class="icon-button" title="停止会话" data-action="stop-session" ${session.status === "running" ? "" : "disabled"}>${icons.stop}</button>
+          <button class="icon-button" title="停止会话" data-action="stop-session" ${canStop ? "" : "disabled"}>${icons.stop}</button>
         </div>
       </div>
       ${renderSessionSummary(session)}
