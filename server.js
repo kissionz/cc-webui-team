@@ -765,6 +765,8 @@ function stopRuntime(sessionId) {
   runtime.stopRequested = true;
   runtime.stoppedForRestart = true;
   runtime.exited = true;
+  runtime.promptQueue?.close();
+  runtime.queryHandle?.close?.();
   clearRuntimeHeartbeat(runtime);
   if (runtime.abortController) runtime.abortController.abort();
   if (runtime.pendingPermissionResolvers) {
@@ -775,6 +777,43 @@ function stopRuntime(sessionId) {
   }
   if (runtime.child && !runtime.child.killed) runtime.child.kill("SIGINT");
   running.delete(sessionId);
+}
+
+function sdkUserMessage(content, priority = "next") {
+  return {
+    type: "user",
+    message: { role: "user", content },
+    parent_tool_use_id: null,
+    priority,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+function createPromptQueue(initialPrompt) {
+  const queue = [sdkUserMessage(initialPrompt, "now")];
+  const waiters = [];
+  let closed = false;
+  return {
+    stream: (async function* stream() {
+      while (!closed || queue.length) {
+        if (queue.length) {
+          yield queue.shift();
+          continue;
+        }
+        await new Promise((resolve) => waiters.push(resolve));
+      }
+    })(),
+    push(content, priority = "next") {
+      if (closed) return false;
+      queue.push(sdkUserMessage(content, priority));
+      while (waiters.length) waiters.shift()();
+      return true;
+    },
+    close() {
+      closed = true;
+      while (waiters.length) waiters.shift()();
+    },
+  };
 }
 
 function clearRuntimeHeartbeat(runtime) {
@@ -946,6 +985,7 @@ async function handleClaudeStreamEvent(session, runtime, event) {
 
   if (event.type === "result") {
     runtime.result = event;
+    runtime.promptQueue?.close();
     if (event.session_id) session.claudeSessionId = event.session_id;
     if (!runtime.finalText && event.result) {
       runtime.finalText = String(event.result);
@@ -968,6 +1008,7 @@ async function upsertToolStreamMessage(session, runtime, part, status) {
   const name = part.name || part.tool_name || existing?.metadata?.name || "tool";
   const output = part.content || part.output || "";
   const payload = part.input || part.args || existing?.metadata?.input || {};
+  await updateRuntimePlanFromTool(session, runtime, name, payload, status);
   const content = status === "completed" ? `${name} 完成${output ? `\n${typeof output === "string" ? output : JSON.stringify(output, null, 2)}` : ""}` : `${name} 运行中\n${JSON.stringify(payload, null, 2)}`;
   const metadata = { type: "tool_call", callId, name, status, input: payload, turnId: runtime.turnId };
   if (existing) {
@@ -976,6 +1017,82 @@ async function upsertToolStreamMessage(session, runtime, part, status) {
   }
   const message = await appendSessionMessage(session, "tool", content, runtime.agent?.id, metadata);
   runtime.toolMessages.set(callId, message);
+}
+
+function normalizePlanStatus(status) {
+  if (status === "completed" || status === "done") return "completed";
+  if (status === "in_progress" || status === "running") return "in_progress";
+  if (status === "deleted") return "deleted";
+  return "pending";
+}
+
+function planSummary(items) {
+  const visible = items.filter((item) => item.status !== "deleted");
+  const done = visible.filter((item) => item.status === "completed").length;
+  const active = visible.find((item) => item.status === "in_progress");
+  return `执行计划 ${done}/${visible.length}${active ? `\n正在执行：${active.activeForm || active.content}` : ""}`;
+}
+
+async function upsertPlanMessage(session, runtime) {
+  const items = [...(runtime.planItems || [])].filter((item) => item.status !== "deleted");
+  if (!items.length) return;
+  const metadata = { type: "plan", status: items.every((item) => item.status === "completed") ? "done" : "running", items, turnId: runtime.turnId };
+  const content = planSummary(items);
+  if (runtime.planMessage) {
+    await updateSessionMessage(session, runtime.planMessage, content, metadata);
+  } else {
+    runtime.planMessage = await appendSessionMessage(session, "tool", content, runtime.agent?.id, metadata);
+  }
+  session.plan = { items, updatedAt: now(), turnId: runtime.turnId };
+  broadcast({ type: "session.plan.updated", sessionId: session.id, plan: session.plan });
+}
+
+async function updateRuntimePlanFromTool(session, runtime, name, input = {}, status = "running") {
+  const tool = String(name || "").toLowerCase();
+  if (status !== "running") return;
+  if (tool === "todowrite" && Array.isArray(input.todos)) {
+    runtime.planItems = input.todos.map((todo, index) => ({
+      id: todo.id || `todo_${index + 1}`,
+      content: String(todo.content || todo.title || `步骤 ${index + 1}`),
+      activeForm: String(todo.activeForm || todo.active_form || todo.content || ""),
+      status: normalizePlanStatus(todo.status),
+    }));
+    await upsertPlanMessage(session, runtime);
+    return;
+  }
+
+  if (tool === "taskcreate") {
+    runtime.planTaskIndex ||= new Map();
+    runtime.planItems ||= [];
+    const taskId = input.taskId || input.id || id("task");
+    if (runtime.planTaskIndex.has(taskId)) return;
+    const item = {
+      id: taskId,
+      content: String(input.subject || input.title || input.description || "新任务"),
+      activeForm: String(input.activeForm || input.active_form || input.subject || ""),
+      status: "pending",
+    };
+    runtime.planTaskIndex.set(taskId, item);
+    runtime.planItems.push(item);
+    await upsertPlanMessage(session, runtime);
+    return;
+  }
+
+  if (tool === "taskupdate" && (input.taskId || input.id)) {
+    runtime.planTaskIndex ||= new Map();
+    runtime.planItems ||= [];
+    const taskId = input.taskId || input.id;
+    let item = runtime.planTaskIndex.get(taskId);
+    if (!item) {
+      item = { id: taskId, content: String(input.subject || input.description || taskId), activeForm: "", status: "pending" };
+      runtime.planTaskIndex.set(taskId, item);
+      runtime.planItems.push(item);
+    }
+    if (input.subject || input.description) item.content = String(input.subject || input.description);
+    if (input.activeForm || input.active_form) item.activeForm = String(input.activeForm || input.active_form);
+    if (input.status) item.status = normalizePlanStatus(input.status);
+    await upsertPlanMessage(session, runtime);
+  }
 }
 
 function normalizeToolPermissionRequest(request = {}) {
@@ -1045,8 +1162,8 @@ async function createToolPermissionRequest(session, runtime, event) {
   );
   audit(session.createdBy, "permission.created", "permission", permission.id, { type: permission.type, toolName: permission.toolName, serverName: permission.serverName });
   await saveDb();
-  broadcast({ type: "permission.created", sessionId: session.id, permissionId: permission.id });
-  broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
+  broadcast({ type: "permission.created", sessionId: session.id, permissionId: permission.id, permission });
+  broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status, session });
   return permission;
 }
 
@@ -1107,8 +1224,8 @@ async function createSdkToolPermissionRequest(session, runtime, toolName, input 
   );
   audit(session.createdBy, "permission.created", "permission", permission.id, { type: permission.type, toolName: permission.toolName, serverName: permission.serverName, sdkPermission: true });
   await saveDb();
-  broadcast({ type: "permission.created", sessionId: session.id, permissionId: permission.id });
-  broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
+  broadcast({ type: "permission.created", sessionId: session.id, permissionId: permission.id, permission });
+  broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status, session });
 
   return new Promise((resolvePermission) => {
     runtime.pendingPermissionResolvers.set(permission.id, resolvePermission);
@@ -1157,7 +1274,7 @@ async function createFallbackToolPermission(session, runtime, request) {
     { type: "permission_request", permissionId: permission.id, toolName: permission.toolName, serverName: permission.serverName, turnId: runtime.turnId },
   );
   audit(session.createdBy, "permission.created", "permission", permission.id, { type: permission.type, toolName: permission.toolName, serverName: permission.serverName, fallbackResume: true });
-  broadcast({ type: "permission.created", sessionId: session.id, permissionId: permission.id });
+  broadcast({ type: "permission.created", sessionId: session.id, permissionId: permission.id, permission });
   return permission;
 }
 
@@ -1212,9 +1329,12 @@ async function completeClaudeTurn(session, runtime, code = 0) {
   runtime.stderr = "";
   runtime.streamParts = new Map();
   runtime.toolMessages = new Map();
+  runtime.planItems = [];
+  runtime.planTaskIndex = new Map();
+  runtime.planMessage = null;
   runtime.pendingPermissionResolvers?.clear();
   await saveDb();
-  broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
+  broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status, session });
 }
 
 async function consumeClaudeStreamChunk(session, runtime, chunk) {
@@ -1296,7 +1416,7 @@ async function submitClaudeTurn(session, prompt, turnId) {
   session.updatedAt = now();
   agent.status = "running";
   await saveDb();
-  broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
+  broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status, session });
 
   const abortController = new AbortController();
   const runtime = {
@@ -1312,6 +1432,9 @@ async function submitClaudeTurn(session, prompt, turnId) {
     heartbeatMessage: await appendSessionMessage(session, "tool", "", agent.id, { type: "thinking", status: "thinking", subject: "正在分析", waitedSeconds: 0, turnId }),
     streamParts: new Map(),
     toolMessages: new Map(),
+    planItems: [],
+    planTaskIndex: new Map(),
+    planMessage: null,
     pendingPermissionResolvers: new Map(),
     result: null,
     finalText: "",
@@ -1326,6 +1449,7 @@ async function submitClaudeTurn(session, prompt, turnId) {
   const extraArgs = sanitizeClaudeExtraArgs(String(db.claudeConfig.args || "").split(" ").filter(Boolean));
   const sdkLaunch = claudeSdkLaunchOptions(db.claudeConfig.command);
   const guardedPrompt = promptWithRuntimeGuard(session, prompt);
+  runtime.promptQueue = createPromptQueue(guardedPrompt);
   const preauthorizedTools = approvedToolSpecs(session);
   const sdkOptions = {
     abortController,
@@ -1361,7 +1485,9 @@ async function submitClaudeTurn(session, prompt, turnId) {
   );
 
   try {
-    for await (const event of query({ prompt: guardedPrompt, options: sdkOptions })) {
+    const sdkQuery = query({ prompt: runtime.promptQueue.stream, options: sdkOptions });
+    runtime.queryHandle = sdkQuery;
+    for await (const event of sdkQuery) {
       runtime.lastOutputAt = now();
       await handleClaudeStreamEvent(session, runtime, event);
     }
@@ -1379,11 +1505,12 @@ async function submitClaudeTurn(session, prompt, turnId) {
     broadcast({ type: "agent.error", sessionId: session.id, message: err.message || String(err) });
   } finally {
     runtime.exited = true;
+    runtime.promptQueue?.close();
     clearRuntimeHeartbeat(runtime);
     if (getRuntime(session.id) === runtime) running.delete(session.id);
     agent.status = "idle";
     await saveDb();
-    broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
+    broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status, session });
   }
 }
 
@@ -1509,10 +1636,11 @@ async function handleApi(req, res, pathname) {
     const agent = db.agents.find((item) => item.teamId === teamId && item.type === "claude_code");
     const session = { id: id("session"), teamId, agentId: agent.id, createdBy: user.id, title: "新会话", visibility: "private", status: "idle", cwd: team.workspacePath, createdAt: now(), updatedAt: now() };
     db.sessions.unshift(session);
-    db.messages.push({ id: id("msg"), sessionId: session.id, senderType: "system", senderId: null, content: "会话已创建，等待用户发送任务。", createdAt: now() });
+    const message = { id: id("msg"), sessionId: session.id, senderType: "system", senderId: null, content: "会话已创建，等待用户发送任务。", createdAt: now() };
+    db.messages.push(message);
     audit(user.id, "session.created", "session", session.id);
     await saveDb();
-    broadcast({ type: "session.created", sessionId: session.id });
+    broadcast({ type: "session.created", sessionId: session.id, session, message });
     return send(res, 201, { session });
   }
 
@@ -1543,7 +1671,7 @@ async function handleApi(req, res, pathname) {
     session.updatedAt = now();
     audit(user.id, "session.visibility_changed", "session", session.id, { visibility });
     await saveDb();
-    broadcast({ type: "session.updated", sessionId: session.id });
+    broadcast({ type: "session.updated", sessionId: session.id, session });
     broadcast({ type: "team.sessions.changed", teamId: session.teamId });
     return send(res, 200, { session });
   }
@@ -1557,7 +1685,7 @@ async function handleApi(req, res, pathname) {
     session.updatedAt = now();
     audit(user.id, "session.tool_approval_removed", "session", session.id, { scope: body.scope, value: body.value });
     await saveDb();
-    broadcast({ type: "session.updated", sessionId: session.id });
+    broadcast({ type: "session.updated", sessionId: session.id, session });
     return send(res, 200, { session });
   }
 
@@ -1573,7 +1701,7 @@ async function handleApi(req, res, pathname) {
     session.updatedAt = now();
     audit(user.id, "session.summary_generated", "session", session.id, { replaceTitle: Boolean(body.replaceTitle) });
     await saveDb();
-    broadcast({ type: "session.updated", sessionId: session.id });
+    broadcast({ type: "session.updated", sessionId: session.id, session });
     return send(res, 200, { session, summary });
   }
 
@@ -1600,19 +1728,36 @@ async function handleApi(req, res, pathname) {
     const body = await readBody(req);
     const content = String(body.content || "").trim();
     if (!content) return error(res, 400, "MESSAGE_EMPTY", "Message cannot be empty.");
-    if (["running", "waiting_permission"].includes(session.status)) return error(res, 409, "SESSION_BUSY", "This conversation turn is already running.");
+    if (session.status === "waiting_permission") return error(res, 409, "SESSION_WAITING_PERMISSION", "This conversation is waiting for permission approval.");
+    if (session.status === "running") {
+      const runtime = getRuntime(session.id);
+      if (!runtime?.promptQueue) return error(res, 409, "SESSION_BUSY", "Claude Code is running but cannot receive guidance right now.");
+      const interrupt = body.mode === "interrupt" || body.interrupt === true;
+      const message = { id: id("msg"), sessionId: session.id, senderType: "user", senderId: user.id, content, metadata: { turnId: runtime.turnId, guidance: true, interrupt }, createdAt: now() };
+      db.messages.push(message);
+      session.updatedAt = now();
+      audit(user.id, interrupt ? "session.guidance_interrupt" : "session.guidance_appended", "session", session.id);
+      await saveDb();
+      broadcast({ type: "session.message.created", sessionId: session.id, message });
+      runtime.promptQueue.push(`用户追加引导：\n${content}`, interrupt ? "now" : "next");
+      if (interrupt && runtime.queryHandle?.interrupt) await runtime.queryHandle.interrupt();
+      return send(res, 202, { ok: true, message });
+    }
     const turnId = id("turn");
     if (session.title === "新会话") session.title = titleFromPrompt(content);
     session.updatedAt = now();
-    db.messages.push({ id: id("msg"), sessionId: session.id, senderType: "user", senderId: user.id, content, metadata: { turnId }, createdAt: now() });
+    const message = { id: id("msg"), sessionId: session.id, senderType: "user", senderId: user.id, content, metadata: { turnId }, createdAt: now() };
+    db.messages.push(message);
     audit(user.id, "session.message_sent", "session", session.id);
+    broadcast({ type: "session.message.created", sessionId: session.id, message });
     if (needsApproval(content)) {
       const permission = { id: id("perm"), sessionId: session.id, agentId: session.agentId, requestedByUserId: user.id, type: "platform_gate", risk: "medium", summary: "任务可能执行敏感操作，需要审批后再交给 Claude Code CLI", payload: content, turnId, status: "pending", expiresAt: now() + 1000 * 60 * 30, createdAt: now() };
       db.permissions.push(permission);
       session.status = "waiting_permission";
       audit(user.id, "permission.created", "permission", permission.id);
       await saveDb();
-      broadcast({ type: "permission.created", sessionId: session.id, permissionId: permission.id });
+      broadcast({ type: "permission.created", sessionId: session.id, permissionId: permission.id, permission });
+      broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status, session });
     } else {
       await saveDb();
       submitClaudeTurn(session, content, turnId);
@@ -1630,7 +1775,7 @@ async function handleApi(req, res, pathname) {
     if (agent) agent.status = "idle";
     audit(user.id, "session.stopped", "session", session.id);
     await saveDb();
-    broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status });
+    broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status, session });
     return send(res, 200, { ok: true });
   }
 
@@ -1701,10 +1846,12 @@ async function handleApi(req, res, pathname) {
         session.status = "stopped";
       }
     }
-    db.messages.push({ id: id("msg"), sessionId: session.id, senderType: "system", senderId: null, content: `权限请求已${permission.status === "approved" ? "批准" : "拒绝"}：${permission.summary}`, metadata: { turnId: permission.turnId, decision }, createdAt: now() });
+    const decisionMessage = { id: id("msg"), sessionId: session.id, senderType: "system", senderId: null, content: `权限请求已${permission.status === "approved" ? "批准" : "拒绝"}：${permission.summary}`, metadata: { turnId: permission.turnId, decision }, createdAt: now() };
+    db.messages.push(decisionMessage);
     audit(user.id, `permission.${permission.status}`, "permission", permission.id);
     await saveDb();
-    broadcast({ type: "permission.updated", sessionId: session.id, permissionId: permission.id, status: permission.status });
+    broadcast({ type: "session.message.created", sessionId: session.id, message: decisionMessage });
+    broadcast({ type: "permission.updated", sessionId: session.id, permissionId: permission.id, status: permission.status, permission });
     if (permission.type === "platform_gate" && permission.status === "approved") submitClaudeTurn(session, permission.payload, permission.turnId);
     else if (permission.type === "mcp_tool" && permission.status === "approved" && !permission.controlRequestId && !permission.sdkPermission) {
       const nextTurnId = id("turn");

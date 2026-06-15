@@ -170,6 +170,12 @@ function scheduleMessagePatch(messageId, delay = 90) {
   }, delay);
 }
 
+function upsertById(items, item) {
+  if (!item?.id) return items;
+  const exists = items.some((existing) => existing.id === item.id);
+  return exists ? items.map((existing) => (existing.id === item.id ? item : existing)) : [...items, item];
+}
+
 function connectEvents() {
   if (eventSource || !state.currentUserId) return;
   eventSource = new EventSource("/api/events");
@@ -209,8 +215,29 @@ function applyRealtimeEvent(event) {
   }
 
   if (event.type === "session.status.changed") {
-    state.sessions = state.sessions.map((session) => (session.id === event.sessionId ? { ...session, status: event.status, updatedAt: now() } : session));
+    state.sessions = event.session
+      ? upsertById(state.sessions, event.session)
+      : state.sessions.map((session) => (session.id === event.sessionId ? { ...session, status: event.status, updatedAt: now() } : session));
     scheduleSessionScopedRender(event.sessionId, { rail: true, chat: true, right: true }, { rail: true }, 120);
+    return;
+  }
+
+  if (event.type === "session.updated" && event.session) {
+    state.sessions = upsertById(state.sessions, event.session);
+    scheduleSessionScopedRender(event.sessionId, { rail: true, chat: true, right: true }, { rail: true }, 120);
+    return;
+  }
+
+  if (event.type === "session.created" && event.session) {
+    state.sessions = upsertById(state.sessions, event.session);
+    if (event.message) state.messages = upsertById(state.messages, event.message);
+    scheduleTeamRender({ rail: true }, 120);
+    return;
+  }
+
+  if (event.type === "session.plan.updated") {
+    state.sessions = state.sessions.map((session) => (session.id === event.sessionId ? { ...session, plan: event.plan, updatedAt: now() } : session));
+    scheduleSessionScopedRender(event.sessionId, { chat: true }, { rail: true }, 120);
     return;
   }
 
@@ -222,12 +249,23 @@ function applyRealtimeEvent(event) {
     return;
   }
 
-  if (event.type === "permission.created" || event.type === "permission.updated") {
-    scheduleRefresh();
+  if ((event.type === "permission.created" || event.type === "permission.updated") && event.permission) {
+    state.permissions = upsertById(state.permissions, event.permission);
+    scheduleSessionScopedRender(event.sessionId, { chat: true, right: true }, { rail: true }, 90);
     return;
   }
 
-  scheduleRefresh();
+  if (event.type === "team.sessions.changed") {
+    scheduleTeamRender({ rail: true }, 120);
+    return;
+  }
+
+  if (event.type === "agent.error") {
+    scheduleSessionScopedRender(event.sessionId, { right: true, chat: true }, { rail: true }, 120);
+    return;
+  }
+
+  scheduleRender();
 }
 
 function currentUser() {
@@ -709,7 +747,8 @@ function renderChat(team, session) {
   const allMessages = state.messages.filter((message) => message.sessionId === session.id);
   const messages = allMessages.slice(-CHAT_RENDER_LIMIT);
   const turns = buildMessageTurns(messages);
-  const canSend = canWriteTeam(team.id) && !["running", "waiting_permission"].includes(session.status);
+  const isRunning = session.status === "running";
+  const canSend = canWriteTeam(team.id) && session.status !== "waiting_permission";
   const canStop = ["running", "waiting_permission"].includes(session.status);
   const placeholder = composerPlaceholder(team, session);
   const visibility = sessionVisibility(session);
@@ -733,7 +772,13 @@ function renderChat(team, session) {
       </div>
       <form class="composer" data-form="message">
         <textarea class="textarea" name="content" placeholder="${escapeHtml(placeholder)}" data-session-draft="${session.id}" ${canSend ? "" : "disabled"}>${escapeHtml(draft)}</textarea>
-        <button class="button primary" type="submit" ${canSend ? "" : "disabled"}>${icons.send}发送</button>
+        <div class="composer-actions">
+          ${
+            isRunning
+              ? `<button class="button primary" type="submit" name="mode" value="guide" ${canSend ? "" : "disabled"}>${icons.send}追加引导</button><button class="button" type="submit" name="mode" value="interrupt" ${canSend ? "" : "disabled"}>${icons.stop}打断并发送</button>`
+              : `<button class="button primary" type="submit" name="mode" value="send" ${canSend ? "" : "disabled"}>${icons.send}发送</button>`
+          }
+        </div>
       </form>
     </section>
   `;
@@ -745,6 +790,10 @@ function buildMessageTurns(messages) {
   const loose = [];
   for (const message of messages) {
     const turnId = message.metadata?.turnId;
+    if (message.senderType === "user" && message.metadata?.guidance && turnId && byId.has(turnId)) {
+      byId.get(turnId).messages.push(message);
+      continue;
+    }
     if (message.senderType === "user") {
       const turn = { id: turnId || message.id, user: message, messages: [] };
       turns.push(turn);
@@ -762,14 +811,52 @@ function buildMessageTurns(messages) {
 
 function renderTurn(turn) {
   const agentMessages = turn.messages.filter((message) => message.senderType === "agent");
-  const eventMessages = turn.messages.filter((message) => message.senderType !== "agent");
+  const planMessages = turn.messages.filter((message) => message.metadata?.type === "plan");
+  const guidanceMessages = turn.messages.filter((message) => message.senderType === "user" && message.metadata?.guidance);
+  const eventMessages = turn.messages.filter((message) => message.senderType !== "agent" && message.senderType !== "user" && message.metadata?.type !== "plan");
   const hasAgentOutput = agentMessages.some((message) => String(message.content || "").trim());
   const hasNoisyEvents = eventMessages.length > 2 || eventMessages.some((message) => ["command", "input", "tool_call", "permission_request"].includes(message.metadata?.type));
   return `
     <section class="turn">
       ${turn.user ? renderMessage(turn.user) : ""}
+      ${planMessages.map(renderPlanMessage).join("")}
       ${agentMessages.map(renderMessage).join("")}
+      ${guidanceMessages.map(renderMessage).join("")}
       ${eventMessages.length ? renderTurnEvents(eventMessages, hasAgentOutput || hasNoisyEvents) : ""}
+    </section>
+  `;
+}
+
+function renderPlanMessage(message) {
+  const items = Array.isArray(message.metadata?.items) ? message.metadata.items : [];
+  if (!items.length) return "";
+  const visible = items.filter((item) => item.status !== "deleted");
+  const done = visible.filter((item) => item.status === "completed").length;
+  const running = visible.find((item) => item.status === "in_progress");
+  const complete = visible.length > 0 && done === visible.length;
+  const body = visible.map((item, index) => {
+    const status = item.status || "pending";
+    const marker = status === "completed" ? icons.check : status === "in_progress" ? '<span class="plan-spinner" aria-hidden="true"></span>' : '<span class="plan-dot" aria-hidden="true"></span>';
+    const label = status === "completed" ? "已完成" : status === "in_progress" ? "进行中" : "等待";
+    return `
+      <li class="${escapeHtml(status)}">
+        <span class="plan-marker">${marker}</span>
+        <div><strong>${escapeHtml(item.content || `步骤 ${index + 1}`)}</strong>${item.activeForm && status === "in_progress" ? `<p>${escapeHtml(item.activeForm)}</p>` : ""}</div>
+        <em>${label}</em>
+      </li>
+    `;
+  }).join("");
+  const content = `<ol class="plan-list">${body}</ol>`;
+  if (complete) {
+    return `<details class="plan-card" data-message-id="${escapeHtml(message.id)}"><summary>${icons.check}<span>执行计划已完成</span><strong>${done}/${visible.length}</strong></summary>${content}</details>`;
+  }
+  return `
+    <section class="plan-card active" data-message-id="${escapeHtml(message.id)}">
+      <div class="plan-head">
+        <div><strong>执行计划</strong>${running ? `<span>正在执行：${escapeHtml(running.activeForm || running.content)}</span>` : ""}</div>
+        ${badge(`${done}/${visible.length}`, "blue")}
+      </div>
+      ${content}
     </section>
   `;
 }
@@ -791,12 +878,13 @@ function turnEventKey(messages) {
 function composerPlaceholder(team, session) {
   if (!canWriteTeam(team.id)) return "viewer 角色只能查看会话";
   if (session.status === "idle") return "向 Claude Code 发送任务";
-  if (session.status === "running") return "当前这一轮正在运行，等待完成后可继续发送";
+  if (session.status === "running") return "Claude Code 正在执行，可以追加引导，不会开启新会话";
   if (session.status === "waiting_permission") return "当前任务等待审批";
   return "继续发送下一轮消息，会自动恢复 Claude Code 会话上下文";
 }
 
 function renderMessage(message) {
+  if (message.metadata?.type === "plan") return renderPlanMessage(message);
   if (message.senderType === "tool" || message.senderType === "system") return renderTimelineEvent(message);
   if (message.senderType === "agent" && !String(message.content || "").trim()) {
     return "";
@@ -808,14 +896,15 @@ function renderMessage(message) {
         ? agentById(message.senderId)?.name || "Agent"
         : message.senderType;
   const rich = message.senderType === "agent";
+  const guidance = message.senderType === "user" && message.metadata?.guidance;
   const content = rich ? renderMarkdown(message.content) : escapeHtml(message.content);
   return `
-    <article class="message ${message.senderType}" data-message-id="${escapeHtml(message.id)}">
+    <article class="message ${message.senderType} ${guidance ? "guidance" : ""}" data-message-id="${escapeHtml(message.id)}">
       <div class="message-meta">
-        <span>${escapeHtml(sender)}</span><span>${fmt(message.createdAt)}</span>
+        <span>${escapeHtml(guidance ? "追加引导" : sender)}</span><span>${fmt(message.createdAt)}</span>${guidance && message.metadata?.interrupt ? badge("打断", "amber") : ""}
         <span class="message-actions">
           <button class="text-button" data-copy-message="${message.id}">复制</button>
-          ${message.senderType === "user" ? `<button class="text-button" data-action="retry-session" data-retry-message="${message.id}">重试</button>` : ""}
+          ${message.senderType === "user" && !guidance ? `<button class="text-button" data-action="retry-session" data-retry-message="${message.id}">重试</button>` : ""}
         </span>
       </div>
       <div class="bubble ${rich ? "markdown" : ""}">${content}</div>
@@ -844,6 +933,7 @@ function timelineEventMeta(message) {
     const running = message.metadata?.status === "running";
     return { title: `${running ? "正在调用" : "已调用"} ${message.metadata?.name || "工具"}`, detail: message.content, icon: icons.terminal, tone: running ? "pending" : "done", spinner: running };
   }
+  if (type === "plan") return { title: "执行计划", detail: message.content, icon: icons.check, tone: message.metadata?.status === "done" ? "done" : "pending", spinner: message.metadata?.status !== "done" };
   if (type === "permission_request") {
     const permission = permissionById(message.metadata?.permissionId);
     const label = `${message.metadata?.serverName ? `${message.metadata.serverName} / ` : ""}${message.metadata?.toolName || ""}`.trim();
@@ -1452,17 +1542,18 @@ async function createSession() {
   const team = state.teams.find((item) => item.id === state.selectedTeamId);
   const result = await api(`/api/teams/${team.id}/sessions`, { method: "POST", body: "{}" });
   state.selectedSessionId = result.session.id;
-  await refresh();
+  state.sessions = upsertById(state.sessions, result.session);
+  scheduleTeamRender({ rail: true, chat: true, right: true }, 0);
 }
 
-async function sendMessage(form) {
+async function sendMessage(form, submitter = null) {
   const session = sessionById(state.selectedSessionId);
   const content = String(new FormData(form).get("content") || "").trim();
   if (!session || !content) return;
+  const mode = submitter?.value || "send";
+  await api(`/api/sessions/${session.id}/messages`, { method: "POST", body: JSON.stringify({ content, mode }) });
   uiMemory.composerDrafts.delete(session.id);
   form.reset();
-  await api(`/api/sessions/${session.id}/messages`, { method: "POST", body: JSON.stringify({ content }) });
-  await refresh();
 }
 
 async function decidePermission(id, decision) {
@@ -1470,7 +1561,6 @@ async function decidePermission(id, decision) {
   if (!permission || !canApprove(permission)) return;
   const action = decision === "rejected" ? "reject" : "approve";
   await api(`/api/permissions/${id}/${action}`, { method: "POST", body: JSON.stringify({ decision }) });
-  await refresh();
 }
 
 async function deleteSession(id) {
@@ -1482,22 +1572,27 @@ async function deleteSession(id) {
     const next = state.sessions.find((item) => item.teamId === session.teamId && item.id !== id);
     state.selectedSessionId = next?.id || "";
   }
-  await refresh();
+  state.sessions = state.sessions.filter((item) => item.id !== id);
+  state.messages = state.messages.filter((message) => message.sessionId !== id);
+  state.permissions = state.permissions.filter((permission) => permission.sessionId !== id);
+  scheduleTeamRender({ rail: true, chat: true, right: true }, 0);
 }
 
 async function toggleSessionVisibility() {
   const session = sessionById(state.selectedSessionId);
   if (!session || !canManageSession(session)) return;
   const nextVisibility = sessionVisibility(session) === "team" ? "private" : "team";
-  await api(`/api/sessions/${session.id}/visibility`, { method: "PATCH", body: JSON.stringify({ visibility: nextVisibility }) });
-  await refresh();
+  const result = await api(`/api/sessions/${session.id}/visibility`, { method: "PATCH", body: JSON.stringify({ visibility: nextVisibility }) });
+  state.sessions = upsertById(state.sessions, result.session);
+  scheduleTeamRender({ rail: true, chat: true, right: true }, 0);
 }
 
 async function removeToolApproval(scope, value) {
   const session = sessionById(state.selectedSessionId);
   if (!session) return;
-  await api(`/api/sessions/${session.id}/tool-approvals`, { method: "DELETE", body: JSON.stringify({ scope, value }) });
-  await refresh();
+  const result = await api(`/api/sessions/${session.id}/tool-approvals`, { method: "DELETE", body: JSON.stringify({ scope, value }) });
+  state.sessions = upsertById(state.sessions, result.session);
+  scheduleTeamRender({ chat: true, right: true }, 0);
 }
 
 async function retrySession() {
@@ -1607,7 +1702,7 @@ document.addEventListener("submit", async (event) => {
   try {
     if (kind === "login") await login(form);
     if (kind === "team") await createTeam(form);
-    if (kind === "message") await sendMessage(form);
+    if (kind === "message") await sendMessage(form, event.submitter);
     if (kind === "user") await createUser(form);
     if (kind === "password") await changeOwnPassword(form);
     if (kind === "admin-password") await resetUserPassword(form);
@@ -1699,7 +1794,6 @@ document.addEventListener("click", async (event) => {
       const session = sessionById(state.selectedSessionId);
       if (session) {
         await api(`/api/sessions/${session.id}/stop`, { method: "POST", body: "{}" });
-        await refresh();
       }
       return;
     }
