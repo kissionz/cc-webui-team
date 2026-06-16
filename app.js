@@ -338,6 +338,10 @@ function canManageSession(session) {
   return Boolean(session) && (canManageTeam(session.teamId) || session.createdBy === state.currentUserId);
 }
 
+function canAskSession(session) {
+  return Boolean(session) && canWriteTeam(session.teamId) && session.createdBy === state.currentUserId;
+}
+
 function sessionVisibility(session) {
   return session?.visibility === "team" ? "team" : "private";
 }
@@ -798,8 +802,8 @@ function renderChat(team, session) {
   const messages = allMessages.slice(-CHAT_RENDER_LIMIT);
   const turns = buildMessageTurns(messages);
   const isRunning = session.status === "running";
-  const canSend = canWriteTeam(team.id) && session.status !== "waiting_permission";
-  const canStop = ["running", "waiting_permission"].includes(session.status);
+  const canSend = canAskSession(session) && session.status !== "waiting_permission";
+  const canStop = canManageSession(session) && ["running", "waiting_permission"].includes(session.status);
   const placeholder = composerPlaceholder(team, session);
   const visibility = sessionVisibility(session);
   const draft = uiMemory.composerDrafts.get(session.id) || "";
@@ -927,6 +931,7 @@ function turnEventKey(messages) {
 
 function composerPlaceholder(team, session) {
   if (!canWriteTeam(team.id)) return "viewer 角色只能查看会话";
+  if (!canAskSession(session)) return "共享会话只读，只有会话创建者可以继续提问";
   if (session.status === "idle") return "向 Claude Code 发送任务";
   if (session.status === "running") return "Claude Code 正在执行，可以追加引导，不会开启新会话";
   if (session.status === "waiting_permission") return "当前任务等待审批";
@@ -954,7 +959,7 @@ function renderMessage(message) {
         <span>${escapeHtml(guidance ? "追加引导" : sender)}</span><span>${fmt(message.createdAt)}</span>${guidance && message.metadata?.interrupt ? badge("打断", "amber") : ""}
         <span class="message-actions">
           <button class="text-button" data-copy-message="${message.id}">复制</button>
-          ${message.senderType === "user" && !guidance ? `<button class="text-button" data-action="retry-session" data-retry-message="${message.id}">重试</button>` : ""}
+          ${message.senderType === "user" && !guidance && canAskSession(sessionById(message.sessionId)) ? `<button class="text-button" data-action="retry-session" data-retry-message="${message.id}">重试</button>` : ""}
         </span>
       </div>
       <div class="bubble ${rich ? "markdown" : ""}">${content}</div>

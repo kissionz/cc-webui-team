@@ -386,6 +386,10 @@ function canWriteSession(user, session) {
   return Boolean(session) && canWriteTeam(user, session.teamId) && (canManageTeamSessions(user, session.teamId) || session.createdBy === user.id);
 }
 
+function canAskSession(user, session) {
+  return Boolean(session) && canWriteTeam(user, session.teamId) && session.createdBy === user.id;
+}
+
 function canShareSession(user, session) {
   return Boolean(session) && (canWriteSession(user, session) || canManageTeamSessions(user, session.teamId));
 }
@@ -1758,7 +1762,7 @@ async function handleApi(req, res, pathname) {
   const retryMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/retry$/);
   if (retryMatch && req.method === "POST") {
     const session = db.sessions.find((item) => item.id === retryMatch[1]);
-    if (!canWriteSession(user, session)) return error(res, 403, "PERMISSION_DENIED", "Cannot retry this session.");
+    if (!canAskSession(user, session)) return error(res, 403, "PERMISSION_DENIED", "Only the session owner can retry this session.");
     if (["running", "waiting_permission"].includes(session.status)) return error(res, 409, "SESSION_BUSY", "This conversation turn is already running.");
     const source = [...db.messages].reverse().find((message) => message.sessionId === session.id && message.senderType === "user");
     if (!source) return error(res, 404, "RETRY_SOURCE_MISSING", "No user message to retry.");
@@ -1774,7 +1778,7 @@ async function handleApi(req, res, pathname) {
   const messageMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/messages$/);
   if (messageMatch && req.method === "POST") {
     const session = db.sessions.find((item) => item.id === messageMatch[1]);
-    if (!canWriteSession(user, session)) return error(res, 403, "PERMISSION_DENIED", "Cannot send messages.");
+    if (!canAskSession(user, session)) return error(res, 403, "PERMISSION_DENIED", "Only the session owner can send messages.");
     const body = await readBody(req);
     const content = String(body.content || "").trim();
     if (!content) return error(res, 400, "MESSAGE_EMPTY", "Message cannot be empty.");
