@@ -392,6 +392,7 @@ function canShareSession(user, session) {
 
 function eventVisibleToUser(event, user) {
   if (!user || user.status !== "active") return false;
+  if (Array.isArray(event.userIds) && event.userIds.includes(user.id)) return true;
   if (event.sessionId) {
     const session = db.sessions.find((item) => item.id === event.sessionId);
     if (session) return canSeeSession(user, session);
@@ -424,6 +425,19 @@ function canWriteTeam(user, teamId) {
 
 function canManageTeam(user, teamId) {
   return user.role === "admin" || ["owner", "admin"].includes(getTeamRole(teamId, user.id));
+}
+
+function isSystemAdmin(user) {
+  return user?.role === "admin";
+}
+
+function teamAudienceUserIds(teamId) {
+  return [
+    ...new Set([
+      ...db.users.filter((item) => item.role === "admin").map((item) => item.id),
+      ...db.members.filter((member) => member.teamId === teamId).map((member) => member.userId),
+    ]),
+  ];
 }
 
 function canApprove(user, permission) {
@@ -1570,6 +1584,7 @@ async function handleApi(req, res, pathname) {
   }
 
   if (pathname === "/api/teams" && req.method === "POST") {
+    if (!isSystemAdmin(user)) return error(res, 403, "PERMISSION_DENIED", "Only system admin can create teams.");
     const body = await readBody(req);
     try {
       const workspacePath = assertWorkspaceAllowed(body.workspacePath);
@@ -1580,7 +1595,7 @@ async function handleApi(req, res, pathname) {
       db.agents.push(agent);
       audit(user.id, "team.created", "team", team.id);
       await saveDb();
-      broadcast({ type: "team.created", teamId: team.id });
+      broadcast({ type: "team.created", teamId: team.id, team, member: db.members.at(-1), agent });
       return send(res, 201, { team });
     } catch (err) {
       return error(res, 400, err.code || "WORKSPACE_PATH_INVALID", "Workspace path must be inside the configured allowlist.");
@@ -1588,6 +1603,27 @@ async function handleApi(req, res, pathname) {
   }
 
   const teamMatch = pathname.match(/^\/api\/teams\/([^/]+)$/);
+  if (teamMatch && req.method === "DELETE") {
+    if (!isSystemAdmin(user)) return error(res, 403, "PERMISSION_DENIED", "Only system admin can delete teams.");
+    const teamId = teamMatch[1];
+    const team = db.teams.find((item) => item.id === teamId);
+    if (!team) return error(res, 404, "TEAM_NOT_FOUND", "Team not found.");
+    const userIds = teamAudienceUserIds(teamId);
+    for (const session of db.sessions.filter((item) => item.teamId === teamId)) stopRuntime(session.id);
+    const sessionIds = new Set(db.sessions.filter((item) => item.teamId === teamId).map((item) => item.id));
+    db.teams = db.teams.filter((item) => item.id !== teamId);
+    db.members = db.members.filter((member) => member.teamId !== teamId);
+    db.agents = db.agents.filter((agent) => agent.teamId !== teamId);
+    db.sessions = db.sessions.filter((session) => session.teamId !== teamId);
+    db.messages = db.messages.filter((message) => !sessionIds.has(message.sessionId));
+    db.permissions = db.permissions.filter((permission) => !sessionIds.has(permission.sessionId));
+    db.fileChanges = db.fileChanges.filter((file) => !sessionIds.has(file.sessionId));
+    audit(user.id, "team.deleted", "team", teamId, { name: team.name });
+    await saveDb();
+    broadcast({ type: "team.deleted", teamId, userIds });
+    return send(res, 200, { ok: true });
+  }
+
   if (teamMatch && req.method === "PATCH") {
     const teamId = teamMatch[1];
     if (!canManageTeam(user, teamId)) return error(res, 403, "PERMISSION_DENIED", "Cannot update this team.");
@@ -1625,6 +1661,20 @@ async function handleApi(req, res, pathname) {
       await saveDb();
       broadcast({ type: "team.member_added", teamId });
     }
+    return send(res, 200, { ok: true });
+  }
+
+  const memberDeleteMatch = pathname.match(/^\/api\/teams\/([^/]+)\/members\/([^/]+)$/);
+  if (memberDeleteMatch && req.method === "DELETE") {
+    if (!isSystemAdmin(user)) return error(res, 403, "PERMISSION_DENIED", "Only system admin can remove team members.");
+    const [, teamId, userId] = memberDeleteMatch;
+    const member = db.members.find((item) => item.teamId === teamId && item.userId === userId);
+    if (!member) return error(res, 404, "MEMBER_NOT_FOUND", "Team member not found.");
+    const userIds = teamAudienceUserIds(teamId);
+    db.members = db.members.filter((item) => !(item.teamId === teamId && item.userId === userId));
+    audit(user.id, "team.member_removed", "team", teamId, { removedUserId: userId, role: member.role });
+    await saveDb();
+    broadcast({ type: "team.member_removed", teamId, userId, userIds });
     return send(res, 200, { ok: true });
   }
 

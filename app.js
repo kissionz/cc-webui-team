@@ -176,6 +176,12 @@ function upsertById(items, item) {
   return exists ? items.map((existing) => (existing.id === item.id ? item : existing)) : [...items, item];
 }
 
+function upsertMember(items, member) {
+  if (!member?.teamId || !member?.userId) return items;
+  const exists = items.some((item) => item.teamId === member.teamId && item.userId === member.userId);
+  return exists ? items.map((item) => (item.teamId === member.teamId && item.userId === member.userId ? member : item)) : [...items, member];
+}
+
 function connectEvents() {
   if (eventSource || !state.currentUserId) return;
   eventSource = new EventSource("/api/events");
@@ -260,6 +266,44 @@ function applyRealtimeEvent(event) {
     return;
   }
 
+  if (event.type === "team.created" && event.team) {
+    state.teams = upsertById(state.teams, event.team);
+    if (event.member) state.members = upsertMember(state.members, event.member);
+    if (event.agent) state.agents = upsertById(state.agents, event.agent);
+    scheduleRender();
+    return;
+  }
+
+  if (event.type === "team.deleted") {
+    const sessionIds = new Set(state.sessions.filter((session) => session.teamId === event.teamId).map((session) => session.id));
+    state.teams = state.teams.filter((team) => team.id !== event.teamId);
+    state.members = state.members.filter((member) => member.teamId !== event.teamId);
+    state.agents = state.agents.filter((agent) => agent.teamId !== event.teamId);
+    state.sessions = state.sessions.filter((session) => session.teamId !== event.teamId);
+    state.messages = state.messages.filter((message) => !sessionIds.has(message.sessionId));
+    state.permissions = state.permissions.filter((permission) => !sessionIds.has(permission.sessionId));
+    if (state.selectedTeamId === event.teamId) {
+      state.selectedTeamId = state.teams[0]?.id || "";
+      state.selectedSessionId = "";
+      state.activeView = "teams";
+    }
+    scheduleRender();
+    return;
+  }
+
+  if (event.type === "team.member_removed") {
+    state.members = state.members.filter((member) => !(member.teamId === event.teamId && member.userId === event.userId));
+    if (event.userId === state.currentUserId && state.selectedTeamId === event.teamId && !isSystemAdmin()) {
+      state.activeView = "teams";
+      state.selectedTeamId = state.teams.find((team) => team.id !== event.teamId && teamRole(team.id))?.id || "";
+      state.selectedSessionId = "";
+      scheduleRender();
+      return;
+    }
+    scheduleTeamRender({ rail: true, right: true }, 120);
+    return;
+  }
+
   if (event.type === "agent.error") {
     scheduleSessionScopedRender(event.sessionId, { right: true, chat: true }, { rail: true }, 120);
     return;
@@ -284,6 +328,10 @@ function canWriteTeam(teamId) {
 function canManageTeam(teamId) {
   const role = teamRole(teamId);
   return currentUser()?.role === "admin" || ["owner", "admin"].includes(role);
+}
+
+function isSystemAdmin() {
+  return currentUser()?.role === "admin";
 }
 
 function canManageSession(session) {
@@ -561,7 +609,7 @@ function renderTeams() {
   const user = currentUser();
   const cli = cliStatus();
   const teams = user.role === "admin" ? state.teams : state.teams.filter((team) => teamRole(team.id));
-  const actions = `<button class="button primary" data-modal="team">${icons.plus}创建团队</button>`;
+  const actions = isSystemAdmin() ? `<button class="button primary" data-modal="team">${icons.plus}创建团队</button>` : "";
   const visibleTeamIds = new Set(teams.map((team) => team.id));
   const visibleSessions = state.sessions.filter((session) => visibleTeamIds.has(session.teamId));
   const runningCount = visibleSessions.filter((session) => session.status === "running").length;
@@ -586,6 +634,7 @@ function renderTeams() {
           <div class="toolbar">
             <button class="button primary" data-open-team="${team.id}">打开工作台</button>
             <button class="button" data-modal="members" data-team="${team.id}">成员</button>
+            ${isSystemAdmin() ? `<button class="button danger" data-delete-team="${team.id}">${icons.close}删除</button>` : ""}
           </div>
         </article>
       `;
@@ -671,6 +720,7 @@ function renderTeamDetail() {
     <button class="button" data-back-teams>团队列表</button>
     <button class="button" data-modal="members" data-team="${team.id}">成员</button>
     <button class="button" data-modal="workspace" data-team="${team.id}">工作区</button>
+    ${isSystemAdmin() ? `<button class="button danger" data-delete-team="${team.id}">${icons.close}删除团队</button>` : ""}
     <button class="button primary" data-action="new-session" ${canWriteTeam(team.id) ? "" : "disabled"}>${icons.plus}新会话</button>
   `;
 
@@ -1302,6 +1352,7 @@ function renderModal(kind, teamId = state.selectedTeamId) {
     `;
   }
   if (kind === "team") {
+    if (!isSystemAdmin()) return "";
     return `
       <div class="modal-backdrop" data-close-modal>
         <form class="modal" data-form="team">
@@ -1321,7 +1372,15 @@ function renderModal(kind, teamId = state.selectedTeamId) {
     .filter((member) => member.teamId === teamId)
     .map((member) => {
       const user = state.users.find((item) => item.id === member.userId);
-      return `<div class="member-row compact-member-row"><div><strong>${escapeHtml(user?.displayName || "")}</strong><span>${escapeHtml(user?.username || "")}</span></div>${badge(member.role, member.role === "viewer" ? "" : "green")}</div>`;
+      return `
+        <div class="member-row compact-member-row">
+          <div><strong>${escapeHtml(user?.displayName || "")}</strong><span>${escapeHtml(user?.username || "")}</span></div>
+          <div class="member-actions">
+            ${badge(member.role, member.role === "viewer" ? "" : "green")}
+            ${isSystemAdmin() ? `<button class="icon-button" type="button" title="移除成员" data-remove-member-team="${teamId}" data-remove-member-user="${member.userId}">${icons.close}</button>` : ""}
+          </div>
+        </div>
+      `;
     })
     .join("");
   const options = state.users
@@ -1578,6 +1637,35 @@ async function deleteSession(id) {
   scheduleTeamRender({ rail: true, chat: true, right: true }, 0);
 }
 
+async function deleteTeam(id) {
+  const team = state.teams.find((item) => item.id === id);
+  if (!team || !isSystemAdmin()) return;
+  if (!confirm(`删除团队「${team.name}」？此操作会删除该团队的成员、会话、消息和权限记录。`)) return;
+  await api(`/api/teams/${id}`, { method: "DELETE" });
+  const sessionIds = new Set(state.sessions.filter((session) => session.teamId === id).map((session) => session.id));
+  state.teams = state.teams.filter((item) => item.id !== id);
+  state.members = state.members.filter((member) => member.teamId !== id);
+  state.agents = state.agents.filter((agent) => agent.teamId !== id);
+  state.sessions = state.sessions.filter((session) => session.teamId !== id);
+  state.messages = state.messages.filter((message) => !sessionIds.has(message.sessionId));
+  state.permissions = state.permissions.filter((permission) => !sessionIds.has(permission.sessionId));
+  if (state.selectedTeamId === id) {
+    state.selectedTeamId = state.teams[0]?.id || "";
+    state.selectedSessionId = "";
+    state.activeView = "teams";
+  }
+  scheduleRender();
+}
+
+async function removeMember(teamId, userId) {
+  if (!isSystemAdmin()) return;
+  const user = state.users.find((item) => item.id === userId);
+  if (!confirm(`从团队中移除「${user?.displayName || user?.username || userId}」？`)) return;
+  await api(`/api/teams/${teamId}/members/${userId}`, { method: "DELETE" });
+  state.members = state.members.filter((member) => !(member.teamId === teamId && member.userId === userId));
+  render();
+}
+
 async function toggleSessionVisibility() {
   const session = sessionById(state.selectedSessionId);
   if (!session || !canManageSession(session)) return;
@@ -1778,6 +1866,8 @@ document.addEventListener("click", async (event) => {
     }
     if (target.dataset.action === "new-session") return await createSession();
     if (target.dataset.deleteSession) return await deleteSession(target.dataset.deleteSession);
+    if (target.dataset.deleteTeam) return await deleteTeam(target.dataset.deleteTeam);
+    if (target.dataset.removeMemberTeam) return await removeMember(target.dataset.removeMemberTeam, target.dataset.removeMemberUser);
     if (target.dataset.action === "toggle-session-visibility") return await toggleSessionVisibility();
     if (target.dataset.action === "retry-session") return await retrySession();
     if (target.dataset.copyMessage) {
