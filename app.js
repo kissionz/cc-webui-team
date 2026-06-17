@@ -55,6 +55,7 @@ const seedState = () => ({
 
 let state = loadState();
 let eventSource = null;
+let sseRetryDelay = 1500;
 let refreshTimer = null;
 let renderTimer = null;
 let teamRenderTimer = null;
@@ -185,6 +186,9 @@ function upsertMember(items, member) {
 function connectEvents() {
   if (eventSource || !state.currentUserId) return;
   eventSource = new EventSource("/api/events");
+  eventSource.onopen = () => {
+    sseRetryDelay = 1500;
+  };
   eventSource.onmessage = (event) => {
     try {
       applyRealtimeEvent(JSON.parse(event.data));
@@ -195,7 +199,9 @@ function connectEvents() {
   eventSource.onerror = () => {
     eventSource?.close();
     eventSource = null;
-    setTimeout(() => state.currentUserId && connectEvents(), 1500);
+    const delay = sseRetryDelay;
+    sseRetryDelay = Math.min(Math.round(sseRetryDelay * 1.5), 30000);
+    setTimeout(() => state.currentUserId && connectEvents(), delay);
   };
 }
 

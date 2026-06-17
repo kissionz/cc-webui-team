@@ -1,9 +1,10 @@
 import { createServer } from "node:http";
 import { createReadStream, existsSync, readFileSync } from "node:fs";
-import { mkdir, readFile, writeFile, stat } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile, stat } from "node:fs/promises";
 import { delimiter, dirname, extname, isAbsolute, join, normalize, resolve } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
-import { randomBytes, pbkdf2Sync, timingSafeEqual } from "node:crypto";
+import { randomBytes, pbkdf2, timingSafeEqual } from "node:crypto";
+import { promisify } from "node:util";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
 const root = process.cwd();
@@ -21,7 +22,12 @@ const CLAUDE_ARGS = (process.env.CLAUDE_ARGS || "").split(" ").filter(Boolean);
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
 const BOOTSTRAP_MESSAGES_PER_SESSION = 240;
 const BOOTSTRAP_AUDIT_LIMIT = 300;
+const MAX_BODY_SIZE = Number(process.env.MAX_BODY_SIZE || 2 * 1024 * 1024);
+const MAX_AUDIT_LOGS = Number(process.env.MAX_AUDIT_LOGS || 5000);
+const MAX_MESSAGES_PER_SESSION = Number(process.env.MAX_MESSAGES_PER_SESSION || 500);
+const COOKIE_SECURE = process.env.HTTPS === "true" || process.env.COOKIE_SECURE === "true";
 const IS_WINDOWS = process.platform === "win32";
+const pbkdf2Async = promisify(pbkdf2);
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -37,8 +43,10 @@ const id = (prefix) => `${prefix}_${randomBytes(6).toString("hex")}`;
 const startedAt = now();
 
 let db = null;
+let saveQueue = Promise.resolve();
 const clients = new Set();
 const running = new Map();
+const loginAttempts = new Map();
 
 function loadDotEnv(filePath) {
   try {
@@ -57,16 +65,18 @@ function loadDotEnv(filePath) {
   }
 }
 
-function hashPassword(password, salt = randomBytes(16).toString("hex")) {
-  const hash = pbkdf2Sync(password, salt, 120000, 32, "sha256").toString("hex");
+async function hashPassword(password, salt = randomBytes(16).toString("hex")) {
+  const hash = (await pbkdf2Async(password, salt, 120000, 32, "sha256")).toString("hex");
   return `${salt}:${hash}`;
 }
 
-function verifyPassword(password, stored) {
+async function verifyPassword(password, stored) {
   const [salt, hash] = String(stored || "").split(":");
   if (!salt || !hash) return false;
-  const candidate = hashPassword(password, salt).split(":")[1];
-  return timingSafeEqual(Buffer.from(hash, "hex"), Buffer.from(candidate, "hex"));
+  const candidate = (await pbkdf2Async(password, salt, 120000, 32, "sha256")).toString("hex");
+  const hashBuffer = Buffer.from(hash, "hex");
+  const candidateBuffer = Buffer.from(candidate, "hex");
+  return hashBuffer.length === candidateBuffer.length && timingSafeEqual(hashBuffer, candidateBuffer);
 }
 
 function cmdQuote(value) {
@@ -174,11 +184,11 @@ function commandTargetForPath(filePath) {
   return { command: filePath, args: [] };
 }
 
-function seedDb() {
+async function seedDb() {
   const adminPassword = process.env.ADMIN_PASSWORD || "admin123";
   const createdAt = now();
   const users = [
-    { id: "user_admin", username: "admin", passwordHash: hashPassword(adminPassword), displayName: "System Admin", email: "admin@example.com", role: "admin", status: "active", createdAt, updatedAt: createdAt },
+    { id: "user_admin", username: "admin", passwordHash: await hashPassword(adminPassword), displayName: "System Admin", email: "admin@example.com", role: "admin", status: "active", createdAt, updatedAt: createdAt },
   ];
   const members = [
     { teamId: "team_platform", userId: "user_admin", role: "owner", createdAt, updatedAt: createdAt },
@@ -186,9 +196,9 @@ function seedDb() {
 
   if (process.env.SEED_DEMO_USERS === "true") {
     users.push(
-      { id: "user_alice", username: "alice", passwordHash: hashPassword("password"), displayName: "Alice Chen", email: "alice@example.com", role: "member", status: "active", createdAt, updatedAt: createdAt },
-      { id: "user_bob", username: "bob", passwordHash: hashPassword("password"), displayName: "Bob Lin", email: "bob@example.com", role: "member", status: "active", createdAt, updatedAt: createdAt },
-      { id: "user_viewer", username: "viewer", passwordHash: hashPassword("password"), displayName: "Viewer", email: "viewer@example.com", role: "member", status: "active", createdAt, updatedAt: createdAt },
+      { id: "user_alice", username: "alice", passwordHash: await hashPassword("password"), displayName: "Alice Chen", email: "alice@example.com", role: "member", status: "active", createdAt, updatedAt: createdAt },
+      { id: "user_bob", username: "bob", passwordHash: await hashPassword("password"), displayName: "Bob Lin", email: "bob@example.com", role: "member", status: "active", createdAt, updatedAt: createdAt },
+      { id: "user_viewer", username: "viewer", passwordHash: await hashPassword("password"), displayName: "Viewer", email: "viewer@example.com", role: "member", status: "active", createdAt, updatedAt: createdAt },
     );
     members.push(
       { teamId: "team_platform", userId: "user_alice", role: "admin", createdAt, updatedAt: createdAt },
@@ -239,7 +249,7 @@ async function loadDb() {
   try {
     db = JSON.parse(await readFile(DB_FILE, "utf8"));
   } catch {
-    db = seedDb();
+    db = await seedDb();
     await saveDb();
   }
   normalizeRuntimeConfig();
@@ -257,7 +267,7 @@ async function maybeResetAdminPassword() {
   if (process.env.RESET_ADMIN_PASSWORD !== "true") return;
   const admin = db.users.find((user) => user.username === "admin");
   if (!admin) return;
-  admin.passwordHash = hashPassword(process.env.ADMIN_PASSWORD || "admin123");
+  admin.passwordHash = await hashPassword(process.env.ADMIN_PASSWORD || "admin123");
   admin.updatedAt = now();
   db.sessionsByToken = {};
   audit(admin.id, "user.admin_password_reset_from_env", "user", admin.id);
@@ -316,8 +326,14 @@ async function syncRuntimeConfigFromEnv() {
 }
 
 async function saveDb() {
-  await mkdir(dirname(DB_FILE), { recursive: true });
-  await writeFile(DB_FILE, JSON.stringify(db, null, 2));
+  const task = saveQueue.then(async () => {
+    await mkdir(dirname(DB_FILE), { recursive: true });
+    const tmpFile = `${DB_FILE}.tmp`;
+    await writeFile(tmpFile, JSON.stringify(db, null, 2));
+    await rename(tmpFile, DB_FILE);
+  });
+  saveQueue = task.catch((err) => console.error("[saveDb]", err));
+  return task;
 }
 
 function publicUser(user) {
@@ -327,12 +343,17 @@ function publicUser(user) {
 }
 
 function parseCookies(req) {
-  return Object.fromEntries(
-    String(req.headers.cookie || "")
-      .split(";")
-      .map((item) => item.trim().split("="))
-      .filter((item) => item.length === 2),
-  );
+  const cookies = {};
+  for (const item of String(req.headers.cookie || "").split(";")) {
+    const index = item.indexOf("=");
+    if (index <= 0) continue;
+    try {
+      cookies[item.slice(0, index).trim()] = decodeURIComponent(item.slice(index + 1).trim());
+    } catch {
+      cookies[item.slice(0, index).trim()] = item.slice(index + 1).trim();
+    }
+  }
+  return cookies;
 }
 
 function getCurrentUser(req) {
@@ -352,9 +373,38 @@ function revokeSessionsForUser(userId, exceptToken = null) {
 
 async function readBody(req) {
   let body = "";
-  for await (const chunk of req) body += chunk;
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > MAX_BODY_SIZE) {
+      const err = new Error("Request body too large");
+      err.code = "BODY_TOO_LARGE";
+      throw err;
+    }
+    body += chunk;
+  }
   if (!body) return {};
   return JSON.parse(body);
+}
+
+function cookieHeader(value, options = {}) {
+  const flags = ["HttpOnly", "SameSite=Lax", "Path=/"];
+  if (COOKIE_SECURE) flags.push("Secure");
+  if (options.maxAge !== undefined) flags.push(`Max-Age=${options.maxAge}`);
+  return `cc_session=${value}; ${flags.join("; ")}`;
+}
+
+function checkLoginRate(ip) {
+  const key = ip || "unknown";
+  const current = now();
+  const record = loginAttempts.get(key);
+  if (!record || current > record.resetAt) {
+    loginAttempts.set(key, { count: 1, resetAt: current + 60_000 });
+    return true;
+  }
+  if (record.count >= 20) return false;
+  record.count += 1;
+  return true;
 }
 
 function send(res, status, payload, headers = {}) {
@@ -368,6 +418,28 @@ function error(res, status, code, message) {
 
 function audit(userId, action, targetType, targetId, metadata = {}) {
   db.auditLogs.push({ id: id("audit"), userId, action, targetType, targetId, metadata, createdAt: now() });
+}
+
+function pruneDb() {
+  let changed = false;
+  if (Array.isArray(db.auditLogs) && db.auditLogs.length > MAX_AUDIT_LOGS) {
+    db.auditLogs = db.auditLogs.slice(-MAX_AUDIT_LOGS);
+    changed = true;
+  }
+
+  if (Array.isArray(db.messages) && db.messages.length) {
+    const counts = new Map();
+    const pruned = [];
+    for (let index = db.messages.length - 1; index >= 0; index -= 1) {
+      const message = db.messages[index];
+      const count = (counts.get(message.sessionId) || 0) + 1;
+      counts.set(message.sessionId, count);
+      if (count <= MAX_MESSAGES_PER_SESSION) pruned.push(message);
+      else changed = true;
+    }
+    if (changed) db.messages = pruned.reverse();
+  }
+  return changed;
 }
 
 function canManageTeamSessions(user, teamId) {
@@ -410,9 +482,14 @@ function eventVisibleToUser(event, user) {
 function broadcast(event) {
   const data = `data: ${JSON.stringify(event)}\n\n`;
   for (const client of clients) {
-    const user = db.users.find((item) => item.id === client.userId);
-    if (eventVisibleToUser(event, user)) client.res.write(data);
+    if (eventVisibleToUser(event, client.user)) client.res.write(data);
   }
+}
+
+function submitClaudeTurnSafely(session, prompt, turnId, label) {
+  submitClaudeTurn(session, prompt, turnId).catch((err) => {
+    console.error(`[${label}] submitClaudeTurn failed:`, err);
+  });
 }
 
 function getTeamRole(teamId, userId) {
@@ -1536,9 +1613,10 @@ async function handleApi(req, res, pathname) {
   if (pathname === "/api/health") return send(res, 200, { ok: true });
 
   if (pathname === "/api/auth/login" && req.method === "POST") {
+    if (!checkLoginRate(req.socket.remoteAddress)) return error(res, 429, "RATE_LIMITED", "Too many login attempts. Please wait.");
     const body = await readBody(req);
     const user = db.users.find((item) => item.username === body.username);
-    if (!user || !verifyPassword(body.password || "", user.passwordHash)) {
+    if (!user || !(await verifyPassword(body.password || "", user.passwordHash))) {
       audit(user?.id, "auth.login_failed", "user", user?.id, { username: body.username });
       await saveDb();
       return error(res, 401, "AUTH_INVALID_CREDENTIALS", "Invalid username or password.");
@@ -1549,7 +1627,7 @@ async function handleApi(req, res, pathname) {
     user.lastLoginAt = now();
     audit(user.id, "auth.login", "user", user.id);
     await saveDb();
-    return send(res, 200, { user: publicUser(user) }, { "Set-Cookie": `cc_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=43200` });
+    return send(res, 200, { user: publicUser(user) }, { "Set-Cookie": cookieHeader(token, { maxAge: 43200 }) });
   }
 
   const user = getCurrentUser(req);
@@ -1559,16 +1637,16 @@ async function handleApi(req, res, pathname) {
     const token = parseCookies(req).cc_session;
     delete db.sessionsByToken[token];
     await saveDb();
-    return send(res, 200, { ok: true }, { "Set-Cookie": "cc_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0" });
+    return send(res, 200, { ok: true }, { "Set-Cookie": cookieHeader("", { maxAge: 0 }) });
   }
 
   if (pathname === "/api/auth/password" && req.method === "PATCH") {
     const body = await readBody(req);
     const currentPassword = String(body.currentPassword || "");
     const newPassword = String(body.newPassword || "");
-    if (!verifyPassword(currentPassword, user.passwordHash)) return error(res, 400, "PASSWORD_CURRENT_INVALID", "Current password is incorrect.");
+    if (!(await verifyPassword(currentPassword, user.passwordHash))) return error(res, 400, "PASSWORD_CURRENT_INVALID", "Current password is incorrect.");
     if (newPassword.trim().length < 6) return error(res, 400, "PASSWORD_WEAK", "Password must be at least 6 characters.");
-    user.passwordHash = hashPassword(newPassword);
+    user.passwordHash = await hashPassword(newPassword);
     user.updatedAt = now();
     revokeSessionsForUser(user.id, parseCookies(req).cc_session);
     audit(user.id, "user.password_changed", "user", user.id);
@@ -1581,9 +1659,20 @@ async function handleApi(req, res, pathname) {
   if (pathname === "/api/events") {
     res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
     res.write("data: {\"type\":\"connected\"}\n\n");
-    const client = { res, userId: user.id };
+    const client = { res, userId: user.id, user };
     clients.add(client);
-    req.on("close", () => clients.delete(client));
+    const heartbeat = setInterval(() => {
+      try {
+        res.write(": heartbeat\n\n");
+      } catch {
+        clearInterval(heartbeat);
+        clients.delete(client);
+      }
+    }, 15_000);
+    req.on("close", () => {
+      clearInterval(heartbeat);
+      clients.delete(client);
+    });
     return;
   }
 
@@ -1771,7 +1860,7 @@ async function handleApi(req, res, pathname) {
     session.updatedAt = now();
     audit(user.id, "session.retry", "session", session.id, { sourceMessageId: source.id });
     await saveDb();
-    submitClaudeTurn(session, source.content, turnId);
+    submitClaudeTurnSafely(session, source.content, turnId, "retry");
     return send(res, 201, { ok: true });
   }
 
@@ -1814,7 +1903,7 @@ async function handleApi(req, res, pathname) {
       broadcast({ type: "session.status.changed", sessionId: session.id, status: session.status, session });
     } else {
       await saveDb();
-      submitClaudeTurn(session, content, turnId);
+      submitClaudeTurnSafely(session, content, turnId, "send");
     }
     return send(res, 201, { ok: true });
   }
@@ -1906,13 +1995,13 @@ async function handleApi(req, res, pathname) {
     await saveDb();
     broadcast({ type: "session.message.created", sessionId: session.id, message: decisionMessage });
     broadcast({ type: "permission.updated", sessionId: session.id, permissionId: permission.id, status: permission.status, permission });
-    if (permission.type === "platform_gate" && permission.status === "approved") submitClaudeTurn(session, permission.payload, permission.turnId);
+    if (permission.type === "platform_gate" && permission.status === "approved") submitClaudeTurnSafely(session, permission.payload, permission.turnId, "approval");
     else if (permission.type === "mcp_tool" && permission.status === "approved" && !permission.controlRequestId && !permission.sdkPermission) {
       const nextTurnId = id("turn");
       const payload = permission.payload || "继续上一轮任务。";
       stopRuntime(session.id);
       await saveDb();
-      submitClaudeTurn(session, payload, nextTurnId);
+      submitClaudeTurnSafely(session, payload, nextTurnId, "approval-fallback");
     }
     else if (permission.type === "platform_gate") {
       session.status = "stopped";
@@ -1926,7 +2015,7 @@ async function handleApi(req, res, pathname) {
     const body = await readBody(req);
     if (!String(body.password || "").trim()) return error(res, 400, "PASSWORD_REQUIRED", "Initial password is required.");
     if (db.users.some((item) => item.username === body.username)) return error(res, 409, "USER_EXISTS", "Username already exists.");
-    const newUser = { id: id("user"), username: body.username, passwordHash: hashPassword(body.password), displayName: body.displayName, email: body.email || `${body.username}@example.com`, role: body.role || "member", status: "active", createdAt: now(), updatedAt: now() };
+    const newUser = { id: id("user"), username: body.username, passwordHash: await hashPassword(body.password), displayName: body.displayName, email: body.email || `${body.username}@example.com`, role: body.role || "member", status: "active", createdAt: now(), updatedAt: now() };
     db.users.push(newUser);
     audit(user.id, "user.created", "user", newUser.id);
     await saveDb();
@@ -1953,7 +2042,7 @@ async function handleApi(req, res, pathname) {
     const body = await readBody(req);
     const newPassword = String(body.newPassword || "");
     if (newPassword.trim().length < 6) return error(res, 400, "PASSWORD_WEAK", "Password must be at least 6 characters.");
-    target.passwordHash = hashPassword(newPassword);
+    target.passwordHash = await hashPassword(newPassword);
     target.updatedAt = now();
     revokeSessionsForUser(target.id, target.id === user.id ? parseCookies(req).cc_session : null);
     audit(user.id, "user.password_reset", "user", target.id);
@@ -1991,14 +2080,20 @@ async function handleApi(req, res, pathname) {
 }
 
 async function serveStatic(req, res, pathname) {
+  const blocked = ["/data/", "/node_modules/", "/scripts/", "/."];
+  if (blocked.some((prefix) => pathname.startsWith(prefix)) || pathname.includes("/.")) {
+    return error(res, 403, "PATH_FORBIDDEN", "Forbidden.");
+  }
   const filePath = pathname === "/" ? join(root, "index.html") : join(root, normalize(pathname));
   if (!filePath.startsWith(root)) return error(res, 403, "PATH_FORBIDDEN", "Forbidden.");
   try {
     const info = await stat(filePath);
     if (!info.isFile()) throw new Error("not file");
-    res.writeHead(200, { "Content-Type": mimeTypes[extname(filePath)] || "application/octet-stream", "Cache-Control": "no-store" });
+    const cacheControl = extname(filePath) === ".html" ? "no-store" : "public, max-age=3600";
+    res.writeHead(200, { "Content-Type": mimeTypes[extname(filePath)] || "application/octet-stream", "Cache-Control": cacheControl });
     createReadStream(filePath).pipe(res);
   } catch {
+    res.writeHead(200, { "Content-Type": mimeTypes[".html"], "Cache-Control": "no-store" });
     createReadStream(join(root, "index.html")).pipe(res);
   }
 }
@@ -2006,16 +2101,35 @@ async function serveStatic(req, res, pathname) {
 await loadDb();
 await syncRuntimeConfigFromEnv();
 await maybeResetAdminPassword();
+if (pruneDb()) await saveDb();
 
-createServer(async (req, res) => {
+setInterval(() => {
+  if (pruneDb()) saveDb().catch((err) => console.error("[pruneDb]", err));
+}, 60 * 60 * 1000);
+
+const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
     if (url.pathname.startsWith("/api/")) return await handleApi(req, res, url.pathname);
     return await serveStatic(req, res, url.pathname);
   } catch (err) {
+    if (err.code === "BODY_TOO_LARGE") return error(res, 413, "BODY_TOO_LARGE", "Request body too large.");
     console.error(err);
     return error(res, 500, "INTERNAL_ERROR", "Internal server error.");
   }
 }).listen(PORT, HOST, () => {
   console.log(`Claude Code Team Platform listening on ${HOST}:${PORT}`);
 });
+
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.on(signal, async () => {
+    console.log(`Received ${signal}, shutting down...`);
+    for (const sessionId of running.keys()) stopRuntime(sessionId);
+    try {
+      await saveDb();
+    } finally {
+      server.close(() => process.exit(0));
+      setTimeout(() => process.exit(1), 5000).unref();
+    }
+  });
+}
