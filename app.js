@@ -12,11 +12,13 @@ const icons = {
   activity: '<svg class="icon" viewBox="0 0 24 24"><path d="M22 12h-4l-3 8L9 4l-3 8H2"/></svg>',
   info: '<svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>',
   panel: '<svg class="icon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>',
+  chevron: '<svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>',
 };
 
 const now = () => Date.now();
 const fmt = (timestamp) => new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(timestamp);
 const CHAT_RENDER_LIMIT = 180;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 const seedState = () => ({
   currentUserId: null,
@@ -65,6 +67,7 @@ const pendingMessagePatches = new Set();
 const uiMemory = {
   composerDrafts: new Map(),
   openTurnEvents: new Map(),
+  openSessionGroups: new Map(),
 };
 
 function loadState() {
@@ -175,6 +178,49 @@ function upsertById(items, item) {
   if (!item?.id) return items;
   const exists = items.some((existing) => existing.id === item.id);
   return exists ? items.map((existing) => (existing.id === item.id ? item : existing)) : [...items, item];
+}
+
+function sessionTimestamp(session) {
+  return Number(session?.updatedAt || session?.createdAt || 0);
+}
+
+function sortSessionsNewestFirst(sessions) {
+  return [...sessions].sort((a, b) => {
+    const timeDifference = sessionTimestamp(b) - sessionTimestamp(a);
+    if (timeDifference) return timeDifference;
+    return String(b.id || "").localeCompare(String(a.id || ""));
+  });
+}
+
+function groupSessionsByTime(sessions, referenceTime = now()) {
+  const today = new Date(referenceTime);
+  today.setHours(0, 0, 0, 0);
+  const todayStart = today.getTime();
+  const groups = [
+    { id: "today", label: "今天", minimum: todayStart, defaultExpanded: true, sessions: [] },
+    { id: "past-7-days", label: "过去7天", minimum: todayStart - DAY_MS * 7, defaultExpanded: true, sessions: [] },
+    { id: "past-30-days", label: "过去30天", minimum: todayStart - DAY_MS * 30, defaultExpanded: false, sessions: [] },
+    { id: "older", label: "更久", minimum: Number.NEGATIVE_INFINITY, defaultExpanded: false, sessions: [] },
+  ];
+
+  sortSessionsNewestFirst(sessions).forEach((session) => {
+    const timestamp = sessionTimestamp(session);
+    const group = groups.find((item) => timestamp >= item.minimum) || groups.at(-1);
+    group.sessions.push(session);
+  });
+
+  return groups.filter((group) => group.sessions.length);
+}
+
+function sessionGroupKey(teamId, groupId) {
+  return `${teamId}:${groupId}`;
+}
+
+function isSessionGroupExpanded(teamId, group, activeSession) {
+  const key = sessionGroupKey(teamId, group.id);
+  if (uiMemory.openSessionGroups.has(key)) return uiMemory.openSessionGroups.get(key);
+  if (group.sessions.some((session) => session.id === activeSession?.id)) return true;
+  return group.defaultExpanded;
 }
 
 function upsertMember(items, member) {
@@ -722,7 +768,7 @@ function cliStatus() {
 function renderTeamDetail() {
   const team = state.teams.find((item) => item.id === state.selectedTeamId) || state.teams[0];
   if (!team) return renderTeams();
-  const sessions = state.sessions.filter((session) => session.teamId === team.id);
+  const sessions = sortSessionsNewestFirst(state.sessions.filter((session) => session.teamId === team.id));
   const session = state.sessions.find((item) => item.id === state.selectedSessionId && item.teamId === team.id) || sessions[0];
   if (session && state.selectedSessionId !== session.id) state.selectedSessionId = session.id;
   const role = teamRole(team.id) || (currentUser()?.role === "admin" ? "system admin" : "viewer");
@@ -762,9 +808,10 @@ function renderTeamRail(team, activeSession) {
 }
 
 function renderSessionList(team, activeSession, embedded = false) {
-  const allSessions = state.sessions.filter((session) => session.teamId === team.id);
+  const allSessions = sortSessionsNewestFirst(state.sessions.filter((session) => session.teamId === team.id));
   const filter = state.sessionMemberFilter || "all";
   const sessions = filter === "all" ? allSessions : allSessions.filter((session) => session.createdBy === filter);
+  const groups = groupSessionsByTime(sessions);
   const memberOptions = state.members
     .filter((member) => member.teamId === team.id)
     .map((member) => {
@@ -783,20 +830,44 @@ function renderSessionList(team, activeSession, embedded = false) {
         </select>
       </div>
       <div class="session-list">
-        ${sessions
-          .map((session) => `
-            <div class="session-row">
-              <button class="session-item ${session.id === activeSession?.id ? "active" : ""}" data-session="${session.id}">
-                <strong class="truncate-title" title="${escapeHtml(titleText(session.title))}">${escapeHtml(titleText(session.title))}</strong>
-                <div class="meta">${badge(session.status, statusTone(session.status))}${badge(sessionVisibility(session) === "team" ? "团队可见" : "私有", sessionVisibility(session) === "team" ? "green" : "")}</div>
-                <div class="meta"><span>${escapeHtml(userName(session.createdBy))}</span><span>${fmt(session.updatedAt)}</span></div>
-              </button>
-              <button class="icon-button session-delete" title="删除会话" data-delete-session="${session.id}">${icons.close}</button>
-            </div>
-          `)
-          .join("") || '<div class="empty">没有匹配的会话</div>'}
+        ${groups.map((group) => renderSessionGroup(team, group, activeSession)).join("") || '<div class="empty">没有匹配的会话</div>'}
       </div>
     </section>
+  `;
+}
+
+function renderSessionGroup(team, group, activeSession) {
+  const expanded = isSessionGroupExpanded(team.id, group, activeSession);
+  const contentId = `session-group-${team.id}-${group.id}`;
+  return `
+    <section class="session-group" data-session-group-section="${group.id}">
+      <button
+        class="session-group-toggle"
+        data-session-group="${group.id}"
+        data-team="${team.id}"
+        data-expanded="${expanded}"
+        aria-expanded="${expanded}"
+        aria-controls="${contentId}"
+      >
+        <span>${escapeHtml(group.label)}</span>
+        <span class="session-group-count">${group.sessions.length}</span>
+        <span class="session-group-chevron" aria-hidden="true">${icons.chevron}</span>
+      </button>
+      ${expanded ? `<div class="session-group-content" id="${contentId}">${group.sessions.map((session) => renderSessionRow(session, activeSession)).join("")}</div>` : ""}
+    </section>
+  `;
+}
+
+function renderSessionRow(session, activeSession) {
+  return `
+    <div class="session-row">
+      <button class="session-item ${session.id === activeSession?.id ? "active" : ""}" data-session="${session.id}">
+        <strong class="truncate-title" title="${escapeHtml(titleText(session.title))}">${escapeHtml(titleText(session.title))}</strong>
+        <div class="meta">${badge(session.status, statusTone(session.status))}${badge(sessionVisibility(session) === "team" ? "团队可见" : "私有", sessionVisibility(session) === "team" ? "green" : "")}</div>
+        <div class="meta"><span>${escapeHtml(userName(session.createdBy))}</span><span>${fmt(session.updatedAt)}</span></div>
+      </button>
+      <button class="icon-button session-delete" title="删除会话" aria-label="删除会话 ${escapeHtml(titleText(session.title))}" data-delete-session="${session.id}">${icons.close}</button>
+    </div>
   `;
 }
 
@@ -1467,7 +1538,7 @@ function renderTeamParts(parts = {}) {
     render();
     return;
   }
-  const sessions = state.sessions.filter((session) => session.teamId === team.id);
+  const sessions = sortSessionsNewestFirst(state.sessions.filter((session) => session.teamId === team.id));
   const session = state.sessions.find((item) => item.id === state.selectedSessionId && item.teamId === team.id) || sessions[0];
   if (session && state.selectedSessionId !== session.id) state.selectedSessionId = session.id;
   const snapshot = captureUiSnapshot();
@@ -1639,7 +1710,7 @@ async function deleteSession(id) {
   if (!confirm(`删除会话「${session.title}」？此操作会同时删除消息和权限记录。`)) return;
   await api(`/api/sessions/${id}`, { method: "DELETE" });
   if (state.selectedSessionId === id) {
-    const next = state.sessions.find((item) => item.teamId === session.teamId && item.id !== id);
+    const next = sortSessionsNewestFirst(state.sessions.filter((item) => item.teamId === session.teamId && item.id !== id))[0];
     state.selectedSessionId = next?.id || "";
   }
   state.sessions = state.sessions.filter((item) => item.id !== id);
@@ -1830,7 +1901,7 @@ document.addEventListener("change", (event) => {
   if (!filter) return;
   const value = filter.value || "all";
   const team = state.teams.find((item) => item.id === state.selectedTeamId);
-  const sessions = team ? state.sessions.filter((session) => session.teamId === team.id && (value === "all" || session.createdBy === value)) : [];
+  const sessions = team ? sortSessionsNewestFirst(state.sessions.filter((session) => session.teamId === team.id && (value === "all" || session.createdBy === value))) : [];
   const selectedIsVisible = sessions.some((session) => session.id === state.selectedSessionId);
   setState({
     sessionMemberFilter: value,
@@ -1852,6 +1923,12 @@ document.addEventListener("click", async (event) => {
     if (target.dataset.openTeam) return setState({ activeView: "team", selectedTeamId: target.dataset.openTeam, selectedSessionId: target.dataset.session || state.selectedSessionId, sessionMemberFilter: "all" });
     if (target.dataset.backTeams !== undefined) return setState({ activeView: "teams" });
     if (target.dataset.session) return setState({ selectedSessionId: target.dataset.session });
+    if (target.dataset.sessionGroup) {
+      const key = sessionGroupKey(target.dataset.team || state.selectedTeamId, target.dataset.sessionGroup);
+      uiMemory.openSessionGroups.set(key, target.dataset.expanded !== "true");
+      scheduleTeamRender({ rail: true }, 0);
+      return;
+    }
     if (target.dataset.action === "toggle-sidebar") {
       const collapsed = !state.sidebarCollapsed;
       localStorage.setItem("cc.sidebarCollapsed", String(collapsed));
