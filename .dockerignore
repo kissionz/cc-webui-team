@@ -1,0 +1,10 @@
+.git
+.env
+.host-claude
+.learnings
+FIXES.md
+data
+dist
+node_modules
+workspaces
+npm-debug.log*

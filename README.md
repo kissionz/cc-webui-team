@@ -1,276 +1,125 @@
 # Claude Code Team Platform
 
-一个可 Docker 部署的 Claude Code CLI 团队协作平台 MVP。它提供真实后端、登录会话、团队/成员/会话 API、权限审批、SSE 事件流、JSON 文件持久化，以及服务器侧 Claude Code CLI 健康检查和进程执行入口。
+面向小团队的 Claude Code 协作平台。当前版本采用严格 TypeScript、SQLite WAL、Claude Agent SDK、游标分页和可恢复任务状态；适合当前百级会话、20+ 用户规模，并为更大的单机团队部署保留了容量空间。
 
-## 最低硬件
-
-- 2 vCPU
-- 4 GB RAM
-- 20 GB SSD
-- Ubuntu 22.04+ / Debian 12+ / 任意可运行 Docker 的 Linux
-
-推荐小团队配置：4 vCPU、8 GB RAM、50 GB SSD，并配置 2-4 GB swap。
-
-## Docker 部署
-
-先创建 `.env`，并设置一个强管理员密码：
-
-```bash
-cp .env.example .env
-```
-
-然后编辑 `.env`：
+## 当前架构
 
 ```text
-ADMIN_PASSWORD=replace-with-a-strong-admin-password
-PORT=8068
-HOST=0.0.0.0
+Browser (TypeScript SPA)
+  ├─ REST：登录、团队、会话、消息、审批、配置
+  └─ SSE：消息增量、状态、审批和计划更新
+            │
+Node.js 24 / TypeScript
+  ├─ 鉴权、角色与团队数据隔离
+  ├─ 全局 / 团队 / 用户三级并发调度
+  ├─ Claude Agent SDK 运行时与会话恢复
+  └─ SQLite WAL：事务、全文检索、游标分页、启动恢复
+            │
+       团队 workspace allowlist
 ```
 
-```bash
-docker compose up -d --build
-```
+JSON 文件存储已退出主链路。第一次启动新版时，如果 `data/db.json` 存在，系统会在事务中一次性导入 SQLite，成功后把原文件重命名为带时间戳的 `.bak` 备份。不要手工删除备份，确认数据完整后再自行归档。
 
-访问：
+## 要求
 
-```text
-http://服务器IP:8068
-```
-
-默认管理员账号：
-
-```text
-admin / 你在 ADMIN_PASSWORD 中设置的密码
-```
-
-如果需要本地演示用户，可以把 `SEED_DEMO_USERS` 设为 `true` 后重新初始化数据目录。生产环境建议保持关闭。
-
-## 挂载目录
-
-```text
-./data       -> /app/data       # 用户、团队、会话、权限、审计等持久化数据
-./workspaces -> /workspaces     # 团队工作区 allowlist 根目录
-```
-
-团队 workspace 必须位于 `/workspaces` 内，否则后端会拒绝创建。
-
-## 使用宿主机 Claude Code CLI
-
-如果宿主机已经安装并登录了 Claude Code CLI，可以让容器复用宿主机上的 CLI 包和 `~/.claude` 登录态。
-
-先在宿主机确认：
-
-```bash
-claude --version
-```
-
-然后准备可挂载的 CLI 包。
-
-macOS / Linux：
-
-```bash
-sh scripts/prepare-host-claude.sh
-```
-
-Windows PowerShell：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/prepare-host-claude.ps1
-```
-
-启动时叠加 host override：
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.host-claude.yml up -d --build
-```
-
-这个方式会挂载：
-
-```text
-./.host-claude/claude-code -> /opt/claude-code     # 宿主机 CLI 包副本
-~/.claude                  -> /home/node/.claude   # 宿主机 Claude Code 登录态
-```
-
-`.host-claude/` 和 `.env` 都已加入 `.gitignore`，不要上传到 GitHub。
-
-后端会按以下配置调用 CLI：
-
-```text
-CLAUDE_COMMAND=/opt/claude-code/cli.js
-CLAUDE_ARGS=
-```
-
-生产环境不要把 `~/.claude`、`.env`、`.host-claude/` 暴露给前端或提交到仓库。
-
-### Windows 宿主机注意事项
-
-Windows 可以用 Docker Desktop 部署，但有三点差异：
-
-- `claude` 通常是 `claude.cmd`，脚本会解析它背后的 npm 全局包并复制到 `.host-claude/`。
-- `~/.claude` 在 compose 中会解析为你的 Windows 用户目录，例如 `C:\Users\you\.claude`。
-- 你的项目目录和用户目录必须在 Docker Desktop 的文件共享范围内，否则挂载会失败。
-
-如果容器内健康检查显示找不到 Claude Code，先确认宿主机 PowerShell 里能运行：
-
-```powershell
-claude --version
-```
-
-再重新执行：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/prepare-host-claude.ps1
-docker compose -f docker-compose.yml -f docker-compose.host-claude.yml up -d --build
-```
+- Node.js 24 或更高版本
+- Claude Code 登录态；团队部署应使用独立、可撤销的服务账号凭据
+- 推荐小团队主机：4 vCPU、8 GB RAM、50 GB SSD
 
 ## 本地运行
 
 ```bash
+cp .env.example .env
+npm ci
+npm run build
 npm start
 ```
 
-默认监听：
+打开 `http://localhost:8068`。初次启动的管理员账号是 `admin`，密码来自 `.env` 的 `ADMIN_PASSWORD`。
+
+开发时使用：
+
+```bash
+npm run dev
+```
+
+项目会自动加载仓库根目录的 `.env`，但不会覆盖已经存在的进程环境变量。需要另一份配置时可直接运行：
+
+```bash
+node --env-file=/absolute/path/to/custom.env dist/server.js
+```
+
+## Docker 部署
+
+```bash
+cp .env.example .env
+# 编辑 .env，至少设置强 ADMIN_PASSWORD
+docker compose up -d --build
+```
+
+默认使用 Docker named volume，避免 Linux 首次部署时 bind mount 被 root 创建后导致服务账号无写权限：
 
 ```text
-http://localhost:8068
+claude_data       -> /app/data       # SQLite、迁移备份
+claude_workspaces -> /workspaces     # 团队工作区 allowlist 根目录
 ```
 
-## Windows 原生运行 Claude Code
+需要映射宿主机目录时，可自行改为 bind mount，但要先创建目录并确保容器内 `node` 用户（UID 1000）可读写。
 
-如果你在 Windows 宿主机上的 Claude Code CLI 已经配置了很多 MCP、hooks、settings 或项目级配置，推荐不要把后端放进 Linux Docker 容器，而是直接在 Windows 上运行 Node 服务。这样后端调用的就是你宿主机环境里的 `claude`，能最大程度复用现有配置。
+如果必须复用宿主机安装的 Claude Code 包和 `~/.claude`，先运行对应准备脚本，再叠加 compose override：
 
-PowerShell：
-
-```powershell
-git clone https://github.com/kissionz/cc-webui-team.git
-cd cc-webui-team
-
-copy .env.example .env
-notepad .env
-
-$env:ADMIN_PASSWORD="your-strong-password"
-$env:PORT="8068"
-$env:HOST="0.0.0.0"
-$env:WORKSPACE_ROOT="C:\workspaces"
-$env:CLAUDE_COMMAND="claude"
-$env:CLAUDE_ARGS=""
-
-npm start
+```bash
+sh scripts/prepare-host-claude.sh
+docker compose -f docker-compose.yml -f docker-compose.host-claude.yml up -d --build
 ```
 
-后端通过官方 `@anthropic-ai/claude-agent-sdk` 调用宿主机 Claude Code，并保存返回的 `session_id`。同一个 Web 会话后续消息会自动用 `resume` 恢复 Claude Code 上下文。`CLAUDE_ARGS` 只用于额外参数，不要填写 `-p`、`--output-format`、`--input-format`、`--resume` 或 `--allowedTools`。
+Windows 可运行 `scripts/prepare-host-claude.ps1`。包含宿主机绝对路径、PowerShell 或 `.exe` 的 MCP 配置不能直接在 Linux 容器内工作；这种情况建议在 Windows 原生运行 Node 服务。
 
-Agent 设置里可以配置模型上下文窗口大小、自动压缩阈值和 MCP 工具 allowlist。allowlist 只用于 WebUI 预授权和审批识别，留空不会禁用宿主机 Claude Code 已配置的 MCP。后端会把 `autoCompactEnabled` / `autoCompactWindow` 传给 Claude Agent SDK，优先使用 Claude Code 原生 auto compact。每轮调用还会注入 WebUI 工具边界提醒，明确当前已预授权或已缓存的 MCP 工具；如果 WebUI 尚未缓存清单，实际可用工具仍以宿主机 Claude Code 运行时暴露为准。模型窗口默认按 1M、阈值 0.62 计算；如果换模型，应同步修改“模型上下文窗口 tokens”。
+安全上不把 `ANTHROPIC_API_KEY` 或 OAuth token 注入任务子进程环境，避免获批 shell 读取共享密钥。Docker 团队部署应使用上面的独立 Claude 服务账号登录态挂载；不要挂载个人主账号凭据。
 
-访问：
+## 生产配置
 
-```text
-http://localhost:8068
+关键环境变量见 [.env.example](.env.example)：
+
+- `WORKSPACE_ROOT`：所有团队 workspace 的真实路径必须位于此目录内；会解析符号链接后校验。
+- `ALLOWED_ORIGINS`：反向代理或自定义域名必须配置精确来源，多个用逗号分隔。
+- `COOKIE_SECURE=true`：HTTPS 部署必须开启。
+- `MAX_CONCURRENT_TURNS`、`MAX_CONCURRENT_TURNS_PER_TEAM`、`MAX_CONCURRENT_TURNS_PER_USER`：三级并发上限。
+- `CLAUDE_COMMAND`：通常留空或写 `claude`，让 SDK 使用自带运行时；只有使用明确存在的自定义可执行文件时才填写路径。
+- `MCP_TOOL_ALLOWLIST`：平台预授权工具；其余工具由会话内审批。
+
+公网部署建议由 Caddy、Nginx 或同类反向代理终止 TLS，并将数据目录和 workspace 纳入独立备份策略。SQLite 的 `-wal` 与 `-shm` 文件属于数据库运行状态，不应单独复制；优先使用 SQLite 在线备份或在停机后整体备份。
+
+## 权限与运行模型
+
+- 系统角色：管理员、成员。
+- 团队角色：所有者、管理员、成员、查看者。
+- 私有会话仅创建者和系统管理员可见；团队会话按团队成员关系可见。
+- 同一会话只允许一个活跃任务；并发超限时进入公平队列。
+- 排队任务可取消；运行中任务可中断；进程异常退出后，遗留运行态会被标记为 `interrupted`，不会假装仍在运行。
+- 工具审批具有过期、幂等和原子决策保护，审批缓存可按工具或 MCP 服务撤销。
+
+## 数据升级与回滚
+
+升级前备份 `data/`。新版启动后：
+
+1. 创建 `app.sqlite` 并启用 WAL。
+2. 检测旧 `db.json`，只导入一次。
+3. 校验并写入迁移标记。
+4. 将旧 JSON 重命名为 `.migrated-<timestamp>.bak`。
+
+需要回滚旧版本时，先停止新服务，保留 `app.sqlite*`，再把迁移备份复制为旧版本需要的 `db.json`。不要让新旧版本同时写同一个数据目录。
+
+## 验证
+
+```bash
+npm run typecheck
+npm run build
+npm test -- --run
 ```
 
-同一内网里的其他电脑访问：
+构建会同时严格检查服务端和浏览器 TypeScript，并把产物写入 `dist/`。
 
-```text
-http://你的Windows内网IP:8068
-```
+## 容量边界
 
-Windows 防火墙如果拦截，需要放行 8068 端口：
-
-```powershell
-New-NetFirewallRule -DisplayName "Claude Code WebUI 8068" -Direction Inbound -Protocol TCP -LocalPort 8068 -Action Allow
-```
-
-查看本机内网 IP：
-
-```powershell
-ipconfig
-```
-
-通常看正在使用的网卡下的 `IPv4 地址`，例如 `192.168.1.23`。
-
-这种方式不会复制 Claude Code CLI，也不会改变你的 MCP 配置；它直接使用当前 Windows 用户的 PATH、`%USERPROFILE%\.claude` 和宿主机可执行环境。
-
-如果用 Docker 复用宿主机 CLI，需要注意：Linux 容器无法直接执行 Windows 的 `claude.cmd`，所以只能复制 CLI 包并挂载 `.claude`。这能复用一部分配置，但如果 MCP 里引用了 Windows 路径、PowerShell 命令、`.exe` 程序或宿主机专用环境变量，容器内可能无法运行。
-
-### 忘记或改错 admin 密码
-
-如果已经启动过一次，`data/db.json` 里会保存初始化时的密码哈希。之后修改 `.env` 里的 `ADMIN_PASSWORD` 不会自动覆盖已有密码。
-
-可以临时设置一次：
-
-```powershell
-$env:RESET_ADMIN_PASSWORD="true"
-$env:ADMIN_PASSWORD="new-strong-password"
-npm start
-```
-
-成功登录后，停止服务并清掉这个临时变量：
-
-```powershell
-Remove-Item Env:\RESET_ADMIN_PASSWORD
-```
-
-也可以删除 `data\db.json` 后重新初始化，但这会清空用户、团队、会话和审计数据。
-
-### Workspace 配置没有生效
-
-`.env` 里的 `WORKSPACE_ROOT` 会在服务启动时同步到系统运行配置，用于新建团队时的 workspace allowlist。
-
-如果你已经启动过一次，默认团队 `Claude Code Platform` 的 workspace 路径已经保存在 `data\db.json`，后续修改 `WORKSPACE_ROOT` 不会自动改这个已有团队。
-
-可以选择其一：
-
-1. 在页面里创建一个新团队，workspace 填新的目录。
-2. 删除 `data\db.json` 后重新初始化，这会清空已有数据。
-3. 临时重置默认团队 workspace：
-
-```powershell
-$env:RESET_DEFAULT_TEAM_WORKSPACE="true"
-npm start
-```
-
-重置后清掉临时变量：
-
-```powershell
-Remove-Item Env:\RESET_DEFAULT_TEAM_WORKSPACE
-```
-
-## 当前能力
-
-- 服务端登录、退出、HttpOnly cookie session
-- 用户创建、初始密码设置、启用/禁用
-- 团队创建、成员添加、角色权限
-- 单 Agent 会话创建、停止、发送消息、重试上一轮
-- 会话私有/团队可见切换、创建人展示
-- Agent Markdown 富文本展示：表格、代码块、引用、任务列表、链接
-- 消息复制、代码块复制
-- 本地抽取式会话摘要，并可一键替换会话标题
-- 敏感任务平台层审批
-- MCP 工具授权记忆查看与撤销
-- MCP 工具 allowlist、运行中发现工具展示
-- Claude Code SDK 原生 auto compact 配置与压缩事件记录
-- SSE 事件通知与前端自动刷新
-- Claude Code CLI `--version` 健康检查
-- 在团队 workspace 中调用 Claude Code CLI
-- 审计日志
-
-## 会话摘要说明
-
-“生成摘要”不会调用 Claude，也不会消耗 token。后端会从当前会话的用户消息和 Claude 回复中抽取首个目标、最新问题和最近进展，生成一条短摘要并保存到会话上。
-
-“摘要作标题”会再次生成摘要，并用摘要前 50 个字符替换会话标题。这个过程只修改 WebUI 的会话元数据，不会改 Claude Code 的上下文或宿主机配置。
-
-## MCP / 工具授权说明
-
-后端使用 Claude Agent SDK 的 `canUseTool` 回调接入 Claude Code 原生工具授权。Claude Code 请求使用 MCP 工具或受限工具时，后端会暂停在该工具调用节点，生成待审批记录，通过 SSE 推给前端。用户选择“允许一次 / 总是允许工具 / 总是允许 server / 拒绝”后，审批结果会回传给 SDK，Claude Code 在同一轮任务中继续执行。
-
-如果某些旧版 CLI 或特殊权限路径没有触发 `canUseTool`，后端仍保留 `allowedTools + resume` 兜底逻辑；这种情况下续跑 prompt 会静默发送，不会显示成用户聊天气泡。
-
-## 生产建议
-
-- 使用 Caddy/Nginx 做 HTTPS 反代
-- 修改默认管理员密码
-- 把 `data` 和 `workspaces` 做持久化备份
-- 容器以非 root 用户运行
-- 限制 workspace allowlist
-- 若要高并发或企业审计，下一步建议迁移到 PostgreSQL/SQLite 正式数据库层
+当前架构的目标是单实例小团队：百至低千级会话、几十名活跃用户。在下列情况出现前无需引入微服务或 PostgreSQL：多实例横向扩容、跨机任务调度、外部 BI 直接查询、持续高并发写入。届时持久化 Repository 和运行时 Store 已形成清晰边界，可以迁移数据库与队列而不重写前端。

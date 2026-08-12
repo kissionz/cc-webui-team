@@ -1,6 +1,10 @@
 data/
 workspaces/
 node_modules/
+dist/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
 .DS_Store
 .env
 .host-claude/

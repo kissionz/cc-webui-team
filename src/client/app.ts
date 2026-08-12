@@ -1,3 +1,194 @@
+type AppView = "teams" | "team" | "settings" | "users" | "audit";
+type SystemRole = "admin" | "member";
+type TeamRole = "owner" | "admin" | "member" | "viewer";
+type SessionStatus = "idle" | "queued" | "running" | "compacting" | "waiting_permission" | "completed" | "failed" | "stopped" | "interrupted";
+type SessionVisibility = "private" | "team";
+type ApprovalStatus = "pending" | "approved" | "rejected" | "expired" | "stale";
+type SenderType = "user" | "agent" | "tool" | "system";
+
+interface User {
+  id: string;
+  username: string;
+  displayName: string;
+  email?: string;
+  role: SystemRole;
+  status: "active" | "disabled";
+}
+
+interface Team {
+  id: string;
+  name: string;
+  workspacePath: string;
+  updatedAt: number;
+}
+
+interface Member {
+  teamId: string;
+  userId: string;
+  role: TeamRole;
+}
+
+interface Agent {
+  id: string;
+  teamId: string;
+  name: string;
+  command: string;
+  status?: "idle" | "running" | "waiting";
+}
+
+interface ToolApprovals {
+  alwaysTools?: string[];
+  alwaysServers?: string[];
+  onceTools?: string[];
+}
+
+interface Session {
+  id: string;
+  teamId: string;
+  agentId?: string;
+  title?: string;
+  status: SessionStatus;
+  visibility?: SessionVisibility;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+  archivedAt?: number | null;
+  archived?: boolean;
+  plan?: PlanItem[];
+  toolApprovals?: ToolApprovals;
+}
+
+interface PlanItem {
+  content?: string;
+  activeForm?: string;
+  status?: "pending" | "in_progress" | "completed" | "deleted";
+}
+
+interface MessageMetadata {
+  type?: string;
+  turnId?: string;
+  guidance?: boolean;
+  interrupt?: boolean;
+  items?: PlanItem[];
+  status?: string;
+  name?: string;
+  permissionId?: string;
+  claudeSessionId?: string;
+  serverName?: string;
+  toolName?: string;
+  durationMs?: number;
+  waitedSeconds?: number;
+  code?: number;
+}
+
+interface Message {
+  id: string;
+  sessionId: string;
+  senderId: string;
+  senderType: SenderType;
+  content: string;
+  createdAt: number;
+  updatedAt?: number;
+  metadata?: MessageMetadata;
+}
+
+interface Permission {
+  id: string;
+  sessionId: string;
+  requestedByUserId: string;
+  type: string;
+  status: ApprovalStatus;
+  risk?: string;
+  summary?: string;
+  reason?: string;
+  expiresAt: number;
+  serverName?: string;
+  toolInput?: Record<string, unknown>;
+  payload?: unknown;
+}
+
+interface FileChange { sessionId: string; changeType: string; path: string; createdAt: number }
+interface AuditLog { action: string; userId: string; targetType?: string; createdAt: number }
+interface ClaudeConfig {
+  command: string;
+  args: string;
+  workspaceRoot: string;
+  modelContextTokens: number;
+  autoCompactRatio: number;
+  autoCompactEnabled: boolean;
+  mcpToolAllowlist: string[];
+  enabled: boolean;
+  available: boolean;
+  version?: string;
+  latencyMs?: number;
+  authenticated?: boolean;
+  lastCheckAt?: number;
+  message?: string;
+}
+interface ServerInfo { appVersion?: string; nodeVersion?: string; sdkPackage?: string; startedAt?: number; dataDir?: string; workspaceRoot?: string }
+interface ToolInventory { tools: string[]; servers: string[] }
+interface PaginationState { nextCursor: string | null; loading: boolean; initialized: boolean }
+interface Toast { id: number; message: string; tone: "success" | "error" | "info" }
+
+interface AppState {
+  currentUserId: string | null;
+  activeView: AppView;
+  selectedTeamId: string;
+  selectedSessionId: string;
+  sidebarCollapsed: boolean;
+  sessionMemberFilter: string;
+  sessionSearch: string;
+  sessionStatusFilter: "all" | SessionStatus;
+  sessionArchiveFilter: "active" | "archived" | "all";
+  teamRailOpen: boolean;
+  rightRailOpen: boolean;
+  mobileNavOpen: boolean;
+  users: User[];
+  teams: Team[];
+  members: Member[];
+  agents: Agent[];
+  sessions: Session[];
+  messages: Message[];
+  permissions: Permission[];
+  fileChanges: FileChange[];
+  auditLogs: AuditLog[];
+  claudeConfig: ClaudeConfig;
+  serverInfo: ServerInfo;
+  toolInventory: ToolInventory;
+  sessionPagination: PaginationState;
+  messagePagination: Record<string, PaginationState>;
+  toasts: Toast[];
+}
+
+interface ApiOptions extends RequestInit { headers?: HeadersInit }
+interface RealtimeEvent {
+  type: string;
+  sessionId?: string;
+  messageId?: string;
+  text?: string;
+  status?: SessionStatus;
+  userId?: string;
+  teamId?: string;
+  message?: Message;
+  session?: Session;
+  permission?: Permission;
+  team?: Team;
+  member?: Member;
+  agent?: Agent;
+  plan?: PlanItem[];
+}
+
+interface SessionGroup { id: string; label: string; minimum: number; defaultExpanded: boolean; sessions: Session[] }
+interface MessageTurn { id: string; user?: Message; messages: Message[] }
+interface ScrollPosition { top: number; left: number; distanceFromBottom: number }
+interface FocusInfo { selector: string; start: number | null; end: number | null }
+interface UiSnapshot { view?: AppView; sessionId?: string; activeInfo?: FocusInfo | null; streamWasNearBottom?: boolean; scrolls?: Record<string, ScrollPosition> }
+interface PermissionQuestionOption { label?: string; description?: string }
+interface PermissionQuestion { header?: string; question?: string; options?: PermissionQuestionOption[] }
+interface PermissionField { key: string; label: string; value: unknown; tone?: string; html?: boolean }
+type LooseRecord = Record<string, unknown>;
+type HtmlValue = string | number | boolean | null | undefined | object;
+
 const icons = {
   teams: '<svg class="icon" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
   settings: '<svg class="icon" viewBox="0 0 24 24"><path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.87l-.06-.06A2 2 0 0 1 7.03 3.84l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15 4.6a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.14.37.35.7.6 1 .3.27.7.4 1.1.4H21a2 2 0 1 1 0 4h-.09A1.7 1.7 0 0 0 19.4 15Z"/></svg>',
@@ -15,18 +206,24 @@ const icons = {
   chevron: '<svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>',
 };
 
-const now = () => Date.now();
-const fmt = (timestamp) => new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(timestamp);
+const now = (): number => Date.now();
+const fmt = (timestamp: number): string => new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(timestamp);
 const CHAT_RENDER_LIMIT = 180;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-const seedState = () => ({
+const seedState = (): AppState => ({
   currentUserId: null,
   activeView: "teams",
   selectedTeamId: "team_platform",
   selectedSessionId: "session_login",
   sidebarCollapsed: localStorage.getItem("cc.sidebarCollapsed") === "true",
   sessionMemberFilter: "all",
+  sessionSearch: "",
+  sessionStatusFilter: "all",
+  sessionArchiveFilter: "active",
+  teamRailOpen: false,
+  rightRailOpen: false,
+  mobileNavOpen: false,
   users: [],
   teams: [],
   members: [],
@@ -53,26 +250,35 @@ const seedState = () => ({
   },
   serverInfo: {},
   toolInventory: { tools: [], servers: [] },
+  sessionPagination: { nextCursor: null, loading: false, initialized: false },
+  messagePagination: {},
+  toasts: [],
 });
 
-let state = loadState();
-let eventSource = null;
+let state: AppState = loadState();
+let eventSource: EventSource | null = null;
 let sseRetryDelay = 1500;
-let refreshTimer = null;
-let renderTimer = null;
-let teamRenderTimer = null;
-let messagePatchTimer = null;
+let sseEverConnected = false;
+let refreshTimer: number | undefined;
+let renderTimer: number | undefined;
+let teamRenderTimer: number | undefined;
+let messagePatchTimer: number | undefined;
 const pendingTeamRender = { rail: false, chat: false, right: false };
-const pendingMessagePatches = new Set();
+const pendingMessagePatches = new Set<string>();
+const pendingActions = new Set<string>();
+let toastSequence = 0;
+let sessionSearchTimer: number | undefined;
 const uiMemory = {
-  composerDrafts: new Map(),
-  openTurnEvents: new Map(),
-  openSessionGroups: new Map(),
+  composerDrafts: new Map<string, string>(),
+  openTurnEvents: new Map<string, boolean>(),
+  openSessionGroups: new Map<string, boolean>(),
 };
 
-function loadState() {
+function loadState(): AppState {
+  const base = seedState();
+  applyLocationToState(base);
   return {
-    ...seedState(),
+    ...base,
     currentUserId: null,
     users: [],
     teams: [],
@@ -88,12 +294,41 @@ function loadState() {
   };
 }
 
-function setState(patch) {
+function applyLocationToState(target: AppState): void {
+  const params = new URLSearchParams(window.location.search);
+  const view = params.get("view");
+  if (view && ["teams", "team", "settings", "users", "audit"].includes(view)) target.activeView = view as AppView;
+  if (params.get("team")) target.selectedTeamId = params.get("team") || "";
+  if (params.get("session")) target.selectedSessionId = params.get("session") || "";
+  target.sessionSearch = params.get("q") || "";
+  const status = params.get("status");
+  if (status && ["idle", "queued", "running", "compacting", "waiting_permission", "completed", "failed", "stopped", "interrupted"].includes(status)) {
+    target.sessionStatusFilter = status as SessionStatus;
+  }
+  const archived = params.get("archived");
+  if (archived === "all" || archived === "archived") target.sessionArchiveFilter = archived;
+}
+
+function syncLocation(mode: "push" | "replace" = "replace"): void {
+  if (!state.currentUserId) return;
+  const params = new URLSearchParams();
+  params.set("view", state.activeView);
+  if (state.activeView === "team" && state.selectedTeamId) params.set("team", state.selectedTeamId);
+  if (state.activeView === "team" && state.selectedSessionId) params.set("session", state.selectedSessionId);
+  if (state.sessionSearch) params.set("q", state.sessionSearch);
+  if (state.sessionStatusFilter !== "all") params.set("status", state.sessionStatusFilter);
+  if (state.sessionArchiveFilter !== "active") params.set("archived", state.sessionArchiveFilter);
+  const url = `${window.location.pathname}?${params.toString()}`;
+  window.history[mode === "push" ? "pushState" : "replaceState"]({}, "", url);
+}
+
+function setState(patch: Partial<AppState>, historyMode: "push" | "replace" = "replace"): void {
   state = { ...state, ...patch };
+  syncLocation(historyMode);
   render();
 }
 
-async function api(path, options = {}) {
+async function api<T>(path: string, options: ApiOptions = {}): Promise<T> {
   const response = await fetch(path, {
     ...options,
     headers: {
@@ -102,24 +337,116 @@ async function api(path, options = {}) {
     },
   });
   const text = await response.text();
-  const payload = text ? JSON.parse(text) : {};
-  if (!response.ok) throw new Error(payload.message || payload.code || "Request failed");
-  return payload;
+  const payload = (text ? JSON.parse(text) : {}) as T & { message?: string; code?: string };
+  if (!response.ok) throw new Error(payload.message || payload.code || "请求失败");
+  return payload as T;
 }
 
-async function refresh() {
+function toast(message: string, tone: Toast["tone"] = "info"): void {
+  const item = { id: ++toastSequence, message, tone };
+  state.toasts = [...state.toasts, item].slice(-4);
+  renderToasts();
+  window.setTimeout(() => {
+    state.toasts = state.toasts.filter((candidate) => candidate.id !== item.id);
+    renderToasts();
+  }, tone === "error" ? 6500 : 3500);
+}
+
+function renderToasts(): void {
+  let region = document.querySelector<HTMLElement>("#toast-region");
+  if (!region) {
+    region = document.createElement("div");
+    region.id = "toast-region";
+    region.className = "toast-region";
+    region.setAttribute("aria-live", "polite");
+    region.setAttribute("aria-atomic", "false");
+    document.body.appendChild(region);
+  }
+  region.innerHTML = state.toasts.map((item) => `<div class="toast ${item.tone}" role="status">${escapeHtml(item.message)}</div>`).join("");
+}
+
+async function refresh(): Promise<void> {
   try {
-    const data = await api("/api/bootstrap");
+    const data = await api<Partial<AppState>>("/api/bootstrap");
     state = { ...state, ...data };
+    normalizeSelection();
+    if (state.activeView === "team" && state.selectedTeamId) {
+      await loadSessions({ reset: true });
+      if (state.selectedSessionId) await loadMessages(state.selectedSessionId, { reset: true });
+    }
+    syncLocation();
     render();
     connectEvents();
-  } catch {
+  } catch (error) {
     if (eventSource) {
       eventSource.close();
       eventSource = null;
     }
     setState({ currentUserId: null });
+    if (error instanceof Error && !/401|unauth/i.test(error.message)) toast(error.message, "error");
   }
+}
+
+function normalizeSelection(): void {
+  if (state.selectedTeamId && !state.teams.some((team) => team.id === state.selectedTeamId)) state.selectedTeamId = state.teams[0]?.id || "";
+  if (state.activeView === "team" && !state.selectedTeamId) state.activeView = "teams";
+}
+
+function sessionQuery(cursor?: string | null): string {
+  const params = new URLSearchParams({ teamId: state.selectedTeamId, limit: "60", archived: state.sessionArchiveFilter });
+  if (state.sessionSearch) params.set("q", state.sessionSearch);
+  if (state.sessionStatusFilter !== "all") params.set("status", state.sessionStatusFilter);
+  if (state.sessionMemberFilter !== "all") params.set("createdBy", state.sessionMemberFilter);
+  if (cursor) params.set("cursor", cursor);
+  return params.toString();
+}
+
+async function loadSessions({ reset = false }: { reset?: boolean } = {}): Promise<void> {
+  if (!state.selectedTeamId || state.sessionPagination.loading) return;
+  state.sessionPagination = { ...state.sessionPagination, loading: true };
+  scheduleTeamRender({ rail: true }, 0);
+  try {
+    const cursor = reset ? null : state.sessionPagination.nextCursor;
+    const data = await api<{ sessions: Session[]; nextCursor?: string | null }>(`/api/sessions?${sessionQuery(cursor)}`);
+    const otherTeams = state.sessions.filter((session) => session.teamId !== state.selectedTeamId);
+    const current = reset ? data.sessions : [...state.sessions.filter((session) => session.teamId === state.selectedTeamId), ...data.sessions];
+    state.sessions = [...otherTeams, ...dedupeById(current)];
+    state.sessionPagination = { nextCursor: data.nextCursor || null, loading: false, initialized: true };
+    normalizeSelectedSession();
+  } catch (error) {
+    state.sessionPagination = { ...state.sessionPagination, loading: false, initialized: true };
+    throw error;
+  }
+}
+
+function normalizeSelectedSession(): void {
+  const visible = state.sessions.filter((session) => session.teamId === state.selectedTeamId);
+  if (!visible.some((session) => session.id === state.selectedSessionId)) state.selectedSessionId = visible[0]?.id || "";
+}
+
+async function loadMessages(sessionId: string, { reset = false }: { reset?: boolean } = {}): Promise<void> {
+  const page = state.messagePagination[sessionId] || { nextCursor: null, loading: false, initialized: false };
+  if (page.loading || (!reset && page.initialized && !page.nextCursor)) return;
+  state.messagePagination[sessionId] = { ...page, loading: true };
+  scheduleTeamRender({ chat: true }, 0);
+  try {
+    const params = new URLSearchParams({ limit: "80" });
+    if (!reset && page.nextCursor) params.set("cursor", page.nextCursor);
+    const data = await api<{ messages: Message[]; nextCursor?: string | null; permissions?: Permission[]; fileChanges?: FileChange[] }>(`/api/sessions/${encodeURIComponent(sessionId)}/messages?${params.toString()}`);
+    const others = state.messages.filter((message) => message.sessionId !== sessionId);
+    const existing = reset ? [] : state.messages.filter((message) => message.sessionId === sessionId);
+    state.messages = [...others, ...dedupeById([...data.messages, ...existing]).sort((a, b) => a.createdAt - b.createdAt)];
+    if (data.permissions) state.permissions = [...state.permissions.filter((permission) => permission.sessionId !== sessionId), ...data.permissions];
+    if (data.fileChanges) state.fileChanges = [...state.fileChanges.filter((change) => change.sessionId !== sessionId), ...data.fileChanges];
+    state.messagePagination[sessionId] = { nextCursor: data.nextCursor || null, loading: false, initialized: true };
+  } catch (error) {
+    state.messagePagination[sessionId] = { ...page, loading: false, initialized: true };
+    throw error;
+  }
+}
+
+function dedupeById<T extends { id: string }>(items: T[]): T[] {
+  return [...new Map(items.map((item) => [item.id, item])).values()];
 }
 
 function scheduleRefresh() {
@@ -132,7 +459,7 @@ function scheduleRender() {
   renderTimer = setTimeout(() => render(), 80);
 }
 
-function scheduleTeamRender(parts, delay = 120) {
+function scheduleTeamRender(parts: Partial<typeof pendingTeamRender>, delay = 120): void {
   if (state.activeView !== "team") {
     scheduleRender();
     return;
@@ -151,7 +478,7 @@ function scheduleTeamRender(parts, delay = 120) {
   }, delay);
 }
 
-function scheduleSessionScopedRender(sessionId, selectedParts, otherParts = { rail: true }, delay = 120) {
+function scheduleSessionScopedRender(sessionId: string | undefined, selectedParts: Partial<typeof pendingTeamRender>, otherParts: Partial<typeof pendingTeamRender> = { rail: true }, delay = 120): void {
   if (state.activeView !== "team") {
     scheduleRender();
     return;
@@ -159,7 +486,7 @@ function scheduleSessionScopedRender(sessionId, selectedParts, otherParts = { ra
   scheduleTeamRender(sessionId === state.selectedSessionId ? selectedParts : otherParts, delay);
 }
 
-function scheduleMessagePatch(messageId, delay = 90) {
+function scheduleMessagePatch(messageId: string, delay = 90): void {
   if (state.activeView !== "team") {
     scheduleRender();
     return;
@@ -174,17 +501,17 @@ function scheduleMessagePatch(messageId, delay = 90) {
   }, delay);
 }
 
-function upsertById(items, item) {
+function upsertById<T extends { id: string }>(items: T[], item: T): T[] {
   if (!item?.id) return items;
   const exists = items.some((existing) => existing.id === item.id);
   return exists ? items.map((existing) => (existing.id === item.id ? item : existing)) : [...items, item];
 }
 
-function sessionTimestamp(session) {
+function sessionTimestamp(session?: Session): number {
   return Number(session?.updatedAt || session?.createdAt || 0);
 }
 
-function sortSessionsNewestFirst(sessions) {
+function sortSessionsNewestFirst(sessions: Session[]): Session[] {
   return [...sessions].sort((a, b) => {
     const timeDifference = sessionTimestamp(b) - sessionTimestamp(a);
     if (timeDifference) return timeDifference;
@@ -192,11 +519,11 @@ function sortSessionsNewestFirst(sessions) {
   });
 }
 
-function groupSessionsByTime(sessions, referenceTime = now()) {
+function groupSessionsByTime(sessions: Session[], referenceTime = now()): SessionGroup[] {
   const today = new Date(referenceTime);
   today.setHours(0, 0, 0, 0);
   const todayStart = today.getTime();
-  const groups = [
+  const groups: SessionGroup[] = [
     { id: "today", label: "今天", minimum: todayStart, defaultExpanded: true, sessions: [] },
     { id: "past-7-days", label: "过去7天", minimum: todayStart - DAY_MS * 7, defaultExpanded: true, sessions: [] },
     { id: "past-30-days", label: "过去30天", minimum: todayStart - DAY_MS * 30, defaultExpanded: false, sessions: [] },
@@ -206,34 +533,38 @@ function groupSessionsByTime(sessions, referenceTime = now()) {
   sortSessionsNewestFirst(sessions).forEach((session) => {
     const timestamp = sessionTimestamp(session);
     const group = groups.find((item) => timestamp >= item.minimum) || groups.at(-1);
-    group.sessions.push(session);
+    if (group) group.sessions.push(session);
   });
 
   return groups.filter((group) => group.sessions.length);
 }
 
-function sessionGroupKey(teamId, groupId) {
+function sessionGroupKey(teamId: string, groupId: string): string {
   return `${teamId}:${groupId}`;
 }
 
-function isSessionGroupExpanded(teamId, group, activeSession) {
+function isSessionGroupExpanded(teamId: string, group: SessionGroup, activeSession?: Session): boolean {
   const key = sessionGroupKey(teamId, group.id);
-  if (uiMemory.openSessionGroups.has(key)) return uiMemory.openSessionGroups.get(key);
+  if (uiMemory.openSessionGroups.has(key)) return uiMemory.openSessionGroups.get(key) ?? false;
   if (group.sessions.some((session) => session.id === activeSession?.id)) return true;
   return group.defaultExpanded;
 }
 
-function upsertMember(items, member) {
+function upsertMember(items: Member[], member: Member): Member[] {
   if (!member?.teamId || !member?.userId) return items;
   const exists = items.some((item) => item.teamId === member.teamId && item.userId === member.userId);
   return exists ? items.map((item) => (item.teamId === member.teamId && item.userId === member.userId ? member : item)) : [...items, member];
 }
 
-function connectEvents() {
+function connectEvents(): void {
   if (eventSource || !state.currentUserId) return;
   eventSource = new EventSource("/api/events");
   eventSource.onopen = () => {
     sseRetryDelay = 1500;
+    if (sseEverConnected) {
+      void refresh().catch(showError);
+    }
+    sseEverConnected = true;
   };
   eventSource.onmessage = (event) => {
     try {
@@ -251,31 +582,33 @@ function connectEvents() {
   };
 }
 
-function applyRealtimeEvent(event) {
+function applyRealtimeEvent(event: RealtimeEvent): void {
   if (event.type === "session.message.created" && event.message) {
-    const exists = state.messages.some((message) => message.id === event.message.id);
-    if (!exists) state.messages = [...state.messages, event.message];
-    scheduleSessionScopedRender(event.message.sessionId || event.sessionId, { chat: true }, { rail: true }, 90);
+    const createdMessage = event.message;
+    const exists = state.messages.some((message) => message.id === createdMessage.id);
+    if (!exists) state.messages = [...state.messages, createdMessage];
+    scheduleSessionScopedRender(createdMessage.sessionId || event.sessionId, { chat: true }, { rail: true }, 90);
     return;
   }
 
   if (event.type === "session.message.delta") {
     state.messages = state.messages.map((message) => (message.id === event.messageId ? { ...message, content: `${message.content || ""}${event.text || ""}`, createdAt: message.createdAt } : message));
-    if (event.sessionId === state.selectedSessionId) scheduleMessagePatch(event.messageId, 90);
+    if (event.sessionId === state.selectedSessionId && event.messageId) scheduleMessagePatch(event.messageId, 90);
     return;
   }
 
   if (event.type === "session.message.updated" && event.message) {
-    state.messages = state.messages.map((message) => (message.id === event.message.id ? event.message : message));
-    if ((event.message.sessionId || event.sessionId) === state.selectedSessionId) scheduleMessagePatch(event.message.id, 90);
-    else scheduleSessionScopedRender(event.message.sessionId || event.sessionId, { chat: true }, { rail: true }, 90);
+    const updatedMessage = event.message;
+    state.messages = state.messages.map((message) => (message.id === updatedMessage.id ? updatedMessage : message));
+    if ((updatedMessage.sessionId || event.sessionId) === state.selectedSessionId) scheduleMessagePatch(updatedMessage.id, 90);
+    else scheduleSessionScopedRender(updatedMessage.sessionId || event.sessionId, { chat: true }, { rail: true }, 90);
     return;
   }
 
   if (event.type === "session.status.changed") {
     state.sessions = event.session
       ? upsertById(state.sessions, event.session)
-      : state.sessions.map((session) => (session.id === event.sessionId ? { ...session, status: event.status, updatedAt: now() } : session));
+      : state.sessions.map((session) => (session.id === event.sessionId ? { ...session, status: event.status || session.status, updatedAt: now() } : session));
     scheduleSessionScopedRender(event.sessionId, { rail: true, chat: true, right: true }, { rail: true }, 120);
     return;
   }
@@ -364,59 +697,59 @@ function applyRealtimeEvent(event) {
   scheduleRender();
 }
 
-function currentUser() {
+function currentUser(): User | undefined {
   return state.users.find((user) => user.id === state.currentUserId);
 }
 
-function teamRole(teamId, userId = state.currentUserId) {
+function teamRole(teamId: string, userId: string | null = state.currentUserId): TeamRole | undefined {
   return state.members.find((member) => member.teamId === teamId && member.userId === userId)?.role;
 }
 
-function canWriteTeam(teamId) {
+function canWriteTeam(teamId: string): boolean {
   const role = teamRole(teamId);
-  return currentUser()?.role === "admin" || ["owner", "admin", "member"].includes(role);
+  return currentUser()?.role === "admin" || (role !== undefined && ["owner", "admin", "member"].includes(role));
 }
 
-function canManageTeam(teamId) {
+function canManageTeam(teamId: string): boolean {
   const role = teamRole(teamId);
-  return currentUser()?.role === "admin" || ["owner", "admin"].includes(role);
+  return currentUser()?.role === "admin" || (role !== undefined && ["owner", "admin"].includes(role));
 }
 
-function isSystemAdmin() {
+function isSystemAdmin(): boolean {
   return currentUser()?.role === "admin";
 }
 
-function canManageSession(session) {
-  return Boolean(session) && (canManageTeam(session.teamId) || session.createdBy === state.currentUserId);
+function canManageSession(session?: Session): boolean {
+  return Boolean(session && (canManageTeam(session.teamId) || session.createdBy === state.currentUserId));
 }
 
-function canAskSession(session) {
-  return Boolean(session) && canWriteTeam(session.teamId) && session.createdBy === state.currentUserId;
+function canAskSession(session?: Session): boolean {
+  return Boolean(session && canWriteTeam(session.teamId) && session.createdBy === state.currentUserId);
 }
 
-function sessionVisibility(session) {
+function sessionVisibility(session?: Session): SessionVisibility {
   return session?.visibility === "team" ? "team" : "private";
 }
 
-function canApprove(permission) {
-  const role = teamRole(sessionById(permission.sessionId)?.teamId);
-  if (["owner", "admin"].includes(role) || currentUser()?.role === "admin") return true;
-  return role === "member" && permission.requestedByUserId === state.currentUserId;
+function canApprove(permission: Permission): boolean {
+  const teamId = sessionById(permission.sessionId)?.teamId;
+  const role = teamId ? teamRole(teamId) : undefined;
+  return Boolean((role !== undefined && ["owner", "admin"].includes(role)) || currentUser()?.role === "admin");
 }
 
-function sessionById(id) {
+function sessionById(id?: string): Session | undefined {
   return state.sessions.find((session) => session.id === id);
 }
 
-function agentById(id) {
+function agentById(id?: string): Agent | undefined {
   return state.agents.find((agent) => agent.id === id);
 }
 
-function userName(id) {
+function userName(id?: string): string {
   return state.users.find((user) => user.id === id)?.displayName || "Unknown";
 }
 
-function escapeHtml(value) {
+function escapeHtml(value: HtmlValue): string {
   return String(value)
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
@@ -425,7 +758,7 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
-function renderInlineMarkdown(value) {
+function renderInlineMarkdown(value: HtmlValue): string {
   return String(value)
     .split(/(`[^`]*`)/g)
     .map((part) => {
@@ -437,7 +770,7 @@ function renderInlineMarkdown(value) {
     .join("");
 }
 
-function splitMarkdownRow(line) {
+function splitMarkdownRow(line: string): string[] {
   return line
     .trim()
     .replace(/^\|/, "")
@@ -446,12 +779,12 @@ function splitMarkdownRow(line) {
     .map((cell) => cell.trim());
 }
 
-function isMarkdownTableSeparator(line) {
+function isMarkdownTableSeparator(line: string): boolean {
   const cells = splitMarkdownRow(line);
   return cells.length > 1 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
 }
 
-function renderMarkdownTable(lines) {
+function renderMarkdownTable(lines: string[]): string {
   const header = splitMarkdownRow(lines[0]);
   const rows = lines.slice(2).map(splitMarkdownRow).filter((row) => row.some(Boolean));
   return `
@@ -466,7 +799,7 @@ function renderMarkdownTable(lines) {
   `;
 }
 
-function renderMarkdownBlocks(text) {
+function renderMarkdownBlocks(text: HtmlValue): string {
   const lines = String(text || "").split(/\r?\n/);
   const blocks = [];
   for (let i = 0; i < lines.length;) {
@@ -486,6 +819,7 @@ function renderMarkdownBlocks(text) {
     }
     if (/^#{1,4}\s+/.test(lines[i])) {
       const match = lines[i].match(/^(#{1,4})\s+(.+)$/);
+      if (!match) { i += 1; continue; }
       const level = Math.min(match[1].length + 2, 5);
       blocks.push(`<h${level}>${renderInlineMarkdown(match[2])}</h${level}>`);
       i += 1;
@@ -545,7 +879,7 @@ function renderMarkdownBlocks(text) {
   return blocks.join("");
 }
 
-function renderMarkdown(text) {
+function renderMarkdown(text: HtmlValue): string {
   const chunks = String(text || "").split(/```([a-zA-Z0-9_-]*)\n?([\s\S]*?)```/g);
   let html = "";
   for (let index = 0; index < chunks.length; index += 1) {
@@ -555,28 +889,29 @@ function renderMarkdown(text) {
   return html;
 }
 
-function badge(text, tone = "") {
+function badge(text: HtmlValue, tone = ""): string {
   return `<span class="badge ${tone}">${escapeHtml(text)}</span>`;
 }
 
-function titleText(value) {
+function titleText(value: HtmlValue): string {
   return String(value || "新会话").replace(/\s+/g, " ").trim().slice(0, 50) || "新会话";
 }
 
-function compactText(value, max = 900) {
+function compactText(value: unknown, max = 900): string {
   const text = typeof value === "string" ? value : JSON.stringify(value ?? "", null, 2);
   const normalized = String(text || "").trim();
   return normalized.length > max ? `${normalized.slice(0, max)}...` : normalized;
 }
 
-function permissionById(id) {
+function permissionById(id?: string): Permission | undefined {
   return state.permissions.find((permission) => permission.id === id);
 }
 
-function appRoot(inner) {
+function appRoot(inner: string): string {
   const user = currentUser();
   return `
-    <div class="app-shell ${state.sidebarCollapsed ? "sidebar-collapsed" : ""}">
+    <div class="app-shell ${state.sidebarCollapsed ? "sidebar-collapsed" : ""} ${state.mobileNavOpen ? "mobile-nav-open" : ""}">
+      <button class="mobile-nav-scrim" aria-label="关闭导航" data-action="toggle-mobile-nav"></button>
       <aside class="sidebar">
         <div class="brand">
           <div class="brand-mark">CC</div>
@@ -584,7 +919,7 @@ function appRoot(inner) {
             <div class="brand-title">Claude Code</div>
             <div class="brand-subtitle">Team Platform</div>
           </div>
-          <button class="sidebar-toggle" title="${state.sidebarCollapsed ? "展开导航栏" : "收起导航栏"}" data-action="toggle-sidebar">${icons.panel}</button>
+          <button class="sidebar-toggle" title="${state.sidebarCollapsed ? "展开导航栏" : "收起导航栏"}" aria-label="${state.sidebarCollapsed ? "展开导航栏" : "收起导航栏"}" data-action="toggle-sidebar">${icons.panel}</button>
         </div>
         <nav class="nav-group">
           ${renderMainNav(user)}
@@ -597,25 +932,28 @@ function appRoot(inner) {
               <div class="brand-subtitle">${escapeHtml(user?.role || "")}</div>
             </div>
           </div>
-          <button class="nav-button" style="margin-top:12px" title="改密码" data-modal="password">${icons.settings}<span>改密码</span></button>
-          <button class="nav-button" style="margin-top:12px" title="退出" data-action="logout">${icons.logout}<span>退出</span></button>
+          <button class="nav-button margin-top-12" title="改密码" data-modal="password">${icons.settings}<span>改密码</span></button>
+          <button class="nav-button margin-top-12" title="退出" data-action="logout">${icons.logout}<span>退出</span></button>
         </div>
       </aside>
-      <main class="main">${inner}</main>
+      <main class="main">
+        <button class="mobile-nav-trigger" data-action="toggle-mobile-nav" aria-expanded="${state.mobileNavOpen}" aria-label="打开导航">${icons.panel}<span>导航</span></button>
+        ${inner}
+      </main>
     </div>
   `;
 }
 
-function renderMainNav(user = currentUser()) {
+function renderMainNav(user = currentUser()): string {
   return `
     ${navButton("teams", icons.teams, "团队工作台")}
-    ${navButton("settings", icons.settings, "Agent 设置")}
+    ${user?.role === "admin" ? navButton("settings", icons.settings, "Agent 设置") : ""}
     ${user?.role === "admin" ? navButton("users", icons.users, "用户管理") : ""}
     ${navButton("audit", icons.check, "审计日志")}
   `;
 }
 
-function renderUserPanel(user = currentUser()) {
+function renderUserPanel(user = currentUser()): string {
   return `
     <div class="sidebar-footer rail-footer">
       <div class="user-chip">
@@ -625,22 +963,22 @@ function renderUserPanel(user = currentUser()) {
           <div class="brand-subtitle">${escapeHtml(user?.role || "")}</div>
         </div>
       </div>
-      <button class="nav-button" style="margin-top:12px" data-action="logout">${icons.logout}<span>退出</span></button>
+      <button class="nav-button margin-top-12" data-action="logout">${icons.logout}<span>退出</span></button>
     </div>
   `;
 }
 
-function navButton(view, icon, text) {
+function navButton(view: AppView, icon: string, text: string): string {
   const active = state.activeView === view || (view === "teams" && state.activeView === "team");
   return `<button class="nav-button ${active ? "active" : ""}" title="${escapeHtml(text)}" data-view="${view}">${icon}<span>${text}</span></button>`;
 }
 
-function topbar(title, subtitle, actions = "") {
+function topbar(title: string, subtitle: string, actions = ""): string {
   return `<header class="topbar"><div><h1 class="page-title">${escapeHtml(title)}</h1><div class="page-subtitle">${escapeHtml(subtitle)}</div></div><div class="toolbar">${actions}</div></header>`;
 }
 
-function renderLogin(error = "") {
-  document.querySelector("#app").innerHTML = `
+function renderLogin(error = ""): void {
+  appElement().innerHTML = `
     <div class="login-page">
       <section class="login-copy">
         <h1>Claude Code Team Platform</h1>
@@ -653,7 +991,7 @@ function renderLogin(error = "") {
           <div class="field"><label for="login-username">用户名</label><input class="input" id="login-username" name="username" value="admin" autocomplete="username" /></div>
           <div class="field"><label for="login-password">密码</label><input class="input" id="login-password" name="password" type="password" autocomplete="current-password" /></div>
           ${error ? `<div class="error">${escapeHtml(error)}</div>` : ""}
-          <button class="button primary" style="width:100%" type="submit">登录工作台</button>
+          <button class="button primary full-width" type="submit">登录工作台</button>
           <div class="helper">数据由服务端持久化。首次部署请立刻修改默认管理员密码。</div>
         </form>
       </section>
@@ -661,8 +999,9 @@ function renderLogin(error = "") {
   `;
 }
 
-function renderTeams() {
+function renderTeams(): string {
   const user = currentUser();
+  if (!user) return "";
   const cli = cliStatus();
   const teams = user.role === "admin" ? state.teams : state.teams.filter((team) => teamRole(team.id));
   const actions = isSystemAdmin() ? `<button class="button primary" data-modal="team">${icons.plus}创建团队</button>` : "";
@@ -739,11 +1078,11 @@ function renderTeams() {
   `);
 }
 
-function metricCard(label, value, caption) {
+function metricCard(label: string, value: HtmlValue, caption: string): string {
   return `<div class="metric card"><div class="metric-label">${escapeHtml(label)}</div><div class="metric-value">${escapeHtml(value)}</div><div class="metric-caption">${escapeHtml(caption)}</div></div>`;
 }
 
-function cliStatus() {
+function cliStatus(): { available: boolean; dot: string; tone: string; label: string; detail: string; message: string } {
   const cfg = state.claudeConfig;
   if (cfg.available) {
     return {
@@ -765,7 +1104,7 @@ function cliStatus() {
   };
 }
 
-function renderTeamDetail() {
+function renderTeamDetail(): string {
   const team = state.teams.find((item) => item.id === state.selectedTeamId) || state.teams[0];
   if (!team) return renderTeams();
   const sessions = sortSessionsNewestFirst(state.sessions.filter((session) => session.teamId === team.id));
@@ -773,6 +1112,8 @@ function renderTeamDetail() {
   if (session && state.selectedSessionId !== session.id) state.selectedSessionId = session.id;
   const role = teamRole(team.id) || (currentUser()?.role === "admin" ? "system admin" : "viewer");
   const actions = `
+    <button class="button workspace-panel-toggle session-panel-trigger" data-action="toggle-team-rail" aria-expanded="${state.teamRailOpen}">会话</button>
+    <button class="button workspace-panel-toggle runtime-panel-trigger" data-action="toggle-right-rail" aria-expanded="${state.rightRailOpen}">运行</button>
     <button class="button" data-back-teams>团队列表</button>
     <button class="button" data-modal="members" data-team="${team.id}">成员</button>
     <button class="button" data-modal="workspace" data-team="${team.id}">工作区</button>
@@ -783,7 +1124,8 @@ function renderTeamDetail() {
   return appRoot(`
     ${topbar(team.name, `${team.workspacePath} · 我的角色 ${role}`, actions)}
     <section class="content team-content">
-      <div class="team-layout">
+      <div class="team-layout ${state.teamRailOpen ? "team-rail-open" : ""} ${state.rightRailOpen ? "right-rail-open" : ""}">
+        <button class="workspace-drawer-scrim" aria-label="关闭侧栏" data-action="close-workspace-drawers"></button>
         ${renderTeamRail(team, session)}
         ${renderChat(team, session)}
         ${renderRightRail(team, session)}
@@ -792,7 +1134,7 @@ function renderTeamDetail() {
   `);
 }
 
-function renderTeamRail(team, activeSession) {
+function renderTeamRail(team: Team, activeSession?: Session): string {
   const members = state.members.filter((member) => member.teamId === team.id);
   const running = state.sessions.filter((session) => session.teamId === team.id && session.status === "running").length;
   return `
@@ -807,10 +1149,17 @@ function renderTeamRail(team, activeSession) {
   `;
 }
 
-function renderSessionList(team, activeSession, embedded = false) {
+function renderSessionList(team: Team, activeSession?: Session, embedded = false): string {
   const allSessions = sortSessionsNewestFirst(state.sessions.filter((session) => session.teamId === team.id));
   const filter = state.sessionMemberFilter || "all";
-  const sessions = filter === "all" ? allSessions : allSessions.filter((session) => session.createdBy === filter);
+  const sessions = allSessions.filter((session) => {
+    if (filter !== "all" && session.createdBy !== filter) return false;
+    if (state.sessionStatusFilter !== "all" && session.status !== state.sessionStatusFilter) return false;
+    const archived = Boolean(session.archived || session.archivedAt);
+    if (state.sessionArchiveFilter === "active" && archived) return false;
+    if (state.sessionArchiveFilter === "archived" && !archived) return false;
+    return true;
+  });
   const groups = groupSessionsByTime(sessions);
   const memberOptions = state.members
     .filter((member) => member.teamId === team.id)
@@ -823,20 +1172,36 @@ function renderSessionList(team, activeSession, embedded = false) {
     <section class="${embedded ? "session-section" : "panel"}">
       <div class="panel-header"><h2 class="panel-title">会话</h2>${badge(`${sessions.length}/${allSessions.length}`)}</div>
       <div class="session-filter">
-        <label for="session-member-filter">成员</label>
-        <select class="select compact-select" id="session-member-filter" data-session-member-filter>
-          <option value="all" ${filter === "all" ? "selected" : ""}>全部成员</option>
-          ${memberOptions.map((option) => `<option value="${escapeHtml(option.userId)}" ${filter === option.userId ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}
-        </select>
+        <div class="session-search-field">
+          <label class="visually-hidden" for="session-search">搜索会话</label>
+          <input class="input compact-input" id="session-search" type="search" value="${escapeHtml(state.sessionSearch)}" placeholder="搜索标题或消息" autocomplete="off" data-session-search />
+        </div>
+        <div class="session-filter-row">
+          <div><label for="session-member-filter">成员</label><select class="select compact-select" id="session-member-filter" data-session-member-filter>
+            <option value="all" ${filter === "all" ? "selected" : ""}>全部成员</option>
+            ${memberOptions.map((option) => `<option value="${escapeHtml(option.userId)}" ${filter === option.userId ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}
+          </select></div>
+          <div><label for="session-status-filter">状态</label><select class="select compact-select" id="session-status-filter" data-session-status-filter>
+            <option value="all">全部状态</option>
+            ${(["running", "compacting", "waiting_permission", "queued", "completed", "failed", "stopped", "interrupted", "idle"] as SessionStatus[]).map((status) => `<option value="${status}" ${state.sessionStatusFilter === status ? "selected" : ""}>${status}</option>`).join("")}
+          </select></div>
+          <div><label for="session-archive-filter">范围</label><select class="select compact-select" id="session-archive-filter" data-session-archive-filter>
+            <option value="active" ${state.sessionArchiveFilter === "active" ? "selected" : ""}>进行中</option>
+            <option value="archived" ${state.sessionArchiveFilter === "archived" ? "selected" : ""}>已归档</option>
+            <option value="all" ${state.sessionArchiveFilter === "all" ? "selected" : ""}>全部</option>
+          </select></div>
+        </div>
       </div>
       <div class="session-list">
         ${groups.map((group) => renderSessionGroup(team, group, activeSession)).join("") || '<div class="empty">没有匹配的会话</div>'}
+        ${state.sessionPagination.loading ? '<div class="session-list-loading" role="status">正在加载会话...</div>' : ""}
+        ${state.sessionPagination.nextCursor ? '<button class="button load-more" data-action="load-more-sessions">加载更多</button>' : ""}
       </div>
     </section>
   `;
 }
 
-function renderSessionGroup(team, group, activeSession) {
+function renderSessionGroup(team: Team, group: SessionGroup, activeSession?: Session): string {
   const expanded = isSessionGroupExpanded(team.id, group, activeSession);
   const contentId = `session-group-${team.id}-${group.id}`;
   return `
@@ -858,32 +1223,35 @@ function renderSessionGroup(team, group, activeSession) {
   `;
 }
 
-function renderSessionRow(session, activeSession) {
+function renderSessionRow(session: Session, activeSession?: Session): string {
+  const archived = Boolean(session.archived || session.archivedAt);
   return `
     <div class="session-row">
       <button class="session-item ${session.id === activeSession?.id ? "active" : ""}" data-session="${session.id}">
         <strong class="truncate-title" title="${escapeHtml(titleText(session.title))}">${escapeHtml(titleText(session.title))}</strong>
-        <div class="meta">${badge(session.status, statusTone(session.status))}${badge(sessionVisibility(session) === "team" ? "团队可见" : "私有", sessionVisibility(session) === "team" ? "green" : "")}</div>
+        <div class="meta">${badge(session.status, statusTone(session.status))}${archived ? badge("已归档") : ""}${badge(sessionVisibility(session) === "team" ? "团队可见" : "私有", sessionVisibility(session) === "team" ? "green" : "")}</div>
         <div class="meta"><span>${escapeHtml(userName(session.createdBy))}</span><span>${fmt(session.updatedAt)}</span></div>
       </button>
-      <button class="icon-button session-delete" title="删除会话" aria-label="删除会话 ${escapeHtml(titleText(session.title))}" data-delete-session="${session.id}">${icons.close}</button>
+      ${canManageSession(session) ? `<button class="icon-button session-delete" title="删除会话" aria-label="删除会话 ${escapeHtml(titleText(session.title))}" data-delete-session="${session.id}">${icons.close}</button>` : ""}
     </div>
   `;
 }
 
-function renderChat(team, session) {
+function renderChat(team: Team, session?: Session): string {
   if (!session) {
     return `<section class="panel chat-panel" id="chat-panel"><div class="empty">创建一个 Claude Code 会话开始协作</div></section>`;
   }
   const allMessages = state.messages.filter((message) => message.sessionId === session.id);
   const messages = allMessages.slice(-CHAT_RENDER_LIMIT);
   const turns = buildMessageTurns(messages);
-  const isRunning = session.status === "running";
-  const canSend = canAskSession(session) && session.status !== "waiting_permission";
-  const canStop = canManageSession(session) && ["running", "waiting_permission"].includes(session.status);
+  const archived = Boolean(session.archived || session.archivedAt);
+  const isRunning = session.status === "running" || session.status === "compacting";
+  const canSend = canAskSession(session) && !archived && !["queued", "waiting_permission"].includes(session.status);
+  const canStop = canManageSession(session) && ["queued", "running", "compacting", "waiting_permission"].includes(session.status);
   const placeholder = composerPlaceholder(team, session);
   const visibility = sessionVisibility(session);
   const draft = uiMemory.composerDrafts.get(session.id) || "";
+  const messagePage = state.messagePagination[session.id] || { nextCursor: null, loading: false, initialized: false };
   return `
     <section class="panel chat-panel" id="chat-panel">
       <div class="panel-header chat-header">
@@ -893,12 +1261,14 @@ function renderChat(team, session) {
         </div>
         <div class="toolbar chat-actions">
           <button class="button" data-action="toggle-session-visibility" ${canManageSession(session) ? "" : "disabled"}>${visibility === "team" ? "设为私有" : "共享给团队"}</button>
+          <button class="button" data-action="toggle-session-archive" ${canManageSession(session) ? "" : "disabled"}>${archived ? "取消归档" : "归档"}</button>
           ${badge(session.status, statusTone(session.status))}
           <button class="icon-button" title="停止会话" data-action="stop-session" ${canStop ? "" : "disabled"}>${icons.stop}</button>
         </div>
       </div>
       <div class="chat-stream" id="chat-stream">
-        ${allMessages.length > messages.length ? `<div class="history-notice">已隐藏更早的 ${allMessages.length - messages.length} 条本地记录，保持页面流畅。</div>` : ""}
+        ${messagePage.nextCursor ? `<button class="history-notice history-load" data-action="load-older-messages" ${messagePage.loading ? "disabled" : ""}>${messagePage.loading ? "正在加载..." : "加载更早消息"}</button>` : ""}
+        ${allMessages.length > messages.length ? `<div class="history-notice">当前仅渲染最近 ${CHAT_RENDER_LIMIT} 条消息，继续向上加载可查看历史。</div>` : ""}
         ${turns.map(renderTurn).join("")}
       </div>
       <form class="composer" data-form="message">
@@ -915,14 +1285,14 @@ function renderChat(team, session) {
   `;
 }
 
-function buildMessageTurns(messages) {
-  const turns = [];
-  const byId = new Map();
-  const loose = [];
+function buildMessageTurns(messages: Message[]): MessageTurn[] {
+  const turns: MessageTurn[] = [];
+  const byId = new Map<string, MessageTurn>();
+  const loose: Message[] = [];
   for (const message of messages) {
     const turnId = message.metadata?.turnId;
     if (message.senderType === "user" && message.metadata?.guidance && turnId && byId.has(turnId)) {
-      byId.get(turnId).messages.push(message);
+      byId.get(turnId)?.messages.push(message);
       continue;
     }
     if (message.senderType === "user") {
@@ -932,7 +1302,7 @@ function buildMessageTurns(messages) {
       continue;
     }
     if (turnId && byId.has(turnId)) {
-      byId.get(turnId).messages.push(message);
+      byId.get(turnId)?.messages.push(message);
     } else {
       loose.push(message);
     }
@@ -940,13 +1310,13 @@ function buildMessageTurns(messages) {
   return [...loose.map((message) => ({ id: message.id, messages: [message] })), ...turns];
 }
 
-function renderTurn(turn) {
+function renderTurn(turn: MessageTurn): string {
   const agentMessages = turn.messages.filter((message) => message.senderType === "agent");
   const planMessages = turn.messages.filter((message) => message.metadata?.type === "plan");
   const guidanceMessages = turn.messages.filter((message) => message.senderType === "user" && message.metadata?.guidance);
   const eventMessages = turn.messages.filter((message) => message.senderType !== "agent" && message.senderType !== "user" && message.metadata?.type !== "plan");
   const hasAgentOutput = agentMessages.some((message) => String(message.content || "").trim());
-  const hasNoisyEvents = eventMessages.length > 2 || eventMessages.some((message) => ["command", "input", "tool_call", "permission_request"].includes(message.metadata?.type));
+  const hasNoisyEvents = eventMessages.length > 2 || eventMessages.some((message) => ["command", "input", "tool_call", "permission_request"].includes(message.metadata?.type || ""));
   return `
     <section class="turn">
       ${turn.user ? renderMessage(turn.user) : ""}
@@ -958,7 +1328,7 @@ function renderTurn(turn) {
   `;
 }
 
-function renderPlanMessage(message) {
+function renderPlanMessage(message: Message): string {
   const items = Array.isArray(message.metadata?.items) ? message.metadata.items : [];
   if (!items.length) return "";
   const visible = items.filter((item) => item.status !== "deleted");
@@ -992,7 +1362,7 @@ function renderPlanMessage(message) {
   `;
 }
 
-function renderTurnEvents(messages, collapsed) {
+function renderTurnEvents(messages: Message[], collapsed: boolean): string {
   const content = messages.map(renderTimelineEvent).join("");
   if (!collapsed) return `<div class="turn-events">${content}</div>`;
   const key = turnEventKey(messages);
@@ -1000,13 +1370,13 @@ function renderTurnEvents(messages, collapsed) {
   return `<details class="turn-events collapsed" data-turn-events="${escapeHtml(key)}" ${isOpen ? "open" : ""}><summary>${icons.terminal}<span>本轮运行记录</span><strong>${messages.length}</strong></summary>${content}</details>`;
 }
 
-function turnEventKey(messages) {
+function turnEventKey(messages: Message[]): string {
   const first = messages[0];
   const turnId = first?.metadata?.turnId || first?.id || "loose";
   return `${first?.sessionId || "session"}:${turnId}`;
 }
 
-function composerPlaceholder(team, session) {
+function composerPlaceholder(team: Team, session: Session): string {
   if (!canWriteTeam(team.id)) return "viewer 角色只能查看会话";
   if (!canAskSession(session)) return "共享会话只读，只有会话创建者可以继续提问";
   if (session.status === "idle") return "向 Claude Code 发送任务";
@@ -1015,7 +1385,7 @@ function composerPlaceholder(team, session) {
   return "继续发送下一轮消息，会自动恢复 Claude Code 会话上下文";
 }
 
-function renderMessage(message) {
+function renderMessage(message: Message): string {
   if (message.metadata?.type === "plan") return renderPlanMessage(message);
   if (message.senderType === "tool" || message.senderType === "system") return renderTimelineEvent(message);
   if (message.senderType === "agent" && !String(message.content || "").trim()) {
@@ -1036,7 +1406,7 @@ function renderMessage(message) {
         <span>${escapeHtml(guidance ? "追加引导" : sender)}</span><span>${fmt(message.createdAt)}</span>${guidance && message.metadata?.interrupt ? badge("打断", "amber") : ""}
         <span class="message-actions">
           <button class="text-button" data-copy-message="${message.id}">复制</button>
-          ${message.senderType === "user" && !guidance && canAskSession(sessionById(message.sessionId)) ? `<button class="text-button" data-action="retry-session" data-retry-message="${message.id}">重试</button>` : ""}
+          ${message.senderType === "user" && !guidance && canAskSession(sessionById(message.sessionId)) && !Boolean(sessionById(message.sessionId)?.archived || sessionById(message.sessionId)?.archivedAt) ? `<button class="text-button" data-action="retry-session" data-retry-message="${message.id}">重试</button>` : ""}
         </span>
       </div>
       <div class="bubble ${rich ? "markdown" : ""}">${content}</div>
@@ -1044,7 +1414,7 @@ function renderMessage(message) {
   `;
 }
 
-function renderTimelineEvent(message) {
+function renderTimelineEvent(message: Message): string {
   const event = timelineEventMeta(message);
   return `
     <article class="timeline-event ${event.tone}" data-message-id="${escapeHtml(message.id)}">
@@ -1057,7 +1427,7 @@ function renderTimelineEvent(message) {
   `;
 }
 
-function timelineEventMeta(message) {
+function timelineEventMeta(message: Message): { title: string; detail: HtmlValue; icon: string; tone: string; spinner?: boolean } {
   const type = message.metadata?.type || (message.senderType === "system" ? "system" : "tool");
   if (type === "command") return { title: message.metadata?.claudeSessionId ? "已恢复 Claude Code 会话" : "已启动 Claude Code 会话", detail: message.content, icon: icons.terminal, tone: "tool" };
   if (type === "input") return { title: "已发送到 Claude Code", detail: message.content, icon: icons.terminal, tone: "tool" };
@@ -1095,7 +1465,7 @@ function timelineEventMeta(message) {
   return { title: "工具事件", detail: message.content, icon: icons.terminal, tone: "tool" };
 }
 
-function renderRightRail(team, session) {
+function renderRightRail(team: Team, session?: Session): string {
   const cli = cliStatus();
   const agents = state.agents.filter((agent) => agent.teamId === team.id);
   const permissions = session ? state.permissions.filter((permission) => permission.sessionId === session.id) : [];
@@ -1136,7 +1506,7 @@ function renderRightRail(team, session) {
   `;
 }
 
-function renderToolApprovalPolicy(session) {
+function renderToolApprovalPolicy(session?: Session): string {
   if (!session) return "";
   const approvals = session.toolApprovals || {};
   const tools = [...(approvals.alwaysTools || [])];
@@ -1155,7 +1525,7 @@ function renderToolApprovalPolicy(session) {
           ? rows.map((row) => `
             <div class="approval-row">
               <div>${badge(row.scope, row.tone)}<strong>${escapeHtml(row.label)}</strong></div>
-              <button class="icon-button" title="撤销" data-remove-approval-scope="${row.scope}" data-remove-approval-value="${escapeHtml(row.value)}">${icons.close}</button>
+              ${canManageSession(session) ? `<button class="icon-button" title="撤销" data-remove-approval-scope="${row.scope}" data-remove-approval-value="${escapeHtml(row.value)}">${icons.close}</button>` : ""}
             </div>
           `).join("")
           : "<p>暂无已记住的工具授权。选择“总是允许工具/server”后会显示在这里。</p>"
@@ -1164,9 +1534,10 @@ function renderToolApprovalPolicy(session) {
   `;
 }
 
-function effectiveAgentStatus(agent, session) {
+function effectiveAgentStatus(agent: Agent, session?: Session): { label: string; className: string } {
   if (session?.agentId === agent.id) {
     if (session.status === "running") return { label: "运行中", className: "running" };
+    if (session.status === "compacting") return { label: "压缩上下文", className: "running" };
     if (session.status === "waiting_permission") return { label: "等待审批", className: "waiting" };
     if (session.status === "failed" || session.status === "stopped") return { label: "异常/已停止", className: "error" };
     if (session.status === "completed" || session.status === "idle") return state.claudeConfig.available ? { label: "空闲可用", className: "ready" } : { label: "未就绪", className: "" };
@@ -1177,7 +1548,7 @@ function effectiveAgentStatus(agent, session) {
   return { label: "未就绪", className: "" };
 }
 
-function renderPermission(permission) {
+function renderPermission(permission: Permission): string {
   const canAct = permission.status === "pending" && canApprove(permission);
   if (permission.type === "mcp_tool") return renderMcpPermission(permission, canAct);
   return `
@@ -1194,15 +1565,15 @@ function renderPermission(permission) {
   `;
 }
 
-function pendingSelectedPermission() {
+function pendingSelectedPermission(): Permission | undefined {
   return state.permissions.find((permission) => permission.sessionId === state.selectedSessionId && permission.status === "pending" && canApprove(permission));
 }
 
-function renderPermissionOverlay() {
+function renderPermissionOverlay(): string {
   return "";
 }
 
-function renderMcpPermission(permission, canAct) {
+function renderMcpPermission(permission: Permission, canAct: boolean): string {
   return `
     <div class="permission-card">
       <div class="meta">${badge("MCP 工具", "amber")} ${permission.serverName ? badge(permission.serverName, "blue") : ""}</div>
@@ -1220,19 +1591,19 @@ function renderMcpPermission(permission, canAct) {
   `;
 }
 
-function renderPermissionInput(permission) {
+function renderPermissionInput(permission: Permission): string {
   const input = permission.toolInput && typeof permission.toolInput === "object" ? permission.toolInput : {};
-  const primary = [];
-  const secondary = [];
-  const used = new Set();
-  const addField = (key, label, tone = "") => {
+  const primary: PermissionField[] = [];
+  const secondary: PermissionField[] = [];
+  const used = new Set<string>();
+  const addField = (key: string, label: string, tone = ""): void => {
     if (input[key] === undefined || input[key] === null || input[key] === "") return;
     primary.push({ key, label, value: input[key], tone });
     used.add(key);
   };
 
   if (Array.isArray(input.questions)) {
-    primary.push({ key: "questions", label: "问题", value: renderQuestionSummary(input.questions), html: true });
+    primary.push({ key: "questions", label: "问题", value: renderQuestionSummary(input.questions as PermissionQuestion[]), html: true });
     used.add("questions");
   }
   addField("sql", "SQL", "code");
@@ -1265,7 +1636,7 @@ function renderPermissionInput(permission) {
   `;
 }
 
-function renderPermissionField(field) {
+function renderPermissionField(field: PermissionField): string {
   const value = field.html ? field.value : escapeHtml(compactText(field.value));
   const valueHtml = field.tone === "code" ? `<pre class="permission-code">${value}</pre>` : `<div class="permission-value">${value}</div>`;
   return `
@@ -1276,7 +1647,7 @@ function renderPermissionField(field) {
   `;
 }
 
-function renderQuestionSummary(questions) {
+function renderQuestionSummary(questions: PermissionQuestion[]): string {
   return questions
     .map((question, index) => {
       const options = Array.isArray(question.options)
@@ -1293,7 +1664,7 @@ function renderQuestionSummary(questions) {
     .join("");
 }
 
-function renderSettings() {
+function renderSettings(): string {
   const cfg = state.claudeConfig;
   const info = state.serverInfo || {};
   const inventory = state.toolInventory || { tools: [], servers: [] };
@@ -1303,7 +1674,7 @@ function renderSettings() {
     ${topbar("Agent 设置", "配置 Claude Code CLI、工作区 allowlist 和运行策略", actions)}
     <section class="content settings-layout">
       <div class="grid">
-        <div class="card" style="padding:18px">
+        <div class="card card-padding-lg">
           <div class="health-grid">
             <div class="metric"><div class="metric-label">可用性</div><div class="metric-value">${cfg.available ? "Available" : "Down"}</div></div>
             <div class="metric"><div class="metric-label">版本</div><div class="metric-value">${escapeHtml(cfg.version)}</div></div>
@@ -1311,25 +1682,25 @@ function renderSettings() {
             <div class="metric"><div class="metric-label">延迟</div><div class="metric-value">${cfg.latencyMs}ms</div></div>
           </div>
         </div>
-        <form class="card" style="padding:18px" data-form="config">
+        <form class="card card-padding-lg" data-form="config">
           <div class="grid two">
-            <div class="field"><label>CLI 命令</label><input class="input" name="command" value="${escapeHtml(cfg.command)}" /></div>
-            <div class="field"><label>启动参数</label><input class="input" name="args" value="${escapeHtml(cfg.args)}" /></div>
+            <div class="field"><label for="config-command">CLI 命令</label><input class="input" id="config-command" name="command" value="${escapeHtml(cfg.command)}" /></div>
+            <div class="field"><label for="config-args">启动参数</label><input class="input" id="config-args" name="args" value="${escapeHtml(cfg.args)}" /></div>
           </div>
-          <div class="field"><label>Workspace allowlist 根目录</label><input class="input" name="workspaceRoot" value="${escapeHtml(cfg.workspaceRoot)}" /></div>
+          <div class="field"><label for="config-workspace">Workspace allowlist 根目录</label><input class="input" id="config-workspace" name="workspaceRoot" value="${escapeHtml(cfg.workspaceRoot)}" /></div>
           <div class="grid two">
-            <div class="field"><label>模型上下文窗口 tokens</label><input class="input" name="modelContextTokens" type="number" min="1000" step="1000" value="${escapeHtml(cfg.modelContextTokens || 1000000)}" /></div>
-            <div class="field"><label>自动压缩阈值</label><input class="input" name="autoCompactRatio" type="number" min="0.1" max="0.9" step="0.01" value="${escapeHtml(cfg.autoCompactRatio || 0.62)}" /></div>
+            <div class="field"><label for="config-context">模型上下文窗口 tokens</label><input class="input" id="config-context" name="modelContextTokens" type="number" min="1000" step="1000" value="${escapeHtml(cfg.modelContextTokens || 1000000)}" /></div>
+            <div class="field"><label for="config-compact">自动压缩阈值</label><input class="input" id="config-compact" name="autoCompactRatio" type="number" min="0.1" max="0.9" step="0.01" value="${escapeHtml(cfg.autoCompactRatio || 0.62)}" /></div>
           </div>
           <label class="toggle-row"><input type="checkbox" name="autoCompactEnabled" ${cfg.autoCompactEnabled === false ? "" : "checked"} />启用 Claude Code SDK 原生 auto compact，当前约 ${compactWindow.toLocaleString()} tokens 触发</label>
           <div class="field">
-            <label>MCP 工具 allowlist</label>
-            <textarea class="textarea" name="mcpToolAllowlist" placeholder="每行一个工具名，例如 mcp__data_connector__run_mc_query">${escapeHtml((cfg.mcpToolAllowlist || []).join("\n"))}</textarea>
+            <label for="config-mcp">MCP 工具 allowlist</label>
+            <textarea class="textarea" id="config-mcp" name="mcpToolAllowlist" placeholder="每行一个工具名，例如 mcp__data_connector__run_mc_query">${escapeHtml((cfg.mcpToolAllowlist || []).join("\n"))}</textarea>
             <div class="helper">这里仅用于 WebUI 预授权和审批识别，不会替代宿主机 Claude Code 的 MCP 配置。留空时仍以 Claude Code 运行时暴露的工具为准。</div>
           </div>
           <button class="button primary" type="submit">保存配置</button>
         </form>
-        <div class="card" style="padding:18px">
+        <div class="card card-padding-lg">
           <h3 class="section-heading">运行信息</h3>
           <div class="info-grid">
             <div><span>WebUI</span><strong>${escapeHtml(info.appVersion || "unknown")}</strong></div>
@@ -1355,7 +1726,7 @@ function renderSettings() {
   `);
 }
 
-function renderToolInventory(inventory) {
+function renderToolInventory(inventory: ToolInventory): string {
   const tools = inventory.tools || [];
   const servers = inventory.servers || [];
   if (!tools.length && !servers.length) return "<p>WebUI 尚未缓存 MCP 工具清单。这不代表宿主机 Claude Code 没有 MCP；实际可用工具以 Claude Code 运行时为准，首次使用或审批后会显示在这里。</p>";
@@ -1367,7 +1738,7 @@ function renderToolInventory(inventory) {
   `;
 }
 
-function renderUsers() {
+function renderUsers(): string {
   const rows = state.users
     .map((user) => `
       <tr>
@@ -1378,7 +1749,8 @@ function renderUsers() {
         <td>
           <div class="user-actions">
             <form class="inline-password-form" data-form="admin-password" data-user-id="${user.id}">
-              <input class="input compact-input" name="newPassword" type="password" autocomplete="new-password" placeholder="新密码" required />
+              <label class="visually-hidden" for="admin-password-${escapeHtml(user.id)}">${escapeHtml(user.displayName)} 的新密码</label>
+              <input class="input compact-input" id="admin-password-${escapeHtml(user.id)}" name="newPassword" type="password" autocomplete="new-password" placeholder="新密码" required />
               <button class="button" type="submit">改密码</button>
             </form>
             <button class="button" data-toggle-user="${user.id}" ${user.id === state.currentUserId ? "disabled" : ""}>${user.status === "active" ? "禁用" : "启用"}</button>
@@ -1390,11 +1762,11 @@ function renderUsers() {
   return appRoot(`
     ${topbar("用户管理", "系统管理员创建用户、禁用账号和重置成员访问", "")}
     <section class="content grid">
-      <form class="card form-row" style="padding:16px" data-form="user">
-        <div class="field"><label>用户名</label><input class="input" name="username" required /></div>
-        <div class="field"><label>显示名</label><input class="input" name="displayName" required /></div>
-        <div class="field"><label>初始密码</label><input class="input" name="password" type="password" autocomplete="new-password" required /></div>
-        <div class="field"><label>角色</label><select class="select" name="role"><option value="member">member</option><option value="admin">admin</option></select></div>
+      <form class="card form-row card-padding-md" data-form="user">
+        <div class="field"><label for="new-user-name">用户名</label><input class="input" id="new-user-name" name="username" required /></div>
+        <div class="field"><label for="new-user-display">显示名</label><input class="input" id="new-user-display" name="displayName" required /></div>
+        <div class="field"><label for="new-user-password">初始密码</label><input class="input" id="new-user-password" name="password" type="password" autocomplete="new-password" required /></div>
+        <div class="field"><label for="new-user-role">角色</label><select class="select" id="new-user-role" name="role"><option value="member">member</option><option value="admin">admin</option></select></div>
         <button class="button primary" type="submit">${icons.plus}创建用户</button>
       </form>
       <table class="table"><thead><tr><th>用户</th><th>账号</th><th>系统角色</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table>
@@ -1402,7 +1774,7 @@ function renderUsers() {
   `);
 }
 
-function renderAudit() {
+function renderAudit(): string {
   const rows = state.auditLogs
     .slice()
     .reverse()
@@ -1411,41 +1783,41 @@ function renderAudit() {
   return appRoot(`${topbar("审计日志", "记录登录、成员、权限和 Agent 配置动作", "")}<section class="content"><div class="audit-list">${rows}</div></section>`);
 }
 
-function statusTone(status) {
-  return status === "running" ? "green" : status === "waiting_permission" ? "amber" : status === "failed" || status === "stopped" ? "red" : "blue";
+function statusTone(status: SessionStatus): string {
+  return status === "running" || status === "compacting" ? "green" : status === "waiting_permission" ? "amber" : status === "failed" || status === "stopped" ? "red" : "blue";
 }
 
-function renderModal(kind, teamId = state.selectedTeamId) {
+function renderModal(kind: string, teamId = state.selectedTeamId): string {
   if (!kind) return "";
   if (kind === "password") {
     return `
-      <div class="modal-backdrop" data-close-modal>
-        <form class="modal" data-form="password">
-          <div class="modal-head"><h3>修改密码</h3></div>
+      <dialog class="modal" data-modal-dialog aria-labelledby="password-dialog-title">
+        <form class="modal-form" data-form="password">
+          <div class="modal-head"><h3 id="password-dialog-title">修改密码</h3></div>
           <div class="modal-body grid">
-            <div class="field"><label>当前密码</label><input class="input" name="currentPassword" type="password" autocomplete="current-password" required /></div>
-            <div class="field"><label>新密码</label><input class="input" name="newPassword" type="password" autocomplete="new-password" required /></div>
-            <div class="field"><label>确认新密码</label><input class="input" name="confirmPassword" type="password" autocomplete="new-password" required /></div>
+            <div class="field"><label for="password-current">当前密码</label><input class="input" id="password-current" name="currentPassword" type="password" autocomplete="current-password" required /></div>
+            <div class="field"><label for="password-new">新密码</label><input class="input" id="password-new" name="newPassword" type="password" autocomplete="new-password" required /></div>
+            <div class="field"><label for="password-confirm">确认新密码</label><input class="input" id="password-confirm" name="confirmPassword" type="password" autocomplete="new-password" required /></div>
             <div class="helper">修改后，除当前浏览器外的其他登录态会失效。</div>
           </div>
           <div class="modal-actions"><button class="button" type="button" data-close-modal>取消</button><button class="button primary" type="submit">保存</button></div>
         </form>
-      </div>
+      </dialog>
     `;
   }
   if (kind === "team") {
     if (!isSystemAdmin()) return "";
     return `
-      <div class="modal-backdrop" data-close-modal>
-        <form class="modal" data-form="team">
-          <div class="modal-head"><h3>创建团队</h3></div>
+      <dialog class="modal" data-modal-dialog aria-labelledby="team-dialog-title">
+        <form class="modal-form" data-form="team">
+          <div class="modal-head"><h3 id="team-dialog-title">创建团队</h3></div>
           <div class="modal-body">
-            <div class="field"><label>团队名称</label><input class="input" name="name" required /></div>
-            <div class="field"><label>工作区目录</label><input class="input" name="workspacePath" value="${escapeHtml(state.claudeConfig.workspaceRoot)}/" required /></div>
+            <div class="field"><label for="team-name">团队名称</label><input class="input" id="team-name" name="name" required /></div>
+            <div class="field"><label for="team-workspace">工作区目录</label><input class="input" id="team-workspace" name="workspacePath" value="${escapeHtml(state.claudeConfig.workspaceRoot)}/" required /></div>
           </div>
           <div class="modal-actions"><button class="button" type="button" data-close-modal>取消</button><button class="button primary" type="submit">创建</button></div>
         </form>
-      </div>
+      </dialog>
     `;
   }
   if (kind === "workspace") return renderWorkspaceModal(teamId);
@@ -1459,7 +1831,7 @@ function renderModal(kind, teamId = state.selectedTeamId) {
           <div><strong>${escapeHtml(user?.displayName || "")}</strong><span>${escapeHtml(user?.username || "")}</span></div>
           <div class="member-actions">
             ${badge(member.role, member.role === "viewer" ? "" : "green")}
-            ${isSystemAdmin() ? `<button class="icon-button" type="button" title="移除成员" data-remove-member-team="${teamId}" data-remove-member-user="${member.userId}">${icons.close}</button>` : ""}
+            ${canManageTeam(teamId) ? `<button class="icon-button" type="button" title="移除成员" data-remove-member-team="${teamId}" data-remove-member-user="${member.userId}">${icons.close}</button>` : ""}
           </div>
         </div>
       `;
@@ -1470,49 +1842,60 @@ function renderModal(kind, teamId = state.selectedTeamId) {
     .map((user) => `<option value="${user.id}">${escapeHtml(user.displayName)}</option>`)
     .join("");
   return `
-    <div class="modal-backdrop" data-close-modal>
-      <div class="modal members-modal">
-        <div class="modal-head"><h3>${escapeHtml(team?.name || "")} 成员</h3></div>
+    <dialog class="modal members-modal" data-modal-dialog aria-labelledby="members-dialog-title">
+        <div class="modal-head"><h3 id="members-dialog-title">${escapeHtml(team?.name || "")} 成员</h3></div>
         <div class="modal-body members-modal-body">
           <div class="member-list">
             ${memberRows || '<div class="empty">还没有成员</div>'}
           </div>
           <form class="form-row" data-form="member" data-team="${teamId}">
-            <div class="field"><label>用户</label><select class="select" name="userId">${options}</select></div>
-            <div class="field"><label>角色</label><select class="select" name="role"><option value="member">member</option><option value="admin">admin</option><option value="viewer">viewer</option></select></div>
+            <div class="field"><label for="member-user">用户</label><select class="select" id="member-user" name="userId">${options}</select></div>
+            <div class="field"><label for="member-role">角色</label><select class="select" id="member-role" name="role"><option value="member">member</option><option value="admin">admin</option><option value="viewer">viewer</option></select></div>
             <button class="button primary" type="submit" ${canManageTeam(teamId) && options ? "" : "disabled"}>${icons.plus}添加</button>
           </form>
         </div>
         <div class="modal-actions"><button class="button" data-close-modal>关闭</button></div>
-      </div>
-    </div>
+    </dialog>
   `;
 }
 
-function renderWorkspaceModal(teamId) {
+function renderWorkspaceModal(teamId: string): string {
   const team = state.teams.find((item) => item.id === teamId);
   return `
-    <div class="modal-backdrop" data-close-modal>
-      <form class="modal" data-form="workspace" data-team="${teamId}">
-        <div class="modal-head"><h3>团队工作区</h3></div>
+    <dialog class="modal" data-modal-dialog aria-labelledby="workspace-dialog-title">
+      <form class="modal-form" data-form="workspace" data-team="${teamId}">
+        <div class="modal-head"><h3 id="workspace-dialog-title">团队工作区</h3></div>
         <div class="modal-body">
-          <div class="field"><label>工作区目录</label><input class="input" name="workspacePath" value="${escapeHtml(team?.workspacePath || state.claudeConfig.workspaceRoot || "")}" required /></div>
+          <div class="field"><label for="workspace-path">工作区目录</label><input class="input" id="workspace-path" name="workspacePath" value="${escapeHtml(team?.workspacePath || state.claudeConfig.workspaceRoot || "")}" required /></div>
           <div class="helper">目录必须位于系统 allowlist 内：${escapeHtml(state.claudeConfig.workspaceRoot || "")}</div>
         </div>
         <div class="modal-actions"><button class="button" type="button" data-close-modal>取消</button><button class="button primary" type="submit" ${canManageTeam(teamId) ? "" : "disabled"}>保存</button></div>
       </form>
-    </div>
+    </dialog>
   `;
 }
 
 let activeModal = "";
 let modalTeamId = "";
 
-function showError(err) {
-  alert(err?.message || "操作失败");
+function showError(err: unknown): void {
+  toast(err instanceof Error ? err.message : "操作失败", "error");
 }
 
-function render() {
+function appElement(): HTMLElement {
+  const element = document.querySelector<HTMLElement>("#app");
+  if (!element) throw new Error("应用挂载节点不存在");
+  return element;
+}
+
+function openRenderedDialog(): void {
+  const dialog = document.querySelector<HTMLDialogElement>("[data-modal-dialog]");
+  if (!dialog || dialog.open) return;
+  dialog.showModal();
+  window.setTimeout(() => dialog.querySelector<HTMLElement>("input, select, textarea, button")?.focus(), 0);
+}
+
+function render(): void {
   const snapshot = captureUiSnapshot();
   if (!state.currentUserId) {
     renderLogin();
@@ -1524,11 +1907,13 @@ function render() {
   else if (state.activeView === "audit") html = renderAudit();
   else if (state.activeView === "team") html = renderTeamDetail();
   else html = renderTeams();
-  document.querySelector("#app").innerHTML = html + renderModal(activeModal, modalTeamId) + renderPermissionOverlay();
+  appElement().innerHTML = html + renderModal(activeModal, modalTeamId) + renderPermissionOverlay();
   restoreUiSnapshot(snapshot);
+  openRenderedDialog();
+  renderToasts();
 }
 
-function renderTeamParts(parts = {}) {
+function renderTeamParts(parts: Partial<typeof pendingTeamRender> = {}): void {
   if (!state.currentUserId || state.activeView !== "team") {
     render();
     return;
@@ -1555,7 +1940,7 @@ function renderTeamParts(parts = {}) {
   restoreUiSnapshot(snapshot);
 }
 
-function patchVisibleMessage(messageId) {
+function patchVisibleMessage(messageId: string): boolean {
   const message = state.messages.find((item) => item.id === messageId);
   if (!message || state.activeView !== "team" || message.sessionId !== state.selectedSessionId) return false;
   const element = document.querySelector(`[data-message-id="${cssEscape(messageId)}"]`);
@@ -1568,8 +1953,8 @@ function patchVisibleMessage(messageId) {
   return true;
 }
 
-function captureUiSnapshot() {
-  const active = document.activeElement;
+function captureUiSnapshot(): UiSnapshot {
+  const active = document.activeElement as HTMLInputElement | HTMLTextAreaElement | null;
   const activeInfo = active
     ? {
         selector: focusSelector(active),
@@ -1577,13 +1962,13 @@ function captureUiSnapshot() {
         end: typeof active.selectionEnd === "number" ? active.selectionEnd : null,
       }
     : null;
-  document.querySelectorAll("[data-session-draft]").forEach((field) => {
-    uiMemory.composerDrafts.set(field.dataset.sessionDraft, field.value);
+  document.querySelectorAll<HTMLTextAreaElement>("[data-session-draft]").forEach((field) => {
+    if (field.dataset.sessionDraft) uiMemory.composerDrafts.set(field.dataset.sessionDraft, field.value);
   });
-  document.querySelectorAll("[data-turn-events]").forEach((details) => {
-    uiMemory.openTurnEvents.set(details.dataset.turnEvents, details.open);
+  document.querySelectorAll<HTMLDetailsElement>("[data-turn-events]").forEach((details) => {
+    if (details.dataset.turnEvents) uiMemory.openTurnEvents.set(details.dataset.turnEvents, details.open);
   });
-  const stream = document.querySelector("#chat-stream");
+  const stream = document.querySelector<HTMLElement>("#chat-stream");
   const streamDistanceFromBottom = stream ? stream.scrollHeight - stream.scrollTop - stream.clientHeight : 0;
   const scrolls = scrollSnapshot();
   return {
@@ -1595,16 +1980,16 @@ function captureUiSnapshot() {
   };
 }
 
-function restoreUiSnapshot(snapshot = {}) {
+function restoreUiSnapshot(snapshot: UiSnapshot = {}): void {
   restoreScrollSnapshot(snapshot);
   restoreFocus(snapshot.activeInfo);
 }
 
-function scrollSnapshot() {
+function scrollSnapshot(): Record<string, ScrollPosition> {
   const selectors = ["#chat-stream", ".session-section .session-list", ".team-layout > .panel:last-child .side-stack", ".sidebar", ".main"];
-  const snapshot = {};
+  const snapshot: Record<string, ScrollPosition> = {};
   selectors.forEach((selector) => {
-    const element = document.querySelector(selector);
+    const element = document.querySelector<HTMLElement>(selector);
     if (!element) return;
     snapshot[selector] = {
       top: element.scrollTop,
@@ -1615,9 +2000,9 @@ function scrollSnapshot() {
   return snapshot;
 }
 
-function restoreScrollSnapshot(snapshot = {}) {
+function restoreScrollSnapshot(snapshot: UiSnapshot = {}): void {
   Object.entries(snapshot.scrolls || {}).forEach(([selector, value]) => {
-    const element = document.querySelector(selector);
+    const element = document.querySelector<HTMLElement>(selector);
     if (!element) return;
     if (selector === "#chat-stream" && snapshot.view === state.activeView && snapshot.sessionId === state.selectedSessionId) {
       element.scrollTop = snapshot.streamWasNearBottom ? element.scrollHeight : Math.max(0, element.scrollHeight - element.clientHeight - value.distanceFromBottom);
@@ -1629,18 +2014,18 @@ function restoreScrollSnapshot(snapshot = {}) {
   });
 }
 
-function focusSelector(element) {
-  if (!element?.matches) return "";
-  if (element.matches("[data-session-draft]")) return `[data-session-draft="${cssEscape(element.dataset.sessionDraft)}"]`;
+function focusSelector(element: HTMLElement): string {
+  if (element.matches("[data-session-draft]")) return `[data-session-draft="${cssEscape(element.dataset.sessionDraft || "")}"]`;
   if (element.id) return `#${cssEscape(element.id)}`;
   const name = element.getAttribute("name");
-  if (name && element.closest("form")?.dataset.form) return `form[data-form="${cssEscape(element.closest("form").dataset.form)}"] [name="${cssEscape(name)}"]`;
+  const form = element.closest<HTMLFormElement>("form");
+  if (name && form?.dataset.form) return `form[data-form="${cssEscape(form.dataset.form)}"] [name="${cssEscape(name)}"]`;
   return "";
 }
 
-function restoreFocus(activeInfo) {
+function restoreFocus(activeInfo?: FocusInfo | null): void {
   if (!activeInfo?.selector) return;
-  const element = document.querySelector(activeInfo.selector);
+  const element = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(activeInfo.selector);
   if (!element || element.disabled) return;
   element.focus({ preventScroll: true });
   if (typeof element.setSelectionRange === "function" && activeInfo.start !== null && activeInfo.end !== null) {
@@ -1648,12 +2033,12 @@ function restoreFocus(activeInfo) {
   }
 }
 
-function cssEscape(value) {
-  if (window.CSS?.escape) return CSS.escape(String(value));
+function cssEscape(value: HtmlValue): string {
+  if (CSS.escape) return CSS.escape(String(value));
   return String(value).replaceAll("\\", "\\\\").replaceAll('"', '\\"');
 }
 
-async function login(form) {
+async function login(form: HTMLFormElement): Promise<void> {
   const data = new FormData(form);
   const username = String(data.get("username") || "").trim();
   const password = String(data.get("password") || "");
@@ -1662,32 +2047,33 @@ async function login(form) {
     state.activeView = "teams";
     await refresh();
   } catch (err) {
-    renderLogin(err.message || "用户名或密码不正确");
+    renderLogin(err instanceof Error ? err.message : "用户名或密码不正确");
   }
 }
 
-async function createTeam(form) {
+async function createTeam(form: HTMLFormElement): Promise<void> {
   const data = new FormData(form);
   const payload = {
     name: String(data.get("name")),
     workspacePath: String(data.get("workspacePath")),
   };
-  const result = await api("/api/teams", { method: "POST", body: JSON.stringify(payload) });
+  const result = await api<{ team: Team }>("/api/teams", { method: "POST", body: JSON.stringify(payload) });
   activeModal = "";
   state.selectedTeamId = result.team.id;
   state.activeView = "team";
   await refresh();
 }
 
-async function createSession() {
+async function createSession(): Promise<void> {
   const team = state.teams.find((item) => item.id === state.selectedTeamId);
-  const result = await api(`/api/teams/${team.id}/sessions`, { method: "POST", body: "{}" });
+  if (!team) throw new Error("团队不存在");
+  const result = await api<{ session: Session }>(`/api/teams/${team.id}/sessions`, { method: "POST", body: "{}" });
   state.selectedSessionId = result.session.id;
   state.sessions = upsertById(state.sessions, result.session);
   scheduleTeamRender({ rail: true, chat: true, right: true }, 0);
 }
 
-async function sendMessage(form, submitter = null) {
+async function sendMessage(form: HTMLFormElement, submitter: HTMLButtonElement | null = null): Promise<void> {
   const session = sessionById(state.selectedSessionId);
   const content = String(new FormData(form).get("content") || "").trim();
   if (!session || !content) return;
@@ -1697,14 +2083,14 @@ async function sendMessage(form, submitter = null) {
   form.reset();
 }
 
-async function decidePermission(id, decision) {
+async function decidePermission(id: string, decision: string): Promise<void> {
   const permission = state.permissions.find((item) => item.id === id);
   if (!permission || !canApprove(permission)) return;
   const action = decision === "rejected" ? "reject" : "approve";
   await api(`/api/permissions/${id}/${action}`, { method: "POST", body: JSON.stringify({ decision }) });
 }
 
-async function deleteSession(id) {
+async function deleteSession(id: string): Promise<void> {
   const session = sessionById(id);
   if (!session) return;
   if (!confirm(`删除会话「${session.title}」？此操作会同时删除消息和权限记录。`)) return;
@@ -1719,7 +2105,7 @@ async function deleteSession(id) {
   scheduleTeamRender({ rail: true, chat: true, right: true }, 0);
 }
 
-async function deleteTeam(id) {
+async function deleteTeam(id: string): Promise<void> {
   const team = state.teams.find((item) => item.id === id);
   if (!team || !isSystemAdmin()) return;
   if (!confirm(`删除团队「${team.name}」？此操作会删除该团队的成员、会话、消息和权限记录。`)) return;
@@ -1739,8 +2125,8 @@ async function deleteTeam(id) {
   scheduleRender();
 }
 
-async function removeMember(teamId, userId) {
-  if (!isSystemAdmin()) return;
+async function removeMember(teamId: string, userId: string): Promise<void> {
+  if (!canManageTeam(teamId)) return;
   const user = state.users.find((item) => item.id === userId);
   if (!confirm(`从团队中移除「${user?.displayName || user?.username || userId}」？`)) return;
   await api(`/api/teams/${teamId}/members/${userId}`, { method: "DELETE" });
@@ -1748,31 +2134,46 @@ async function removeMember(teamId, userId) {
   render();
 }
 
-async function toggleSessionVisibility() {
+async function toggleSessionVisibility(): Promise<void> {
   const session = sessionById(state.selectedSessionId);
   if (!session || !canManageSession(session)) return;
   const nextVisibility = sessionVisibility(session) === "team" ? "private" : "team";
-  const result = await api(`/api/sessions/${session.id}/visibility`, { method: "PATCH", body: JSON.stringify({ visibility: nextVisibility }) });
+  const result = await api<{ session: Session }>(`/api/sessions/${session.id}/visibility`, { method: "PATCH", body: JSON.stringify({ visibility: nextVisibility }) });
   state.sessions = upsertById(state.sessions, result.session);
   scheduleTeamRender({ rail: true, chat: true, right: true }, 0);
 }
 
-async function removeToolApproval(scope, value) {
+async function toggleSessionArchive(): Promise<void> {
+  const session = sessionById(state.selectedSessionId);
+  if (!session || !canManageSession(session)) return;
+  const archived = !Boolean(session.archived || session.archivedAt);
+  const result = await api<{ session: Session }>(`/api/sessions/${session.id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ archived }),
+  });
+  state.sessions = upsertById(state.sessions, result.session);
+  if (state.sessionArchiveFilter === "active" && archived) normalizeSelectedSession();
+  syncLocation();
+  scheduleTeamRender({ rail: true, chat: true, right: true }, 0);
+  toast(archived ? "会话已归档" : "会话已恢复", "success");
+}
+
+async function removeToolApproval(scope: string, value: string): Promise<void> {
   const session = sessionById(state.selectedSessionId);
   if (!session) return;
-  const result = await api(`/api/sessions/${session.id}/tool-approvals`, { method: "DELETE", body: JSON.stringify({ scope, value }) });
+  const result = await api<{ session: Session }>(`/api/sessions/${session.id}/tool-approvals`, { method: "DELETE", body: JSON.stringify({ scope, value }) });
   state.sessions = upsertById(state.sessions, result.session);
   scheduleTeamRender({ chat: true, right: true }, 0);
 }
 
-async function retrySession() {
+async function retrySession(messageId?: string): Promise<void> {
   const session = sessionById(state.selectedSessionId);
-  if (!session) return;
-  await api(`/api/sessions/${session.id}/retry`, { method: "POST", body: "{}" });
+  if (!session || session.archived || session.archivedAt) return;
+  await api(`/api/sessions/${session.id}/retry`, { method: "POST", body: JSON.stringify({ messageId }) });
   await refresh();
 }
 
-async function copyText(text) {
+async function copyText(text: string): Promise<void> {
   if (navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(text);
     return;
@@ -1787,7 +2188,7 @@ async function copyText(text) {
   area.remove();
 }
 
-async function createUser(form) {
+async function createUser(form: HTMLFormElement): Promise<void> {
   const data = new FormData(form);
   const username = String(data.get("username")).trim();
   const payload = {
@@ -1802,7 +2203,7 @@ async function createUser(form) {
   await refresh();
 }
 
-async function changeOwnPassword(form) {
+async function changeOwnPassword(form: HTMLFormElement): Promise<void> {
   const data = new FormData(form);
   const newPassword = String(data.get("newPassword") || "");
   const confirmPassword = String(data.get("confirmPassword") || "");
@@ -1819,7 +2220,7 @@ async function changeOwnPassword(form) {
   await refresh();
 }
 
-async function resetUserPassword(form) {
+async function resetUserPassword(form: HTMLFormElement): Promise<void> {
   const data = new FormData(form);
   await api(`/api/users/${form.dataset.userId}/password`, {
     method: "PATCH",
@@ -1829,14 +2230,14 @@ async function resetUserPassword(form) {
   await refresh();
 }
 
-async function addMember(form) {
+async function addMember(form: HTMLFormElement): Promise<void> {
   const data = new FormData(form);
   const teamId = form.dataset.team;
   await api(`/api/teams/${teamId}/members`, { method: "POST", body: JSON.stringify({ userId: String(data.get("userId")), role: String(data.get("role")) }) });
   await refresh();
 }
 
-async function saveConfig(form) {
+async function saveConfig(form: HTMLFormElement): Promise<void> {
   const data = new FormData(form);
   await api("/api/claude/config", {
     method: "PATCH",
@@ -1853,7 +2254,7 @@ async function saveConfig(form) {
   await refresh();
 }
 
-async function saveWorkspace(form) {
+async function saveWorkspace(form: HTMLFormElement): Promise<void> {
   const teamId = form.dataset.team;
   const data = new FormData(form);
   await api(`/api/teams/${teamId}`, {
@@ -1864,130 +2265,190 @@ async function saveWorkspace(form) {
   await refresh();
 }
 
-document.addEventListener("submit", async (event) => {
-  const form = event.target.closest("form");
-  if (!form) return;
-  event.preventDefault();
-  const kind = form.dataset.form;
+function setElementBusy(element: HTMLElement, busy: boolean): void {
+  element.setAttribute("aria-busy", String(busy));
+  const controls = element instanceof HTMLFormElement ? [...element.querySelectorAll<HTMLButtonElement>("button[type='submit']")] : element instanceof HTMLButtonElement ? [element] : [];
+  controls.forEach((control) => { control.disabled = busy; });
+}
+
+async function runAction(key: string, element: HTMLElement, action: () => Promise<void>, successMessage?: string): Promise<void> {
+  if (pendingActions.has(key)) return;
+  pendingActions.add(key);
+  setElementBusy(element, true);
   try {
-    if (kind === "login") await login(form);
-    if (kind === "team") await createTeam(form);
-    if (kind === "message") await sendMessage(form, event.submitter);
-    if (kind === "user") await createUser(form);
-    if (kind === "password") await changeOwnPassword(form);
-    if (kind === "admin-password") await resetUserPassword(form);
-    if (kind === "member") await addMember(form);
-    if (kind === "config") await saveConfig(form);
-    if (kind === "workspace") await saveWorkspace(form);
-  } catch (err) {
-    showError(err);
+    await action();
+    if (successMessage) toast(successMessage, "success");
+  } catch (error) {
+    showError(error);
+  } finally {
+    pendingActions.delete(key);
+    if (element.isConnected) setElementBusy(element, false);
   }
+}
+
+async function changeSessionFilters(): Promise<void> {
+  state.sessionPagination = { nextCursor: null, loading: false, initialized: false };
+  await loadSessions({ reset: true });
+  if (state.selectedSessionId) await loadMessages(state.selectedSessionId, { reset: true });
+  syncLocation();
+  scheduleTeamRender({ rail: true, chat: true, right: true }, 0);
+}
+
+document.addEventListener("submit", (event) => {
+  const submitEvent = event as SubmitEvent;
+  const form = submitEvent.target instanceof HTMLFormElement ? submitEvent.target : null;
+  if (!form) return;
+  submitEvent.preventDefault();
+  const kind = form.dataset.form || "unknown";
+  const submitter = submitEvent.submitter instanceof HTMLButtonElement ? submitEvent.submitter : null;
+  const actions: Record<string, () => Promise<void>> = {
+    login: () => login(form),
+    team: () => createTeam(form),
+    message: () => sendMessage(form, submitter),
+    user: () => createUser(form),
+    password: () => changeOwnPassword(form),
+    "admin-password": () => resetUserPassword(form),
+    member: () => addMember(form),
+    config: () => saveConfig(form),
+    workspace: () => saveWorkspace(form),
+  };
+  const action = actions[kind];
+  if (action) void runAction(`form:${kind}:${form.dataset.userId || form.dataset.team || state.selectedSessionId}`, form, action, kind === "message" || kind === "login" ? undefined : "保存成功");
 });
 
 document.addEventListener("input", (event) => {
-  const field = event.target.closest?.("[data-session-draft]");
-  if (!field) return;
-  uiMemory.composerDrafts.set(field.dataset.sessionDraft, field.value);
+  const target = event.target;
+  if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) return;
+  if (target.matches("[data-session-draft]") && target.dataset.sessionDraft) {
+    uiMemory.composerDrafts.set(target.dataset.sessionDraft, target.value);
+  }
+  if (target.matches("[data-session-search]")) {
+    state.sessionSearch = target.value;
+    syncLocation();
+    window.clearTimeout(sessionSearchTimer);
+    sessionSearchTimer = window.setTimeout(() => void runAction("session-filter", target, changeSessionFilters), 280);
+  }
 });
 
 document.addEventListener("toggle", (event) => {
-  const details = event.target.closest?.("[data-turn-events]");
-  if (!details) return;
-  uiMemory.openTurnEvents.set(details.dataset.turnEvents, details.open);
+  const details = event.target instanceof HTMLDetailsElement ? event.target.closest<HTMLDetailsElement>("[data-turn-events]") : null;
+  if (details?.dataset.turnEvents) uiMemory.openTurnEvents.set(details.dataset.turnEvents, details.open);
 }, true);
 
 document.addEventListener("change", (event) => {
-  const filter = event.target.closest?.("[data-session-member-filter]");
-  if (!filter) return;
-  const value = filter.value || "all";
-  const team = state.teams.find((item) => item.id === state.selectedTeamId);
-  const sessions = team ? sortSessionsNewestFirst(state.sessions.filter((session) => session.teamId === team.id && (value === "all" || session.createdBy === value))) : [];
-  const selectedIsVisible = sessions.some((session) => session.id === state.selectedSessionId);
-  setState({
-    sessionMemberFilter: value,
-    selectedSessionId: selectedIsVisible ? state.selectedSessionId : sessions[0]?.id || state.selectedSessionId,
-  });
+  const target = event.target;
+  if (!(target instanceof HTMLSelectElement)) return;
+  if (target.matches("[data-session-member-filter]")) state.sessionMemberFilter = target.value || "all";
+  else if (target.matches("[data-session-status-filter]")) state.sessionStatusFilter = target.value as AppState["sessionStatusFilter"];
+  else if (target.matches("[data-session-archive-filter]")) state.sessionArchiveFilter = target.value as AppState["sessionArchiveFilter"];
+  else return;
+  void runAction("session-filter", target, changeSessionFilters);
 });
 
-document.addEventListener("click", async (event) => {
-  try {
-    if (event.target.classList?.contains("modal-backdrop")) {
-      activeModal = "";
-      render();
-      return;
-    }
-    const target = event.target.closest("button");
-    if (!target || target.disabled) return;
+document.addEventListener("close", (event) => {
+  if (!(event.target instanceof HTMLDialogElement) || !event.target.matches("[data-modal-dialog]")) return;
+  activeModal = "";
+  render();
+}, true);
 
-    if (target.dataset.view) return setState({ activeView: target.dataset.view });
-    if (target.dataset.openTeam) return setState({ activeView: "team", selectedTeamId: target.dataset.openTeam, selectedSessionId: target.dataset.session || state.selectedSessionId, sessionMemberFilter: "all" });
-    if (target.dataset.backTeams !== undefined) return setState({ activeView: "teams" });
-    if (target.dataset.session) return setState({ selectedSessionId: target.dataset.session });
-    if (target.dataset.sessionGroup) {
-      const key = sessionGroupKey(target.dataset.team || state.selectedTeamId, target.dataset.sessionGroup);
-      uiMemory.openSessionGroups.set(key, target.dataset.expanded !== "true");
-      scheduleTeamRender({ rail: true }, 0);
-      return;
-    }
-    if (target.dataset.action === "toggle-sidebar") {
-      const collapsed = !state.sidebarCollapsed;
-      localStorage.setItem("cc.sidebarCollapsed", String(collapsed));
-      return setState({ sidebarCollapsed: collapsed });
-    }
-    if (target.dataset.modal) {
-      activeModal = target.dataset.modal;
-      modalTeamId = target.dataset.team || state.selectedTeamId;
-      render();
-      return;
-    }
-    if (target.dataset.closeModal !== undefined) {
-      activeModal = "";
-      render();
-      return;
-    }
-    if (target.dataset.action === "logout") {
+document.addEventListener("click", (event) => {
+  const origin = event.target;
+  if (!(origin instanceof Element)) return;
+  const dialog = origin instanceof HTMLDialogElement ? origin : origin.closest<HTMLDialogElement>("dialog");
+  if (dialog && origin === dialog) {
+    activeModal = "";
+    render();
+    return;
+  }
+  const target = origin.closest<HTMLButtonElement>("button");
+  if (!target || target.disabled) return;
+
+  if (target.dataset.view) return setState({ activeView: target.dataset.view as AppView, mobileNavOpen: false }, "push");
+  if (target.dataset.openTeam) {
+    setState({ activeView: "team", selectedTeamId: target.dataset.openTeam, selectedSessionId: target.dataset.session || "", sessionMemberFilter: "all", mobileNavOpen: false }, "push");
+    void runAction(`open-team:${target.dataset.openTeam}`, target, async () => {
+      await loadSessions({ reset: true });
+      if (state.selectedSessionId) await loadMessages(state.selectedSessionId, { reset: true });
+      scheduleTeamRender({ rail: true, chat: true, right: true }, 0);
+    });
+    return;
+  }
+  if (target.dataset.backTeams !== undefined) return setState({ activeView: "teams" }, "push");
+  if (target.dataset.session) {
+    state.selectedSessionId = target.dataset.session;
+    state.teamRailOpen = false;
+    syncLocation("push");
+    render();
+    void runAction(`messages:${target.dataset.session}`, target, async () => { await loadMessages(target.dataset.session || "", { reset: true }); scheduleTeamRender({ chat: true, right: true }, 0); });
+    return;
+  }
+  if (target.dataset.sessionGroup) {
+    const key = sessionGroupKey(target.dataset.team || state.selectedTeamId, target.dataset.sessionGroup);
+    uiMemory.openSessionGroups.set(key, target.dataset.expanded !== "true");
+    scheduleTeamRender({ rail: true }, 0);
+    return;
+  }
+  const actionName = target.dataset.action;
+  if (actionName === "toggle-sidebar") {
+    const collapsed = !state.sidebarCollapsed;
+    localStorage.setItem("cc.sidebarCollapsed", String(collapsed));
+    return setState({ sidebarCollapsed: collapsed });
+  }
+  if (actionName === "toggle-mobile-nav") return setState({ mobileNavOpen: !state.mobileNavOpen });
+  if (actionName === "toggle-team-rail") return setState({ teamRailOpen: !state.teamRailOpen, rightRailOpen: false });
+  if (actionName === "toggle-right-rail") return setState({ rightRailOpen: !state.rightRailOpen, teamRailOpen: false });
+  if (actionName === "close-workspace-drawers") return setState({ teamRailOpen: false, rightRailOpen: false });
+  if (target.dataset.modal) {
+    activeModal = target.dataset.modal;
+    modalTeamId = target.dataset.team || state.selectedTeamId;
+    render();
+    return;
+  }
+  if (target.dataset.closeModal !== undefined) {
+    activeModal = "";
+    render();
+    return;
+  }
+
+  const key = `click:${actionName || target.dataset.permission || target.dataset.deleteSession || target.dataset.deleteTeam || target.dataset.toggleUser || target.dataset.copyMessage || "action"}`;
+  void runAction(key, target, async () => {
+    if (actionName === "logout") {
       await api("/api/auth/logout", { method: "POST", body: "{}" });
       eventSource?.close();
       eventSource = null;
       setState({ currentUserId: null });
-      return;
-    }
-    if (target.dataset.action === "new-session") return await createSession();
-    if (target.dataset.deleteSession) return await deleteSession(target.dataset.deleteSession);
-    if (target.dataset.deleteTeam) return await deleteTeam(target.dataset.deleteTeam);
-    if (target.dataset.removeMemberTeam) return await removeMember(target.dataset.removeMemberTeam, target.dataset.removeMemberUser);
-    if (target.dataset.action === "toggle-session-visibility") return await toggleSessionVisibility();
-    if (target.dataset.action === "retry-session") return await retrySession();
-    if (target.dataset.copyMessage) {
-      const message = state.messages.find((item) => item.id === target.dataset.copyMessage);
-      if (message) await copyText(message.content || "");
-      return;
-    }
-    if (target.dataset.copyCode) {
-      await copyText(decodeURIComponent(target.dataset.copyCode));
-      return;
-    }
-    if (target.dataset.removeApprovalScope) return await removeToolApproval(target.dataset.removeApprovalScope, target.dataset.removeApprovalValue);
-    if (target.dataset.action === "stop-session") {
+    } else if (actionName === "new-session") await createSession();
+    else if (actionName === "toggle-session-visibility") await toggleSessionVisibility();
+    else if (actionName === "toggle-session-archive") await toggleSessionArchive();
+    else if (actionName === "retry-session") await retrySession(target.dataset.retryMessage);
+    else if (actionName === "load-more-sessions") { await loadSessions(); scheduleTeamRender({ rail: true }, 0); }
+    else if (actionName === "load-older-messages") { await loadMessages(state.selectedSessionId); scheduleTeamRender({ chat: true }, 0); }
+    else if (actionName === "stop-session") {
       const session = sessionById(state.selectedSessionId);
-      if (session) {
-        await api(`/api/sessions/${session.id}/stop`, { method: "POST", body: "{}" });
-      }
-      return;
-    }
-    if (target.dataset.action === "health-check") {
+      if (session) await api(`/api/sessions/${session.id}/stop`, { method: "POST", body: "{}" });
+    } else if (actionName === "health-check") {
       await api("/api/claude/health-check", { method: "POST", body: "{}" });
       await refresh();
-      return;
-    }
-    if (target.dataset.permission) return await decidePermission(target.dataset.permission, target.dataset.decision);
-    if (target.dataset.toggleUser) {
+    } else if (target.dataset.deleteSession) await deleteSession(target.dataset.deleteSession);
+    else if (target.dataset.deleteTeam) await deleteTeam(target.dataset.deleteTeam);
+    else if (target.dataset.removeMemberTeam && target.dataset.removeMemberUser) await removeMember(target.dataset.removeMemberTeam, target.dataset.removeMemberUser);
+    else if (target.dataset.copyMessage) {
+      const message = state.messages.find((item) => item.id === target.dataset.copyMessage);
+      if (message) { await copyText(message.content || ""); toast("已复制", "success"); }
+    } else if (target.dataset.copyCode) { await copyText(decodeURIComponent(target.dataset.copyCode)); toast("已复制", "success"); }
+    else if (target.dataset.removeApprovalScope && target.dataset.removeApprovalValue) await removeToolApproval(target.dataset.removeApprovalScope, target.dataset.removeApprovalValue);
+    else if (target.dataset.permission && target.dataset.decision) await decidePermission(target.dataset.permission, target.dataset.decision);
+    else if (target.dataset.toggleUser) {
       await api(`/api/users/${target.dataset.toggleUser}/status`, { method: "PATCH", body: "{}" });
       await refresh();
     }
-  } catch (err) {
-    showError(err);
-  }
+  });
 });
 
-refresh();
+window.addEventListener("popstate", () => {
+  applyLocationToState(state);
+  render();
+  if (state.activeView === "team") void loadSessions({ reset: true }).then(() => state.selectedSessionId ? loadMessages(state.selectedSessionId, { reset: true }) : undefined).then(() => scheduleTeamRender({ rail: true, chat: true, right: true }, 0)).catch(showError);
+});
+
+void refresh();

@@ -2,7 +2,7 @@ services:
   claude-code-webui:
     environment:
       CLAUDE_COMMAND: "/opt/claude-code/cli.js"
-      CLAUDE_ARGS: "-p"
+      CLAUDE_ARGS: ""
       HOME: "/home/node"
     volumes:
       - ./.host-claude/claude-code:/opt/claude-code:ro

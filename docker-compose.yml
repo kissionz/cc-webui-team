@@ -10,10 +10,17 @@ services:
       HOST: "0.0.0.0"
       DATA_DIR: "/app/data"
       WORKSPACE_ROOT: "/workspaces"
-      CLAUDE_COMMAND: "claude"
+      CLAUDE_COMMAND: ""
       CLAUDE_ARGS: ""
       ADMIN_PASSWORD: "${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env before starting}"
       SEED_DEMO_USERS: "false"
+      MAX_CONCURRENT_TURNS: "4"
+      MAX_CONCURRENT_TURNS_PER_TEAM: "2"
+      MAX_CONCURRENT_TURNS_PER_USER: "1"
     volumes:
-      - ./data:/app/data
-      - ./workspaces:/workspaces
+      - claude_data:/app/data
+      - claude_workspaces:/workspaces
+
+volumes:
+  claude_data:
+  claude_workspaces:
