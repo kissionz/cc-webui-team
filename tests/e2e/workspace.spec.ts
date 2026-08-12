@@ -30,6 +30,28 @@ test("管理员可登录、筛选会话并查看审计", async ({ page, isMobile
   await expect(page.getByText("system.initialized")).toBeVisible();
 });
 
+test("新建会话后可以立即发送第一条消息", async ({ page, isMobile }) => {
+  test.skip(isMobile, "桌面端覆盖新会话首条消息");
+  await login(page);
+  await page.getByRole("button", { name: "打开工作台" }).click();
+
+  const sent = page.waitForRequest((request) => request.method() === "POST" && /\/api\/sessions\/[^/]+\/messages$/.test(new URL(request.url()).pathname));
+  await page.route("**/api/sessions/*/messages", async (route) => {
+    await route.fulfill({ status: 202, contentType: "application/json", body: JSON.stringify({ accepted: true }) });
+  });
+
+  await page.getByRole("button", { name: "新会话" }).click();
+  await expect(page.locator("#chat-panel").getByRole("heading", { name: "新会话" })).toBeVisible();
+  const composer = page.locator("#chat-panel textarea[name='content']");
+  await composer.fill("验证新会话首条消息");
+  await page.locator("#chat-panel").getByRole("button", { name: "发送", exact: true }).click();
+
+  const request = await sent;
+  expect(request.postDataJSON()).toEqual({ content: "验证新会话首条消息", mode: "send" });
+  expect(new URL(request.url()).pathname).not.toContain("session_welcome");
+  await expect(composer).toHaveValue("");
+});
+
 test("管理员可查看指标、应用模板并批量归档", async ({ page, isMobile }) => {
   test.skip(isMobile, "桌面端覆盖管理批量操作");
   await login(page);

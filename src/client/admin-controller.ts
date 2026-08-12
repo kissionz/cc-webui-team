@@ -1,5 +1,6 @@
 import type { AdminMetrics, AppState, AuditFilters, AuditLog, Session, TeamTemplate } from "./types.js";
 import { api } from "./api.js";
+import { createLiveState } from "./live-state.js";
 
 export interface AdminControllerDeps {
   state(): AppState;
@@ -19,7 +20,7 @@ export function createAdminController(deps: AdminControllerDeps) {
   let auditLoading = false;
   let loading = false;
   let editingId: string | null = null;
-  const state = new Proxy({} as AppState, { get: (_target, key: keyof AppState) => deps.state()[key] });
+  const state = createLiveState(deps.state);
 
   async function refreshData(): Promise<void> {
     if (!deps.isAdmin() || loading) return;

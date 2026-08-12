@@ -1,5 +1,6 @@
 import type { AppState, Permission, Session, Team } from "./types.js";
 import { api } from "./api.js";
+import { createLiveState } from "./live-state.js";
 
 export interface ClientActionDeps {
   state(): AppState;
@@ -24,9 +25,7 @@ export interface ClientActionDeps {
 }
 
 export function createClientActions(deps: ClientActionDeps) {
-  const state = new Proxy({} as AppState, {
-    get: (_, key: keyof AppState) => deps.state()[key],
-  });
+  const state = createLiveState(deps.state);
   const { refresh, renderLogin, setActiveModal, upsertById, scheduleTeamRender, sessionById, canApprove,
     isSystemAdmin, sortSessionsNewestFirst, canManageTeam, canManageSession, sessionVisibility,
     normalizeSelectedSession, syncLocation, toast, uiMemory, scheduleRender, render } = deps;
@@ -63,13 +62,17 @@ async function createSession(): Promise<void> {
   const result = await api<{ session: Session }>(`/api/teams/${team.id}/sessions`, { method: "POST", body: "{}" });
   state.selectedSessionId = result.session.id;
   state.sessions = upsertById(state.sessions, result.session);
+  state.messagePagination[result.session.id] = { nextCursor: null, loading: false, initialized: true };
+  syncLocation();
   scheduleTeamRender({ rail: true, chat: true, right: true }, 0);
+  window.setTimeout(() => document.querySelector<HTMLTextAreaElement>(`[data-session-draft="${CSS.escape(result.session.id)}"]`)?.focus(), 0);
 }
 
 async function sendMessage(form: HTMLFormElement, submitter: HTMLButtonElement | null = null): Promise<void> {
   const session = sessionById(state.selectedSessionId);
   const content = String(new FormData(form).get("content") || "").trim();
-  if (!session || !content) return;
+  if (!session) throw new Error("新会话尚未准备完成，请重试。");
+  if (!content) throw new Error("请输入消息后再发送。");
   const mode = submitter?.value || "send";
   await api(`/api/sessions/${session.id}/messages`, { method: "POST", body: JSON.stringify({ content, mode }) });
   uiMemory.composerDrafts.delete(session.id);

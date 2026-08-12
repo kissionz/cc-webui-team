@@ -1,4 +1,5 @@
 import type { AppState, FocusInfo, HtmlValue, ScrollPosition, Session, Team, UiSnapshot } from "./types.js";
+import { createLiveState } from "./live-state.js";
 
 type TeamParts = { rail: boolean; chat: boolean; right: boolean };
 export interface UiShellDeps {
@@ -21,10 +22,7 @@ export interface UiShellDeps {
 }
 
 export function createUiShell(deps: UiShellDeps) {
-  const state = new Proxy({} as AppState, {
-    get: (_, key: keyof AppState) => deps.state()[key],
-    set: () => true,
-  });
+  const state = createLiveState(deps.state);
   const { adminViews, renderLogin, renderTeams, renderTeamDetail, renderTeamRail, renderChat, renderRightRail,
     renderMessage, renderModal, renderPermissionOverlay, renderToasts, sortSessionsNewestFirst, uiMemory } = deps;
   const activeModal = deps.activeModal;

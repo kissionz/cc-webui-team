@@ -2,6 +2,7 @@ import type {
   Agent, AppState, HtmlValue, Message, MessageTurn, Permission, Session, SessionGroup, SessionStatus, Team,
 } from "./types.js";
 import { createPermissionViews } from "./permission-views.js";
+import { createLiveState } from "./live-state.js";
 
 export interface TeamViewDeps {
   state(): AppState;
@@ -36,9 +37,7 @@ export interface TeamViewDeps {
 }
 
 export function createTeamViews(deps: TeamViewDeps) {
-  const state = new Proxy({} as AppState, {
-    get: (_, key: keyof AppState) => deps.state()[key],
-  });
+  const state = createLiveState(deps.state);
   const { icons, now, fmt, appRoot, topbar, currentUser, isSystemAdmin, canManageTeam, canManageSession, canAskSession,
     sessionVisibility, teamRole, agentById, userName, escapeHtml, badge, titleText, compactText, sessionById,
     permissionById, groupSessionsByTime, isSessionGroupExpanded, sortSessionsNewestFirst, selectedSessionIds,
@@ -326,7 +325,7 @@ function renderChat(team: Team, session?: Session): string {
         ${turns.map(renderTurn).join("")}
       </div>
       <form class="composer" data-form="message">
-        <textarea class="textarea" name="content" placeholder="${escapeHtml(placeholder)}" data-session-draft="${session.id}" ${canSend ? "" : "disabled"}>${escapeHtml(draft)}</textarea>
+        <textarea class="textarea" name="content" placeholder="${escapeHtml(placeholder)}" data-session-draft="${session.id}" maxlength="200000" required ${canSend ? "" : "disabled"}>${escapeHtml(draft)}</textarea>
         <div class="composer-actions">
           ${
             isRunning
