@@ -6,14 +6,15 @@
 
 ```text
 Browser (TypeScript SPA)
-  ├─ REST：登录、团队、会话、消息、审批、配置
+  ├─ REST：登录、团队、会话、审批、导出、审计、指标
   └─ SSE：消息增量、状态、审批和计划更新
             │
 Node.js 24 / TypeScript
   ├─ 鉴权、角色与团队数据隔离
   ├─ 全局 / 团队 / 用户三级并发调度
-  ├─ Claude Agent SDK 运行时与会话恢复
-  └─ SQLite WAL：事务、全文检索、游标分页、启动恢复
+  ├─ Claude Agent SDK 运行时、增量批处理与会话恢复
+  ├─ 有界 SSE 背压、结构化日志与管理指标
+  └─ SQLite WAL：事务、全文检索、游标分页、在线备份
             │
        团队 workspace allowlist
 ```
@@ -87,8 +88,38 @@ Windows 可运行 `scripts/prepare-host-claude.ps1`。包含宿主机绝对路�
 - `MAX_CONCURRENT_TURNS`、`MAX_CONCURRENT_TURNS_PER_TEAM`、`MAX_CONCURRENT_TURNS_PER_USER`：三级并发上限。
 - `CLAUDE_COMMAND`：通常留空或写 `claude`，让 SDK 使用自带运行时；只有使用明确存在的自定义可执行文件时才填写路径。
 - `MCP_TOOL_ALLOWLIST`：平台预授权工具；其余工具由会话内审批。
+- `BACKUP_ENABLED`、`BACKUP_INTERVAL_HOURS`、`BACKUP_RETENTION`：在线备份开关、周期和保留数量。
 
 公网部署建议由 Caddy、Nginx 或同类反向代理终止 TLS，并将数据目录和 workspace 纳入独立备份策略。SQLite 的 `-wal` 与 `-shm` 文件属于数据库运行状态，不应单独复制；优先使用 SQLite 在线备份或在停机后整体备份。
+
+## 备份与恢复
+
+服务默认启动在线 SQLite 备份，每 24 小时执行一次，保留最近 14 份。备份目录默认是 `data/backups/`。也可以手动执行：
+
+```bash
+npm run build
+npm run db:backup
+npm run db:verify -- --source=/absolute/path/to/backup.sqlite
+```
+
+恢复必须先正常停止服务，避免与仍在运行的 WAL 写入并发。恢复命令会验证来源文件，并在覆盖前为当前数据库再创建一份 `pre-restore` 备份：
+
+```bash
+npm run db:restore -- \
+  --source=/absolute/path/to/backup.sqlite \
+  --force \
+  --confirm-offline
+```
+
+不要把 `--confirm-offline` 当作普通确认参数；它表示你已经确认服务进程关闭，数据库的 `-wal` 和 `-shm` 文件不存在。
+
+## 管理与导出
+
+- 管理员运行概览展示真实的队列、任务、流式刷盘、SSE 连接、数据库、备份和平台数据。
+- 审计日志支持条件筛选、游标分页及 CSV/JSON 导出。
+- 会话可导出为 Markdown 或完整 JSON。
+- 管理员可以批量归档/恢复非运行中会话；无法操作的会话会逐项返回原因。
+- 团队模板只保存非敏感运行默认值，并按团队隔离；不会复制凭据、命令或 workspace 路径。
 
 ## 权限与运行模型
 
@@ -97,6 +128,7 @@ Windows 可运行 `scripts/prepare-host-claude.ps1`。包含宿主机绝对路�
 - 私有会话仅创建者和系统管理员可见；团队会话按团队成员关系可见。
 - 同一会话只允许一个活跃任务；并发超限时进入公平队列。
 - 排队任务可取消；运行中任务可中断；进程异常退出后，遗留运行态会被标记为 `interrupted`，不会假装仍在运行。
+- 进程崩溃后，尚未开始的排队任务会按原 FIFO 顺序恢复；缺失用户、团队、会话或 Agent 的异常队列记录会安全终结并写入审计。
 - 工具审批具有过期、幂等和原子决策保护，审批缓存可按工具或 MCP 服务撤销。
 
 ## 数据升级与回滚
@@ -116,9 +148,11 @@ Windows 可运行 `scripts/prepare-host-claude.ps1`。包含宿主机绝对路�
 npm run typecheck
 npm run build
 npm test -- --run
+npx playwright install chromium
+npm run test:e2e
 ```
 
-构建会同时严格检查服务端和浏览器 TypeScript，并把产物写入 `dist/`。
+构建会同时严格检查服务端和浏览器 TypeScript，并把产物写入 `dist/`。端到端测试会启动隔离数据目录和真实 Chromium，不会执行 Claude 任务；本机也可用 `PLAYWRIGHT_CHANNEL=chrome npm run test:e2e` 复用已安装的 Chrome。
 
 ## 容量边界
 

@@ -4,9 +4,12 @@ import { createServer } from "node:http";
 import { loadConfig } from "./config.js";
 import { SseHub } from "./events/sse.js";
 import { ApiServer } from "./http/api-server.js";
+import { JsonLogger } from "./observability/logger.js";
+import { BackupScheduler } from "./ops/backup-scheduler.js";
 import { PersistenceRepository } from "./persistence/index.js";
 import { ClaudeRuntimeManager, type RuntimeEvent } from "./runtime/claude-runtime.js";
 import { ensureInitialData } from "./services/bootstrap.js";
+import { recoverQueuedRuntimeTurns } from "./services/runtime-recovery.js";
 import { SqliteRuntimeStore } from "./services/runtime-store.js";
 
 const nodeMajor = Number.parseInt(process.versions.node.split(".")[0] ?? "0", 10);
@@ -26,6 +29,7 @@ const { repository, result: initialization } = await PersistenceRepository.open(
 });
 await ensureInitialData(repository, config);
 
+const logger = new JsonLogger();
 const events = new SseHub();
 let apiServer: ApiServer | undefined;
 const runtime = new ClaudeRuntimeManager({
@@ -37,7 +41,19 @@ const runtime = new ClaudeRuntimeManager({
     },
   },
 });
-apiServer = new ApiServer({ repository, config, runtime, events });
+const backups = new BackupScheduler({
+  databaseFile: config.databaseFile,
+  backupDir: config.backup.directory,
+  intervalMs: config.backup.intervalMs,
+  retention: config.backup.retention,
+  onCompleted: (result) => logger.info("database.backup.completed", { path: result.path, sizeBytes: result.sizeBytes, createdAt: result.createdAt }),
+  onError: (error) => logger.error("database.backup.failed", { error: error instanceof Error ? { name: error.name, message: error.message } : String(error) }),
+});
+apiServer = new ApiServer({ repository, config, runtime, events, logger, backup: backups });
+const recovery = recoverQueuedRuntimeTurns(repository, runtime, logger);
+if (recovery.recovered || recovery.failed) {
+  logger.info("runtime.queued_turns_recovered", { ...recovery });
+}
 
 const server = createServer((request, response) => {
   void apiServer?.handle(request, response);
@@ -54,27 +70,29 @@ await new Promise<void>((resolve, reject) => {
     resolve();
   });
 });
+if (config.backup.enabled) await backups.start();
 
-console.log(`Claude Code Team Platform listening at http://${config.host}:${config.port}`);
+logger.info("server.started", { host: config.host, port: config.port, backupEnabled: config.backup.enabled });
 if (initialization.importedLegacyJson) {
-  console.log(`Legacy JSON was migrated to SQLite; backup: ${initialization.legacyBackupPath}`);
+  logger.info("database.legacy_json_migrated", { backupPath: initialization.legacyBackupPath });
 }
 const reconciled = initialization.reconciliation;
 if (reconciled.interruptedSessions || reconciled.interruptedTurns || reconciled.stalePermissions) {
-  console.log("Recovered persisted runtime state", reconciled);
+  logger.warn("runtime.state_reconciled", { reconciliation: reconciled });
 }
 
 let shuttingDown = false;
 function shutdown(signal: string): void {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log(`Received ${signal}; shutting down.`);
+  logger.info("server.shutdown.started", { signal });
   void (async () => {
     const activeTurns = [...runtime.scheduler.listQueued(), ...runtime.scheduler.listRunning()];
     for (const sessionId of new Set(activeTurns.map((turn) => turn.sessionId))) {
       runtime.stop(sessionId, `Server shutdown (${signal}).`);
     }
     events.close();
+    await backups.close();
     await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
     const deadline = Date.now() + 5_000;
     while ((runtime.scheduler.listQueued().length || runtime.scheduler.listRunning().length) && Date.now() < deadline) {
@@ -83,7 +101,7 @@ function shutdown(signal: string): void {
     repository.close();
     process.exitCode = runtime.scheduler.listRunning().length ? 1 : 0;
   })().catch((error: unknown) => {
-    console.error("Shutdown failed", error);
+    logger.error("server.shutdown.failed", { error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : String(error) });
     process.exitCode = 1;
   });
 }

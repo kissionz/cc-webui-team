@@ -2175,6 +2175,43 @@ select:disabled {
   }
 }
 
+/* Admin-only bulk work stays compact inside the existing session rail. */
+.batch-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.session-select { display: grid; place-items: center; flex: 0 0 28px; }
+.session-select input { width: 16px; height: 16px; }
+
+.audit-content { display: grid; gap: 14px; }
+.audit-filter { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)) auto auto; gap: 10px; align-items: end; padding: 14px; }
+.admin-observability .metric-row { grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); }
+.template-list { display: grid; gap: 10px; }
+.template-row { padding: 10px 0; border-top: 1px solid var(--line); }
+.template-row:first-child { border-top: 0; padding-top: 0; }
+.template-row p { margin: 3px 0 8px; color: var(--muted); font-size: 12px; }
+.template-row-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.template-row-actions,
+.template-actions { display: flex; align-items: center; gap: 6px; }
+.template-editor { margin: 8px 0 10px; }
+.template-editor summary { cursor: pointer; color: var(--accent); font-size: 13px; }
+.template-form { display: grid; gap: 8px; margin-top: 10px; }
+.template-apply { display: flex; gap: 6px; }
+.template-apply .select { min-width: 0; flex: 1; }
+
+@media (max-width: 900px) { .audit-filter { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .audit-filter { grid-template-columns: 1fr; } .template-apply { align-items: stretch; flex-direction: column; } }
+
 /* TypeScript workspace shell: responsive drawers, feedback, and dense filters. */
 .visually-hidden {
   position: absolute !important;
@@ -2449,7 +2486,7 @@ dialog.modal::backdrop {
     padding: 10px 12px;
   }
 
-  .chat-actions .button:not([data-action="toggle-session-archive"]):not([data-action="stop-session"]),
+  .chat-actions .button:not([data-action="toggle-session-archive"]):not([data-action="stop-session"]):not([data-export-session]),
   .chat-actions .badge {
     display: none;
   }

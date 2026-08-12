@@ -59,15 +59,39 @@ export interface Team {
   name: string;
   workspacePath: string;
   workspaceMode: WorkspaceMode;
+  runtimeDefaults: ClaudeRuntimeDefaults;
   createdBy: string;
   createdAt: Timestamp;
   updatedAt: Timestamp;
+}
+
+/** Per-team overrides for non-sensitive runtime policy only. */
+export interface ClaudeRuntimeDefaults {
+  modelContextTokens?: number;
+  autoCompactRatio?: number;
+  autoCompactEnabled?: boolean;
+  mcpToolAllowlist?: string[];
 }
 
 export interface TeamMember {
   teamId: string;
   userId: string;
   role: TeamRole;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+/** Reusable, non-secret team defaults. Workspace paths are intentionally absent. */
+export interface TeamConfigTemplate {
+  id: string;
+  name: string;
+  description: string;
+  workspaceMode: WorkspaceMode;
+  modelContextTokens: number;
+  autoCompactRatio: number;
+  autoCompactEnabled: boolean;
+  mcpToolAllowlist: string[];
+  createdBy: string;
   createdAt: Timestamp;
   updatedAt: Timestamp;
 }

@@ -5,6 +5,8 @@
 FIXES.md
 data
 dist
+test-results
+playwright-report
 node_modules
 workspaces
 npm-debug.log*

@@ -26,6 +26,22 @@ export function sendJson(
   response.end(JSON.stringify(payload));
 }
 
+export function sendDownload(
+  response: ServerResponse,
+  filename: string,
+  content: string | Buffer,
+  contentType: string,
+): void {
+  const ascii = filename.replace(/[^\x20-\x7E]+/g, "-").replaceAll('"', "");
+  response.writeHead(200, {
+    "Content-Type": contentType,
+    "Content-Disposition": `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(filename)}`,
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+  });
+  response.end(content);
+}
+
 export async function readJsonBody(request: IncomingMessage, maximumBytes: number): Promise<unknown> {
   const declared = Number(request.headers["content-length"] ?? 0);
   if (Number.isFinite(declared) && declared > maximumBytes) {

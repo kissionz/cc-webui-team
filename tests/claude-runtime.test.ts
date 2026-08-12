@@ -90,6 +90,7 @@ class MemoryStore implements SessionRuntimeStore {
   readonly permissions = new Map<string, Permission>();
   readonly compacts: CompactRecord[] = [];
   readonly inventories: Array<[string, string | null]> = [];
+  readonly deltaWrites: Array<{ messageId: string; text: string }> = [];
   plans: RuntimePlan[] = [];
   private sequence = 0;
 
@@ -99,7 +100,7 @@ class MemoryStore implements SessionRuntimeStore {
   async getAgent(agentId: string): Promise<Agent | null> {
     return agentId === this.agent.id ? this.agent : null;
   }
-  async getConfig(): Promise<ClaudeConfig> { return this.config; }
+  async getConfig(_teamId?: string): Promise<ClaudeConfig> { return this.config; }
   async createTurn(turn: Turn): Promise<void> { this.turns.set(turn.id, turn); }
   async updateTurn(turnId: string, patch: Partial<Turn>): Promise<void> {
     const current = this.turns.get(turnId);
@@ -128,6 +129,7 @@ class MemoryStore implements SessionRuntimeStore {
     return message;
   }
   async appendMessageDelta(messageId: string, text: string, metadata: Message["metadata"]): Promise<Message> {
+    this.deltaWrites.push({ messageId, text });
     const message = this.messages.get(messageId);
     if (!message) throw new Error("missing message");
     message.content += text;
@@ -221,6 +223,87 @@ describe("Claude runtime pure helpers", () => {
 });
 
 describe("ClaudeRuntimeManager", () => {
+  test("coalesces burst deltas and flushes them before turn completion", async () => {
+    const store = new MemoryStore();
+    const events: RuntimeEvent[] = [];
+    const manager = new ClaudeRuntimeManager({
+      store,
+      events: { publish: (event) => { events.push(event); } },
+      limits: { global: 1, perTeam: 1, perUser: 1 },
+      streamFlushIntervalMs: 1_000,
+      streamFlushBytes: 64 * 1_024,
+      queryFactory: () => (async function* () {
+        for (const text of ["one", "-", "two", "-", "three"]) {
+          yield { type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text } } };
+        }
+        yield {
+          type: "result", result: "ignored", is_error: false, session_id: "resume-me",
+          duration_ms: 1250, total_cost_usd: 0.0125,
+          usage: { input_tokens: 120, output_tokens: 45, cache_read_input_tokens: 30, cache_creation_input_tokens: 10 },
+        };
+      })(),
+    });
+
+    const turn = await manager.submit({ sessionId: "session-1", teamId: "team-1", userId: "user-1", prompt: "burst" });
+    await waitFor(() => store.turns.get(turn.id)?.status === "completed");
+    expect(store.deltaWrites).toHaveLength(1);
+    expect(store.deltaWrites[0]?.text).toBe("one-two-three");
+    const deltaIndex = events.findIndex((event) => event.type === "session.message.delta");
+    const finishIndex = events.findIndex((event) => event.type === "turn.finished");
+    expect(deltaIndex).toBeGreaterThan(-1);
+    expect(finishIndex).toBeGreaterThan(deltaIndex);
+    expect(manager.metricsSnapshot()).toMatchObject({
+      streamBufferedBytes: 0, streamFlushes: 1, streamFlushFailures: 0,
+      inputTokens: 120, outputTokens: 45, cacheReadInputTokens: 30,
+      cacheCreationInputTokens: 10, totalCostUsd: 0.0125, averageTurnDurationMs: 1250,
+    });
+  });
+
+  test("does not report completion when the terminal durability flush fails", async () => {
+    const store = new MemoryStore();
+    store.appendMessageDelta = async () => { throw new Error("sqlite busy"); };
+    const manager = new ClaudeRuntimeManager({
+      store,
+      events: { publish: () => undefined },
+      limits: { global: 1, perTeam: 1, perUser: 1 },
+      streamFlushIntervalMs: 1_000,
+      queryFactory: () => (async function* () {
+        yield { type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "not durable yet" } } };
+        yield { type: "result", result: "ignored", is_error: false, session_id: "resume-me" };
+      })(),
+    });
+
+    const turn = await manager.submit({ sessionId: "session-1", teamId: "team-1", userId: "user-1", prompt: "fail flush" });
+    await waitFor(() => store.turns.get(turn.id)?.status === "failed");
+    expect(store.turns.get(turn.id)?.error).toContain("sqlite busy");
+    expect(manager.metricsSnapshot().streamFlushFailures).toBe(1);
+  });
+
+  test("still aborts and flushes buffered text when the SDK close hook throws", async () => {
+    const store = new MemoryStore();
+    const manager = new ClaudeRuntimeManager({
+      store,
+      events: { publish: () => undefined },
+      limits: { global: 1, perTeam: 1, perUser: 1 },
+      streamFlushIntervalMs: 1_000,
+      queryFactory: ({ options }) => ({
+        close: () => { throw new Error("close hook failed"); },
+        async *[Symbol.asyncIterator]() {
+          yield { type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "keep me" } } };
+          await new Promise<void>((resolve) => options.abortController.signal.addEventListener("abort", () => resolve(), { once: true }));
+          throw new Error("aborted");
+        },
+      }),
+    });
+
+    const turn = await manager.submit({ sessionId: "session-1", teamId: "team-1", userId: "user-1", prompt: "stop" });
+    await waitFor(() => manager.metricsSnapshot().streamBufferedBytes > 0);
+    expect(manager.stop("session-1")).toBe(true);
+    await waitFor(() => store.turns.get(turn.id)?.status === "stopped");
+    expect(store.deltaWrites.map((item) => item.text).join("")).toBe("keep me");
+    expect(manager.metricsSnapshot()).toMatchObject({ streamBufferedBytes: 0, turnsStopped: 1 });
+  });
+
   test("resumes SDK sessions and persists partial text, thinking, tools, plans, compact and completion", async () => {
     const store = new MemoryStore();
     const events: RuntimeEvent[] = [];

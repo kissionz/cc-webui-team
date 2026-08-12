@@ -29,6 +29,7 @@ export async function ensureInitialData(repository: PersistenceRepository, confi
     name: "Claude Code Platform",
     workspacePath: config.workspaceRoot,
     workspaceMode: "shared",
+    runtimeDefaults: {},
     createdBy: admin.id,
     createdAt,
     updatedAt: createdAt,

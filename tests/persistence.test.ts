@@ -42,7 +42,7 @@ function user(overrides: Partial<User> = {}): User {
 }
 
 function team(overrides: Partial<Team> = {}): Team {
-  return { id: "t1", name: "Platform", workspacePath: "/workspaces/platform", workspaceMode: "shared", createdBy: "u1", createdAt: clock, updatedAt: clock, ...overrides };
+  return { id: "t1", name: "Platform", workspacePath: "/workspaces/platform", workspaceMode: "shared", runtimeDefaults: {}, createdBy: "u1", createdAt: clock, updatedAt: clock, ...overrides };
 }
 
 function member(overrides: Partial<TeamMember> = {}): TeamMember {
@@ -77,6 +77,7 @@ describe("PersistenceRepository", () => {
     repo.createTurn(turn("turn1", "s1", "running"));
     expect(() => repo.createTurn(turn("turn2", "s1", "queued"))).toThrow();
     expect(repo.getSession("s1")?.toolApprovals).toEqual({ onceTools: [], alwaysTools: [], alwaysServers: [] });
+    expect(repo.getTeam("t1")?.runtimeDefaults).toEqual({});
     expect(repo.getActiveTurn("s1")?.id).toBe("turn1");
     repo.close();
   });

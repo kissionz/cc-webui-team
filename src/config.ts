@@ -40,6 +40,12 @@ function boundedNumber(name: string, fallback: number, minimum: number, maximum:
   return value;
 }
 
+function boundedInteger(name: string, fallback: number, minimum: number, maximum: number): number {
+  const value = boundedNumber(name, fallback, minimum, maximum);
+  if (!Number.isSafeInteger(value)) throw new Error(`${name} must be an integer.`);
+  return value;
+}
+
 function csv(name: string): string[] {
   return String(process.env[name] ?? "")
     .split(",")
@@ -73,6 +79,12 @@ export interface AppConfig {
   autoCompactRatio: number;
   autoCompactEnabled: boolean;
   mcpToolAllowlist: string[];
+  backup: {
+    enabled: boolean;
+    directory: string;
+    intervalMs: number;
+    retention: number;
+  };
 }
 
 export function loadConfig(rootDir = process.cwd()): AppConfig {
@@ -108,5 +120,11 @@ export function loadConfig(rootDir = process.cwd()): AppConfig {
     autoCompactRatio: boundedNumber("AUTO_COMPACT_RATIO", 0.62, 0.1, 0.9),
     autoCompactEnabled: process.env.AUTO_COMPACT_ENABLED !== "false",
     mcpToolAllowlist: csv("MCP_TOOL_ALLOWLIST"),
+    backup: {
+      enabled: process.env.BACKUP_ENABLED !== "false",
+      directory: resolve(process.env.BACKUP_DIR || join(dataDir, "backups")),
+      intervalMs: boundedInteger("BACKUP_INTERVAL_HOURS", 24, 1, 168) * 60 * 60 * 1000,
+      retention: boundedInteger("BACKUP_RETENTION", 14, 1, 365),
+    },
   };
 }

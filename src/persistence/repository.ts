@@ -18,6 +18,7 @@ import type {
   PermissionDecision,
   PermissionStatus,
   Team,
+  TeamConfigTemplate,
   TeamMember,
   Turn,
   User,
@@ -53,6 +54,7 @@ export interface SessionPageRequest extends PageRequest {
   createdBy?: string;
   statuses?: ConversationSession["status"][];
   includeArchived?: boolean;
+  archivedOnly?: boolean;
   visibleToUserId?: string;
 }
 
@@ -184,12 +186,14 @@ export class PersistenceRepository {
   }
 
   saveTeam(team: Team): void {
+    const runtimeDefaults = validatedRuntimeDefaults(team.runtimeDefaults);
     this.database.prepare(`
-      INSERT INTO teams(id, name, workspace_path, workspace_mode, created_by, created_at, updated_at)
-      VALUES (@id, @name, @workspacePath, @workspaceMode, @createdBy, @createdAt, @updatedAt)
+      INSERT INTO teams(id, name, workspace_path, workspace_mode, runtime_defaults_json, created_by, created_at, updated_at)
+      VALUES (@id, @name, @workspacePath, @workspaceMode, @runtimeDefaultsJson, @createdBy, @createdAt, @updatedAt)
       ON CONFLICT(id) DO UPDATE SET name=excluded.name, workspace_path=excluded.workspace_path,
-        workspace_mode=excluded.workspace_mode, updated_at=excluded.updated_at
-    `).run(team);
+        workspace_mode=excluded.workspace_mode, runtime_defaults_json=excluded.runtime_defaults_json,
+        updated_at=excluded.updated_at
+    `).run({ ...team, runtimeDefaultsJson: json(runtimeDefaults) });
   }
 
   getTeam(id: string): Team | null {
@@ -228,6 +232,56 @@ export class PersistenceRepository {
 
   removeTeamMember(teamId: string, userId: string): boolean {
     return this.database.prepare("DELETE FROM team_members WHERE team_id=? AND user_id=?").run(teamId, userId).changes > 0;
+  }
+
+  saveTeamConfigTemplate(template: TeamConfigTemplate): void {
+    this.database.prepare(`
+      INSERT INTO team_config_templates(id, name, description, workspace_mode, model_context_tokens,
+        auto_compact_ratio, auto_compact_enabled, mcp_tool_allowlist_json, created_by, created_at, updated_at)
+      VALUES (@id, @name, @description, @workspaceMode, @modelContextTokens, @autoCompactRatio,
+        @autoCompactEnabled, @mcpToolAllowlistJson, @createdBy, @createdAt, @updatedAt)
+      ON CONFLICT(id) DO UPDATE SET name=excluded.name, description=excluded.description,
+        workspace_mode=excluded.workspace_mode, model_context_tokens=excluded.model_context_tokens,
+        auto_compact_ratio=excluded.auto_compact_ratio, auto_compact_enabled=excluded.auto_compact_enabled,
+        mcp_tool_allowlist_json=excluded.mcp_tool_allowlist_json, updated_at=excluded.updated_at
+    `).run({
+      ...template,
+      autoCompactEnabled: boolInt(template.autoCompactEnabled),
+      mcpToolAllowlistJson: json(template.mcpToolAllowlist),
+    });
+  }
+
+  getTeamConfigTemplate(id: string): TeamConfigTemplate | null {
+    const row = this.getOne("SELECT * FROM team_config_templates WHERE id=?", id);
+    return row ? teamConfigTemplateFromRow(row) : null;
+  }
+
+  listTeamConfigTemplates(): TeamConfigTemplate[] {
+    return this.getMany("SELECT * FROM team_config_templates ORDER BY updated_at DESC, id DESC").map(teamConfigTemplateFromRow);
+  }
+
+  deleteTeamConfigTemplate(id: string): boolean {
+    return this.database.prepare("DELETE FROM team_config_templates WHERE id=?").run(id).changes > 0;
+  }
+
+  countMetrics(): {
+    users: number;
+    teams: number;
+    sessions: Record<string, number>;
+    pendingPermissions: number;
+    messages: number;
+  } {
+    const scalar = (sql: string): number => Number(this.getOne(sql)?.count ?? 0);
+    const sessionRows = this.getMany("SELECT status, count(*) count FROM sessions GROUP BY status");
+    const sessions: Record<string, number> = {};
+    for (const row of sessionRows) sessions[str(row.status!)] = num(row.count!);
+    return {
+      users: scalar("SELECT count(*) count FROM users WHERE status='active'"),
+      teams: scalar("SELECT count(*) count FROM teams"),
+      sessions,
+      pendingPermissions: scalar("SELECT count(*) count FROM permissions WHERE status='pending'"),
+      messages: scalar("SELECT count(*) count FROM messages"),
+    };
   }
 
   saveAgent(agent: Agent): void {
@@ -293,7 +347,8 @@ export class PersistenceRepository {
     addInClause(clauses, params, "team_id", request.teamIds);
     if (request.createdBy) { clauses.push("created_by=?"); params.push(request.createdBy); }
     addInClause(clauses, params, "status", request.statuses);
-    if (!request.includeArchived) clauses.push("archived_at IS NULL");
+    if (request.archivedOnly) clauses.push("archived_at IS NOT NULL");
+    else if (!request.includeArchived) clauses.push("archived_at IS NULL");
     if (request.visibleToUserId) {
       clauses.push("(visibility='team' OR created_by=?)");
       params.push(request.visibleToUserId);
@@ -314,7 +369,7 @@ export class PersistenceRepository {
     const query = ftsQuery(request.query);
     if (!query) return { items: [], nextCursor: null };
     // FTS5's unicode tokenizer does not reliably split adjacent CJK characters.
-    // Keep FTS for ranked/token search, then add a bound LIKE fallback so short
+    // Keep FTS for ranked/token search, then add a bound substring fallback so short
     // Chinese queries and intentional substrings still behave as users expect.
     const substring = request.query.trim();
     const limit = pageLimit(request.limit);
@@ -331,7 +386,8 @@ export class PersistenceRepository {
     addInClause(clauses, params, "team_id", request.teamIds);
     if (request.createdBy) { clauses.push("created_by=?"); params.push(request.createdBy); }
     addInClause(clauses, params, "status", request.statuses);
-    if (!request.includeArchived) clauses.push("archived_at IS NULL");
+    if (request.archivedOnly) clauses.push("archived_at IS NOT NULL");
+    else if (!request.includeArchived) clauses.push("archived_at IS NULL");
     if (request.visibleToUserId) { clauses.push("(visibility='team' OR created_by=?)"); params.push(request.visibleToUserId); }
     if (cursor) {
       clauses.push("(updated_at < ? OR (updated_at = ? AND id < ?))");
@@ -368,6 +424,11 @@ export class PersistenceRepository {
   getActiveTurn(sessionId: string): Turn | null {
     const row = this.getOne("SELECT * FROM turns WHERE session_id=? AND status IN ('queued','running','waiting_permission')", sessionId);
     return row ? turnFromRow(row) : null;
+  }
+
+  /** Ordered recovery source. Queued work survives crashes and is re-admitted at startup. */
+  listQueuedTurns(): Turn[] {
+    return this.getMany("SELECT * FROM turns WHERE status='queued' ORDER BY created_at, id").map(turnFromRow);
   }
 
   appendMessage(message: Message): void {
@@ -590,11 +651,11 @@ export class PersistenceRepository {
       `).run(at).changes;
       const interruptedTurns = this.database.prepare(`
         UPDATE turns SET status='interrupted', finished_at=?, stop_reason='server_restart', updated_at=?
-        WHERE status IN ('queued','running','waiting_permission')
+        WHERE status IN ('running','waiting_permission')
       `).run(at, at).changes;
       const interruptedSessions = this.database.prepare(`
         UPDATE sessions SET status='interrupted', updated_at=?
-        WHERE status IN ('queued','running','compacting','waiting_permission')
+        WHERE status IN ('running','compacting','waiting_permission')
       `).run(at).changes;
       this.database.prepare("UPDATE agents SET status='idle', updated_at=? WHERE status IN ('queued','running','waiting')").run(at);
       return { interruptedSessions, interruptedTurns, stalePermissions, expiredPermissions };
@@ -699,8 +760,9 @@ function page<T>(rows: Row[], limit: number, map: (row: Row) => T, timestampColu
 
 function userFromRow(r: Row): User { return { id:str(r.id!), username:str(r.username!), passwordHash:str(r.password_hash!), displayName:str(r.display_name!), email:str(r.email!), role:str(r.role!) as User["role"], status:str(r.status!) as User["status"], createdAt:num(r.created_at!), updatedAt:num(r.updated_at!) }; }
 function authSessionFromRow(r: Row): AuthSession { return { token:str(r.token!), userId:str(r.user_id!), expiresAt:num(r.expires_at!), createdAt:num(r.created_at!), lastSeenAt:num(r.last_seen_at!) }; }
-function teamFromRow(r: Row): Team { return { id:str(r.id!), name:str(r.name!), workspacePath:str(r.workspace_path!), workspaceMode:str(r.workspace_mode!) as Team["workspaceMode"], createdBy:str(r.created_by!), createdAt:num(r.created_at!), updatedAt:num(r.updated_at!) }; }
+function teamFromRow(r: Row): Team { return { id:str(r.id!), name:str(r.name!), workspacePath:str(r.workspace_path!), workspaceMode:str(r.workspace_mode!) as Team["workspaceMode"], runtimeDefaults:validatedRuntimeDefaults(jsonObject(r.runtime_defaults_json!)), createdBy:str(r.created_by!), createdAt:num(r.created_at!), updatedAt:num(r.updated_at!) }; }
 function teamMemberFromRow(r: Row): TeamMember { return { teamId:str(r.team_id!), userId:str(r.user_id!), role:str(r.role!) as TeamMember["role"], createdAt:num(r.created_at!), updatedAt:num(r.updated_at!) }; }
+function teamConfigTemplateFromRow(r: Row): TeamConfigTemplate { return { id:str(r.id!), name:str(r.name!), description:str(r.description!), workspaceMode:str(r.workspace_mode!) as TeamConfigTemplate["workspaceMode"], modelContextTokens:num(r.model_context_tokens!), autoCompactRatio:num(r.auto_compact_ratio!), autoCompactEnabled:bool(r.auto_compact_enabled!), mcpToolAllowlist:parseJson(r.mcp_tool_allowlist_json!, []), createdBy:str(r.created_by!), createdAt:num(r.created_at!), updatedAt:num(r.updated_at!) }; }
 function agentFromRow(r: Row): Agent { return { id:str(r.id!), teamId:nullableStr(r.team_id!), name:str(r.name!), type:"claude_code", command:str(r.command!), enabled:bool(r.enabled!), status:str(r.status!) as Agent["status"], metadata:jsonObject(r.metadata_json!), createdAt:num(r.created_at!), updatedAt:num(r.updated_at!) }; }
 function sessionFromRow(r: Row): ConversationSession { return { id:str(r.id!), teamId:str(r.team_id!), agentId:str(r.agent_id!), createdBy:str(r.created_by!), title:str(r.title!), summary:nullableStr(r.summary!), summaryUpdatedAt:nullableNum(r.summary_updated_at!), visibility:str(r.visibility!) as ConversationSession["visibility"], status:str(r.status!) as ConversationSession["status"], cwd:str(r.cwd!), claudeSessionId:nullableStr(r.claude_session_id!), toolApprovals:parseJson(r.tool_approvals_json!, { onceTools:[], alwaysTools:[], alwaysServers:[] }), archivedAt:nullableNum(r.archived_at!), pinnedAt:nullableNum(r.pinned_at!), createdAt:num(r.created_at!), updatedAt:num(r.updated_at!) }; }
 function turnFromRow(r: Row): Turn { return { id:str(r.id!), sessionId:str(r.session_id!), requestedByUserId:nullableStr(r.requested_by_user_id!), status:str(r.status!) as Turn["status"], prompt:str(r.prompt!), retryOfMessageId:nullableStr(r.retry_of_message_id!), claudeSessionId:nullableStr(r.claude_session_id!), startedAt:nullableNum(r.started_at!), finishedAt:nullableNum(r.finished_at!), stopReason:nullableStr(r.stop_reason!), error:nullableStr(r.error!), createdAt:num(r.created_at!), updatedAt:num(r.updated_at!) }; }
@@ -730,7 +792,7 @@ function parseLegacyDatabase(raw: string): { users:User[]; authSessions:AuthSess
   const users = records(db.users).map((x):User => ({ id:text(x.id), username:text(x.username), passwordHash:text(x.passwordHash), displayName:text(x.displayName, text(x.username)), email:text(x.email), role:oneOf(x.role,["admin","member"] as const,"member"), status:oneOf(x.status,["active","disabled"] as const,"active"), createdAt:numberValue(x.createdAt,at), updatedAt:numberValue(x.updatedAt,at) }));
   const userIds = new Set(users.map((x)=>x.id));
   const authSessions = Object.entries(db.sessionsByToken ?? {}).flatMap(([token,x]) => isRecord(x) && userIds.has(text(x.userId)) ? [{ token:digestSessionToken(token), userId:text(x.userId), expiresAt:numberValue(x.expiresAt,at), createdAt:at, lastSeenAt:at }] : []);
-  const teams = records(db.teams).map((x):Team => ({ id:text(x.id), name:text(x.name), workspacePath:text(x.workspacePath), workspaceMode:oneOf(x.workspaceMode,["shared","isolated"] as const,"shared"), createdBy:text(x.createdBy), createdAt:numberValue(x.createdAt,at), updatedAt:numberValue(x.updatedAt,at) }));
+  const teams = records(db.teams).map((x):Team => ({ id:text(x.id), name:text(x.name), workspacePath:text(x.workspacePath), workspaceMode:oneOf(x.workspaceMode,["shared","isolated"] as const,"shared"), runtimeDefaults:{}, createdBy:text(x.createdBy), createdAt:numberValue(x.createdAt,at), updatedAt:numberValue(x.updatedAt,at) }));
   const members = records(db.members).map((x):TeamMember => ({ teamId:text(x.teamId), userId:text(x.userId), role:oneOf(x.role,["owner","admin","member","viewer"] as const,"member"), createdAt:numberValue(x.createdAt,at), updatedAt:numberValue(x.updatedAt,at) }));
   const agents = records(db.agents).map((x):Agent => ({ id:text(x.id), teamId:nullableText(x.teamId), name:text(x.name), type:"claude_code", command:text(x.command,"claude"), enabled:booleanValue(x.enabled,true), status:oneOf(x.status,["idle","queued","running","waiting","offline","error"] as const,"idle"), metadata:objectValue(x.metadata), createdAt:numberValue(x.createdAt,at), updatedAt:numberValue(x.updatedAt,at) }));
   const sessions = records(db.sessions).map((x):ConversationSession => ({ id:text(x.id), teamId:text(x.teamId), agentId:text(x.agentId), createdBy:text(x.createdBy), title:text(x.title,"新会话"), summary:nullableText(x.summary), summaryUpdatedAt:nullableNumber(x.summaryUpdatedAt), visibility:oneOf(x.visibility,["private","team"] as const,"private"), status:oneOf(x.status,["idle","queued","running","compacting","waiting_permission","completed","failed","stopped","interrupted"] as const,"idle"), cwd:text(x.cwd), claudeSessionId:nullableText(x.claudeSessionId), toolApprovals:toolApprovalsValue(x.toolApprovals), archivedAt:nullableNumber(x.archivedAt), pinnedAt:nullableNumber(x.pinnedAt), createdAt:numberValue(x.createdAt,at), updatedAt:numberValue(x.updatedAt,at) }));
@@ -754,6 +816,15 @@ function objectValue(value: unknown):JsonObject { return isRecord(value) ? value
 function arrayValue(value: unknown):JsonValue[] { return Array.isArray(value) ? value as JsonValue[] : []; }
 function stringArray(value: unknown):string[] { return Array.isArray(value) ? value.filter((x):x is string=>typeof x === "string") : []; }
 function toolApprovalsValue(value: unknown):ConversationSession["toolApprovals"] { const x=isRecord(value)?value:{}; return { onceTools:stringArray(x.onceTools),alwaysTools:stringArray(x.alwaysTools),alwaysServers:stringArray(x.alwaysServers) }; }
+function validatedRuntimeDefaults(value: unknown):Team["runtimeDefaults"] {
+  if (!isRecord(value)) return {};
+  const defaults:Team["runtimeDefaults"] = {};
+  if (typeof value.modelContextTokens === "number" && Number.isSafeInteger(value.modelContextTokens) && value.modelContextTokens >= 1_000 && value.modelContextTokens <= 10_000_000) defaults.modelContextTokens = value.modelContextTokens;
+  if (typeof value.autoCompactRatio === "number" && Number.isFinite(value.autoCompactRatio) && value.autoCompactRatio >= 0.1 && value.autoCompactRatio <= 0.9) defaults.autoCompactRatio = value.autoCompactRatio;
+  if (typeof value.autoCompactEnabled === "boolean") defaults.autoCompactEnabled = value.autoCompactEnabled;
+  if (Array.isArray(value.mcpToolAllowlist)) defaults.mcpToolAllowlist = value.mcpToolAllowlist.filter((item):item is string => typeof item === "string" && item.length <= 512).slice(0, 500);
+  return defaults;
+}
 function legacyPermissionDecision(value: unknown): PermissionDecision | null {
   if (value === "approved") return "allow_once";
   return typeof value === "string" && ["allow_once", "allow_always_tool", "allow_always_server", "rejected"].includes(value)

@@ -256,6 +256,35 @@ const migrations: Migration[] = [
       END;
     `,
   },
+  {
+    version: 2,
+    name: "team_config_templates",
+    sql: `
+      CREATE TABLE team_config_templates (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        description TEXT NOT NULL DEFAULT '',
+        workspace_mode TEXT NOT NULL CHECK (workspace_mode IN ('shared', 'isolated')),
+        model_context_tokens INTEGER NOT NULL CHECK (model_context_tokens >= 1000),
+        auto_compact_ratio REAL NOT NULL CHECK (auto_compact_ratio >= 0.1 AND auto_compact_ratio <= 0.9),
+        auto_compact_enabled INTEGER NOT NULL CHECK (auto_compact_enabled IN (0, 1)),
+        mcp_tool_allowlist_json TEXT NOT NULL DEFAULT '[]',
+        created_by TEXT NOT NULL REFERENCES users(id),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        CHECK (json_valid(mcp_tool_allowlist_json))
+      ) STRICT;
+      CREATE INDEX team_config_templates_updated_idx ON team_config_templates(updated_at DESC, id DESC);
+    `,
+  },
+  {
+    version: 3,
+    name: "team_runtime_defaults",
+    sql: `
+      ALTER TABLE teams ADD COLUMN runtime_defaults_json TEXT NOT NULL DEFAULT '{}'
+        CHECK (json_valid(runtime_defaults_json));
+    `,
+  },
 ];
 
 export function migrateSchema(database: Database.Database): void {

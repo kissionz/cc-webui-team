@@ -9,7 +9,11 @@
     "dev": "node --watch --import tsx src/server.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.client.json",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "db:backup": "node dist/ops/database-cli.js backup",
+    "db:restore": "node dist/ops/database-cli.js restore",
+    "db:verify": "node dist/ops/database-cli.js verify"
   },
   "engines": {
     "node": ">=24"
@@ -19,6 +23,7 @@
     "better-sqlite3": "^13.0.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^24.13.3",
     "esbuild": "^0.28.2",

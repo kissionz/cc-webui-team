@@ -2,6 +2,8 @@ data/
 workspaces/
 node_modules/
 dist/
+test-results/
+playwright-report/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal

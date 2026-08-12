@@ -38,10 +38,19 @@ export class SqliteRuntimeStore implements SessionRuntimeStore {
     return this.repository.getAgent(agentId);
   }
 
-  async getConfig(): Promise<ClaudeConfig> {
+  async getConfig(teamId?: string): Promise<ClaudeConfig> {
     const config = this.repository.getClaudeConfig();
     if (!config) throw new Error("Claude runtime configuration is missing.");
-    return config;
+    if (!teamId) return config;
+    const overrides = this.repository.getTeam(teamId)?.runtimeDefaults;
+    if (!overrides) return config;
+    return {
+      ...config,
+      ...(overrides.modelContextTokens === undefined ? {} : { modelContextTokens: overrides.modelContextTokens }),
+      ...(overrides.autoCompactRatio === undefined ? {} : { autoCompactRatio: overrides.autoCompactRatio }),
+      ...(overrides.autoCompactEnabled === undefined ? {} : { autoCompactEnabled: overrides.autoCompactEnabled }),
+      ...(overrides.mcpToolAllowlist === undefined ? {} : { mcpToolAllowlist: [...overrides.mcpToolAllowlist] }),
+    };
   }
 
   async createTurn(turn: Turn): Promise<void> {
