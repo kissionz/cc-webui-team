@@ -64,6 +64,7 @@ export interface AppConfig {
   workspaceRoot: string;
   claudeCommand: string;
   claudeArgs: string[];
+  allowUnsandboxedWindows: boolean;
   adminPassword: string;
   seedDemoUsers: boolean;
   sessionTtlMs: number;
@@ -105,6 +106,7 @@ export function loadConfig(rootDir = process.cwd()): AppConfig {
     workspaceRoot,
     claudeCommand: process.env.CLAUDE_COMMAND ?? "claude",
     claudeArgs: String(process.env.CLAUDE_ARGS || "").split(/\s+/).filter(Boolean),
+    allowUnsandboxedWindows: process.env.CLAUDE_ALLOW_UNSANDBOXED_WINDOWS === "true",
     adminPassword: process.env.ADMIN_PASSWORD || "admin123",
     seedDemoUsers: process.env.SEED_DEMO_USERS === "true",
     sessionTtlMs: positiveInteger("SESSION_TTL_MS", 12 * 60 * 60 * 1000),

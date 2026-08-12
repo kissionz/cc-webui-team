@@ -55,7 +55,12 @@ test("管理员可查看指标、应用模板并批量归档", async ({ page, is
   await expect(page.getByText("团队模板已删除")).toBeVisible();
   await page.getByRole("button", { name: "团队工作台" }).click();
   await page.getByRole("button", { name: "打开工作台" }).click();
+  const sessionRail = page.locator(".session-section .session-list");
+  const sessionRow = page.locator(".session-row").first();
+  expect(await sessionRail.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+  expect((await sessionRow.boundingBox())?.height ?? 0).toBeLessThan(100);
   await page.locator("[data-session-select='session_welcome']").check();
+  expect(await sessionRail.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
   await page.getByRole("button", { name: "归档选中" }).click();
   await expect(page.getByText("已归档 1 个会话")).toBeVisible();
 });

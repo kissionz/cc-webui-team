@@ -35,12 +35,24 @@ let apiServer: ApiServer | undefined;
 const runtime = new ClaudeRuntimeManager({
   store: new SqliteRuntimeStore(repository),
   limits: config.concurrency,
+  allowUnsandboxedFallback: process.platform === "win32" && config.allowUnsandboxedWindows,
   events: {
     publish(event: RuntimeEvent): void {
       apiServer?.publishRuntimeEvent(event);
     },
   },
 });
+if (process.platform === "win32") {
+  if (config.allowUnsandboxedWindows) {
+    logger.warn("runtime.windows_unsandboxed_fallback_enabled", {
+      message: "Claude Code tasks may access files outside the configured workspace. Use only on a trusted Windows host.",
+    });
+  } else {
+    logger.warn("runtime.windows_sandbox_unavailable", {
+      message: "Native Windows does not support the Claude Code sandbox. Use WSL2 or set CLAUDE_ALLOW_UNSANDBOXED_WINDOWS=true to opt in to unsandboxed execution.",
+    });
+  }
+}
 const backups = new BackupScheduler({
   databaseFile: config.databaseFile,
   backupDir: config.backup.directory,

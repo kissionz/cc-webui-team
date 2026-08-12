@@ -818,7 +818,8 @@ select:disabled {
 }
 
 .session-section .session-list {
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   gap: 6px;
   padding: 8px;
 }
@@ -826,6 +827,7 @@ select:disabled {
 .session-group {
   display: grid;
   gap: 4px;
+  min-width: 0;
 }
 
 .session-group-toggle {
@@ -883,6 +885,7 @@ select:disabled {
 .session-group-content {
   display: grid;
   gap: 4px;
+  min-width: 0;
 }
 
 .rail-footer {
@@ -896,6 +899,7 @@ select:disabled {
 
 .session-item {
   width: 100%;
+  min-width: 0;
   min-height: 64px;
   padding: 11px;
   border: 1px solid transparent;
@@ -913,6 +917,11 @@ select:disabled {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 4px;
   align-items: center;
+  min-width: 0;
+}
+
+.session-row.has-selection {
+  grid-template-columns: 28px minmax(0, 1fr) auto;
 }
 
 .session-delete {
@@ -2190,7 +2199,7 @@ select:disabled {
   font-size: 12px;
 }
 
-.session-select { display: grid; place-items: center; flex: 0 0 28px; }
+.session-select { display: grid; place-items: center; width: 28px; min-height: 44px; }
 .session-select input { width: 16px; height: 16px; }
 
 .audit-content { display: grid; gap: 14px; }

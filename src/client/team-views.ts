@@ -276,9 +276,10 @@ function renderSessionGroup(team: Team, group: SessionGroup, activeSession?: Ses
 function renderSessionRow(session: Session, activeSession?: Session): string {
   const archived = Boolean(session.archived || session.archivedAt);
   const batchUnavailable = ["queued", "running", "compacting", "waiting_permission"].includes(session.status);
+  const selectable = isSystemAdmin();
   return `
-    <div class="session-row">
-      ${isSystemAdmin() ? `<label class="session-select" title="${batchUnavailable ? "运行中的会话不能批量归档或恢复" : ""}"><input type="checkbox" data-session-select="${session.id}" ${selectedSessionIds.has(session.id) ? "checked" : ""} ${batchUnavailable ? "disabled" : ""} aria-label="选择会话 ${escapeHtml(titleText(session.title))}" /></label>` : ""}
+    <div class="session-row ${selectable ? "has-selection" : ""}">
+      ${selectable ? `<label class="session-select" title="${batchUnavailable ? "运行中的会话不能批量归档或恢复" : ""}"><input type="checkbox" data-session-select="${session.id}" ${selectedSessionIds.has(session.id) ? "checked" : ""} ${batchUnavailable ? "disabled" : ""} aria-label="选择会话 ${escapeHtml(titleText(session.title))}" /></label>` : ""}
       <button class="session-item ${session.id === activeSession?.id ? "active" : ""}" data-session="${session.id}">
         <strong class="truncate-title" title="${escapeHtml(titleText(session.title))}">${escapeHtml(titleText(session.title))}</strong>
         <div class="meta">${badge(session.status, statusTone(session.status))}${archived ? badge("已归档") : ""}${badge(sessionVisibility(session) === "team" ? "团队可见" : "私有", sessionVisibility(session) === "team" ? "green" : "")}</div>

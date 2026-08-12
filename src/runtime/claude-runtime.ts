@@ -82,6 +82,7 @@ export class ClaudeRuntimeManager {
   private readonly heartbeatSilenceMs: number;
   private readonly streamFlushIntervalMs: number;
   private readonly streamFlushBytes: number;
+  private readonly allowUnsandboxedFallback: boolean;
   private readonly active = new Map<string, ActiveRuntime>();
   private readonly finalizedTurnIds = new Set<string>();
   private turnsSubmitted = 0;
@@ -108,6 +109,7 @@ export class ClaudeRuntimeManager {
     this.heartbeatSilenceMs = options.heartbeatSilenceMs ?? 10_000;
     this.streamFlushIntervalMs = options.streamFlushIntervalMs ?? 75;
     this.streamFlushBytes = options.streamFlushBytes ?? 8 * 1024;
+    this.allowUnsandboxedFallback = options.allowUnsandboxedFallback === true;
     this.permissions = new RuntimePermissionBroker({
       store: this.store,
       getRuntime: (sessionId) => this.active.get(sessionId),
@@ -339,7 +341,7 @@ export class ClaudeRuntimeManager {
       },
       sandbox: {
         enabled: true,
-        failIfUnavailable: true,
+        failIfUnavailable: !this.allowUnsandboxedFallback,
         allowUnsandboxedCommands: false,
         autoAllowBashIfSandboxed: false,
         filesystem: {

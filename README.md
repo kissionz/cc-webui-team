@@ -87,6 +87,7 @@ Windows 可运行 `scripts/prepare-host-claude.ps1`。包含宿主机绝对路�
 - `COOKIE_SECURE=true`：HTTPS 部署必须开启。
 - `MAX_CONCURRENT_TURNS`、`MAX_CONCURRENT_TURNS_PER_TEAM`、`MAX_CONCURRENT_TURNS_PER_USER`：三级并发上限。
 - `CLAUDE_COMMAND`：通常留空或写 `claude`，让 SDK 使用自带运行时；只有使用明确存在的自定义可执行文件时才填写路径。
+- `CLAUDE_ALLOW_UNSANDBOXED_WINDOWS`：Windows 原生环境不支持 Claude Code sandbox。推荐改用 WSL2；仅当主机和团队成员均受信任时才设为 `true`，允许 SDK 无沙箱回退。
 - `MCP_TOOL_ALLOWLIST`：平台预授权工具；其余工具由会话内审批。
 - `BACKUP_ENABLED`、`BACKUP_INTERVAL_HOURS`、`BACKUP_RETENTION`：在线备份开关、周期和保留数量。
 

@@ -139,6 +139,8 @@ export interface ClaudeRuntimeOptions {
   permissionTtlMs?: number;
   streamFlushIntervalMs?: number;
   streamFlushBytes?: number;
+  /** Explicitly permits SDK execution when the platform sandbox is unavailable. */
+  allowUnsandboxedFallback?: boolean;
 }
 
 export interface RuntimeMetricsSnapshot {

@@ -223,6 +223,28 @@ describe("Claude runtime pure helpers", () => {
 });
 
 describe("ClaudeRuntimeManager", () => {
+  test("requires the sandbox by default and only allows fallback after explicit opt-in", async () => {
+    for (const allowUnsandboxedFallback of [false, true]) {
+      const store = new MemoryStore();
+      let failIfUnavailable: boolean | undefined;
+      const manager = new ClaudeRuntimeManager({
+        store,
+        events: { publish: () => undefined },
+        limits: { global: 1, perTeam: 1, perUser: 1 },
+        allowUnsandboxedFallback,
+        queryFactory: ({ options }) => {
+          failIfUnavailable = options.sandbox?.failIfUnavailable;
+          return (async function* () {
+            yield { type: "result", result: "done", is_error: false, session_id: "resume-me" };
+          })();
+        },
+      });
+      const turn = await manager.submit({ sessionId: "session-1", teamId: "team-1", userId: "user-1", prompt: "sandbox policy" });
+      await waitFor(() => store.turns.get(turn.id)?.status === "completed");
+      expect(failIfUnavailable).toBe(!allowUnsandboxedFallback);
+    }
+  });
+
   test("coalesces burst deltas and flushes them before turn completion", async () => {
     const store = new MemoryStore();
     const events: RuntimeEvent[] = [];
