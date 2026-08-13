@@ -162,15 +162,16 @@
 .sync-scope-options { display: flex; flex-wrap: wrap; gap: 10px 20px; margin-bottom: 12px; }
 .sync-scope-options label { display: flex; align-items: center; gap: 7px; color: var(--muted); }
 .sync-project-scope input { accent-color: var(--brand); }
-.sync-project-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); max-height: 220px; overflow: auto; border: 1px solid var(--line); border-radius: 7px; background: var(--panel-soft); }
-.sync-project-option { display: flex; align-items: flex-start; gap: 9px; min-width: 0; padding: 10px 12px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.sync-project-list { display: grid; grid-template-columns: minmax(0, 1fr); max-height: 320px; overflow: auto; border: 1px solid var(--line); border-radius: 7px; background: var(--panel-soft); }
+.sync-project-option { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px; min-width: 0; min-height: 48px; padding: 9px 12px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.sync-project-option:last-child { border-bottom: 0; }
 .sync-project-option:hover { background: var(--brand-soft); }
 .sync-project-option.readonly { cursor: default; }
 .sync-project-option.readonly:hover { background: transparent; }
 .sync-project-option.readonly input { opacity: .68; }
-.sync-project-option span { display: grid; min-width: 0; gap: 2px; }
-.sync-project-option strong, .sync-project-option small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sync-project-option small { color: var(--subtle); }
+.sync-project-option span { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; min-width: 0; gap: 12px; }
+.sync-project-option strong { min-width: 0; overflow-wrap: anywhere; }
+.sync-project-option small { color: var(--subtle); white-space: nowrap; }
 .sync-project-scope > .helper { margin: 10px 0 0; }
 .sync-diagnostic { border: 1px solid #b9d2f5; border-radius: 8px; background: #f5f9ff; }
 .sync-diagnostic > summary { padding: 11px 13px; color: #174d8e; font-weight: 720; cursor: pointer; }

@@ -105,10 +105,26 @@ test("移动端导航与会话抽屉可通过按钮开关", async ({ page, isMob
 
 test("数据同步集中配置后可查询血缘并手动触发", async ({ page, isMobile }) => {
   await login(page);
+  await page.route("**/api/lineage/status", async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.config.discoveredProjects = [
+      { name: "btn_datalake_customer_service_long_project_name", status: "NORMAL", region: "cn-shanghai" },
+      { name: "btn_billing", status: "NORMAL", region: "cn-shanghai" },
+    ];
+    await route.fulfill({ response, json: body });
+  });
   if (isMobile) await page.getByRole("button", { name: "打开导航" }).click();
   await page.getByRole("button", { name: "系统设置" }).click();
   await page.locator(".system-subnav [data-view='sync']").click();
-  await page.getByLabel("Project").fill("analytics");
+  const projectRows = page.locator(".sync-project-option");
+  await expect(projectRows).toHaveCount(2);
+  const firstRow = await projectRows.nth(0).boundingBox();
+  const secondRow = await projectRows.nth(1).boundingBox();
+  expect(Math.abs((firstRow?.x ?? 0) - (secondRow?.x ?? 0))).toBeLessThan(2);
+  expect((secondRow?.y ?? 0)).toBeGreaterThan((firstRow?.y ?? 0) + (firstRow?.height ?? 0) - 2);
+  await expect(projectRows.nth(0).getByText("btn_datalake_customer_service_long_project_name")).toBeVisible();
+  await page.getByLabel("执行项目").fill("analytics");
   await page.getByLabel("Endpoint").fill("https://service.cn-shanghai.maxcompute.aliyun.com/api");
   await page.getByLabel("AccessKey ID").fill("LTAI-e2e-test");
   await page.getByLabel("AccessKey Secret").fill("e2e-secret-value");
