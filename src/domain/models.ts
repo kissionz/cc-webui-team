@@ -233,12 +233,22 @@ export interface ClaudeConfig {
 }
 
 export type MaxComputeSyncStatus = "idle" | "running" | "success" | "failed";
+export type MaxComputeCollectionMode = "all" | "selected";
+
+export interface MaxComputeProject {
+  name: string;
+  status: string;
+  region: string;
+}
 
 export interface MaxComputeConfig {
   enabled: boolean;
   command: string;
   args: string;
   project: string;
+  collectionMode: MaxComputeCollectionMode;
+  collectionProjects: string[];
+  discoveredProjects: MaxComputeProject[];
   endpoint: string;
   credentialCiphertext: string | null;
   credentialUpdatedAt: Timestamp | null;

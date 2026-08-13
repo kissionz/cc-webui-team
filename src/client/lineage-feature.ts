@@ -6,6 +6,7 @@ import type {
 
 interface LineageStatus { config: MaxComputeConfigView | null; running: boolean; runs: LineageSyncRun[] }
 interface LineageDetail { table: LineageTable; columns: LineageColumn[]; relations: { upstream: number; downstream: number } }
+interface ConnectionDiagnostic { stdout: string; stderr: string; parsed: Array<{ name: string; status: string; region: string }> }
 
 export interface LineageFeatureDeps {
   state(): AppState;
@@ -30,6 +31,7 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
   let columnText = "";
   let graphLoading = false;
   let analysisLoading = false;
+  let connectionDiagnostic: ConnectionDiagnostic | null = null;
   let searchTimer: number | undefined;
   let zoom = 1;
 
@@ -89,20 +91,27 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
     const credentialState = config.credentialConfigured
       ? `<span class="sync-pill success"><i></i>已保存 ${deps.escape(config.accessKeyIdMasked || "AccessKey")}</span>`
       : `<span class="sync-pill neutral"><i></i>尚未配置凭据</span>`;
+    const discovered = config.discoveredProjects || [];
+    const selected = new Set(config.collectionProjects?.length ? config.collectionProjects : discovered.map((project) => project.name));
+    const projectChoices = discovered.length
+      ? discovered.map((project) => `<label class="sync-project-option"><input type="checkbox" name="collectionProjects" value="${deps.escape(project.name)}" ${selected.has(project.name) ? "checked" : ""} /><span><strong>${deps.escape(project.name)}</strong><small>${deps.escape([project.region, project.status].filter(Boolean).join(" · ") || "可访问")}</small></span></label>`).join("")
+      : '<p class="empty-inline">保存连接后点击“发现项目”，系统会读取当前 AK 可见的项目。</p>';
+    const diagnostic = connectionDiagnostic ? `<details class="sync-diagnostic" open><summary>最近一次采集预览</summary><div><div class="diagnostic-summary"><span>${connectionDiagnostic.parsed.length} 个项目已解析</span><small>仅显示连接验证的 CATALOGS 查询，不包含 AccessKey</small></div><pre>${deps.escape(connectionDiagnostic.stdout || connectionDiagnostic.stderr || "命令执行成功，但客户端未返回控制台文本。")}</pre><details><summary>查看解析后的 JSON</summary><pre>${deps.escape(JSON.stringify(connectionDiagnostic.parsed, null, 2))}</pre></details></div></details>` : "";
     return `<section class="content data-sync-page">
       <div class="sync-overview">
-        <article class="card sync-summary-card"><span>连接状态</span><strong>${credentialState}</strong><small>${config.endpoint ? deps.escape(config.endpoint) : "请配置服务 Endpoint"}</small></article>
+        <article class="card sync-summary-card"><span>连接状态</span><strong>${credentialState}</strong><small>${discovered.length ? `已发现 ${discovered.length} 个可访问项目` : (config.endpoint ? deps.escape(config.endpoint) : "请配置服务 Endpoint")}</small></article>
         <article class="card sync-summary-card"><span>自动调度</span><strong>${config.enabled ? `每天 ${deps.escape(config.scheduleTime)}` : "已关闭"}</strong><small>${config.nextRunAt ? `下次 ${deps.fmt(config.nextRunAt)}` : "保存后计算下次执行时间"}</small></article>
         <article class="card sync-summary-card"><span>最近同步</span><strong>${lastRun ? (lastRun.status === "success" ? "成功" : lastRun.status === "failed" ? "失败" : "运行中") : "尚未执行"}</strong><small>${lastRun ? `${lastRun.tablesProcessed} 张表 · ${lastRun.edgesProcessed} 条关系` : "可保存配置后手动触发"}</small></article>
       </div>
       <div class="sync-settings-grid">
         <form class="card card-padding-lg data-source-form" data-form="lineage-config">
           <div class="section-title"><div><h3>MaxCompute 数据源</h3><p class="helper">AccessKey 加密保存，运行 odpscmd 时仅写入权限为 0600 的临时配置文件，任务结束立即删除。</p></div>${credentialState}</div>
-          <div class="grid two"><div class="field"><label for="mc-project">Project</label><input class="input" id="mc-project" name="project" value="${deps.escape(config.project)}" placeholder="your_maxcompute_project" required /></div><div class="field"><label for="mc-endpoint">Endpoint</label><input class="input" id="mc-endpoint" name="endpoint" type="url" value="${deps.escape(config.endpoint || "")}" placeholder="https://service.cn-shanghai.maxcompute.aliyun.com/api" required /></div></div>
+          <div class="grid two"><div class="field"><label for="mc-project">执行项目</label><input class="input" id="mc-project" name="project" value="${deps.escape(config.project)}" placeholder="用于发起 Information Schema 查询" required /><small class="helper">只用于承载查询和计费，不限制采集范围。</small></div><div class="field"><label for="mc-endpoint">Endpoint</label><input class="input" id="mc-endpoint" name="endpoint" type="url" value="${deps.escape(config.endpoint || "")}" placeholder="https://service.cn-shanghai.maxcompute.aliyun.com/api" required /></div></div>
           <div class="grid two"><div class="field"><label for="mc-ak-id">AccessKey ID</label><input class="input" id="mc-ak-id" name="accessKeyId" autocomplete="off" placeholder="${deps.escape(config.accessKeyIdMasked || "留空则保留现有凭据")}" /></div><div class="field"><label for="mc-ak-secret">AccessKey Secret</label><input class="input" id="mc-ak-secret" name="accessKeySecret" type="password" autocomplete="new-password" placeholder="${config.credentialConfigured ? "留空则保留现有凭据" : "请输入 AccessKey Secret"}" /></div></div>
+          <fieldset class="sync-project-scope"><legend>采集项目</legend><div class="sync-scope-options"><label><input type="radio" name="collectionMode" value="all" ${config.collectionMode === "all" ? "checked" : ""} />同一元数据中心内全部可见项目</label><label><input type="radio" name="collectionMode" value="selected" ${config.collectionMode === "selected" ? "checked" : ""} />仅采集勾选项目</label></div><div class="sync-project-list">${projectChoices}</div><p class="helper">租户级 Information Schema 会按当前 AK 权限返回项目；不同元数据中心需单独配置数据源。</p></fieldset>
           <div class="sync-schedule-row"><label class="toggle-row"><input type="checkbox" name="enabled" ${config.enabled ? "checked" : ""} />启用每日自动同步</label><div class="field"><label for="mc-schedule">每日执行时间（Asia/Shanghai）</label><input class="input" id="mc-schedule" type="time" name="scheduleTime" value="${deps.escape(config.scheduleTime)}" required /></div></div>
           <details class="advanced-settings"><summary>高级执行设置</summary><div class="grid two"><div class="field"><label for="mc-command">odpscmd 命令</label><input class="input" id="mc-command" name="command" value="${deps.escape(config.command || "odpscmd")}" placeholder="Windows 可填写 C:\\MaxCompute\\bin\\odpscmd.bat" required /><small class="helper">Windows 直接填写 odpscmd.bat 的绝对路径，不要再填写 cmd.exe。</small></div><div class="field"><label for="mc-args">额外启动参数</label><input class="input" id="mc-args" name="args" value="${deps.escape(config.args || "")}" placeholder="通常留空" /><small class="helper">系统会自动传入临时配置、Project 和 SQL 文件。</small></div></div></details>
-          <div class="form-actions"><button class="button primary" type="submit">保存数据源与调度</button><button class="button" type="button" data-action="lineage-test-connection">验证连接</button><button class="button" type="button" data-action="lineage-sync" ${status?.running ? "disabled" : ""}>${status?.running ? "正在同步" : "立即同步"}</button></div>
+          ${diagnostic}<div class="form-actions"><button class="button primary" type="submit">保存数据源与调度</button><button class="button" type="button" data-action="lineage-test-connection">发现项目并验证连接</button><button class="button" type="button" data-action="lineage-sync" ${status?.running ? "disabled" : ""}>${status?.running ? "正在同步" : "立即同步"}</button></div>
         </form>
         <aside class="card card-padding-lg sync-history"><div class="section-title"><h3>最近执行</h3><span class="meta">数据日期 T-1</span></div><div class="sync-run-list">${status?.runs.map((run) => `<div class="sync-run-row"><span class="run-dot ${run.status}"></span><div><strong>${run.trigger === "manual" ? "手动同步" : "自动调度"}</strong><small>${deps.fmt(run.startedAt)} · 数据日 ${deps.escape(run.dataDate)}</small></div><span>${run.status === "success" ? "成功" : run.status === "failed" ? "失败" : "运行中"}</span></div>`).join("") || '<p class="empty-inline">暂无执行记录</p>'}</div>${config.lastError ? `<div class="inline-alert error"><strong>最近同步失败</strong><span>${deps.escape(config.lastError)}</span></div>` : ""}<div class="security-note"><strong>凭据安全</strong><p>生产环境建议设置 <code>CREDENTIAL_ENCRYPTION_KEY</code> 并使用独立 RAM 用户、最小权限和定期轮换。页面与接口不会回传 Secret。</p></div></aside>
       </div>
@@ -206,18 +215,22 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
     } finally { graphLoading = false; deps.scheduleRender(); }
   }
 
-  async function saveConfig(form: HTMLFormElement): Promise<void> {
+  async function saveConfig(form: HTMLFormElement, announce = true): Promise<void> {
     const data = new FormData(form);
-    const response = await api<{ config: MaxComputeConfigView }>("/api/lineage/config", { method: "PATCH", body: JSON.stringify({ enabled: data.get("enabled") === "on", project: String(data.get("project") || ""), endpoint: String(data.get("endpoint") || ""), accessKeyId: String(data.get("accessKeyId") || ""), accessKeySecret: String(data.get("accessKeySecret") || ""), scheduleTime: String(data.get("scheduleTime") || ""), command: String(data.get("command") || ""), args: String(data.get("args") || "") }) });
+    const response = await api<{ config: MaxComputeConfigView }>("/api/lineage/config", { method: "PATCH", body: JSON.stringify({ enabled: data.get("enabled") === "on", project: String(data.get("project") || ""), collectionMode: String(data.get("collectionMode") || "all"), collectionProjects: data.getAll("collectionProjects").map(String), endpoint: String(data.get("endpoint") || ""), accessKeyId: String(data.get("accessKeyId") || ""), accessKeySecret: String(data.get("accessKeySecret") || ""), scheduleTime: String(data.get("scheduleTime") || ""), command: String(data.get("command") || ""), args: String(data.get("args") || "") }) });
     status = { ...(status ?? { running: false, runs: [] }), config: response.config };
-    deps.toast("同步设置已保存", "success");
+    if (announce) deps.toast("同步设置已保存", "success");
     deps.scheduleRender();
   }
 
   async function testConnection(): Promise<void> {
-    const result = await api<{ connected: boolean; latencyMs: number }>("/api/lineage/connection-test", { method: "POST", body: "{}" });
-    deps.toast(`MaxCompute 连接成功（${result.latencyMs} ms）`, "success");
+    const form = document.querySelector<HTMLFormElement>('[data-form="lineage-config"]');
+    if (form) await saveConfig(form, false);
+    const result = await api<{ connected: boolean; latencyMs: number; projects: Array<{ name: string; status: string; region: string }>; diagnostic: ConnectionDiagnostic }>("/api/lineage/connection-test", { method: "POST", body: "{}" });
+    connectionDiagnostic = result.diagnostic;
+    deps.toast(`连接成功，发现 ${result.projects.length} 个项目（${result.latencyMs} ms）`, "success");
     await load();
+    deps.scheduleRender();
   }
 
   async function triggerSync(): Promise<void> {

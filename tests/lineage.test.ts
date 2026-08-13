@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ClaudeConfig, MaxComputeConfig } from "../src/domain/index.js";
 import { ColumnLineageAnalyzer } from "../src/lineage/column-analyzer.js";
-import { decodeOdpsOutput, parseOdpsRows, resolveOdpsInvocation, type MaxComputeQueryClient, type MaxComputeRow } from "../src/lineage/maxcompute-client.js";
+import { decodeOdpsOutput, parseOdpsRows, parseOdpsRowsFromChannels, resolveOdpsInvocation, type MaxComputeQueryClient, type MaxComputeRow } from "../src/lineage/maxcompute-client.js";
 import { LineageScheduler, nextShanghaiRun, previousShanghaiDate } from "../src/lineage/scheduler.js";
 import { LineageSyncService, parseTableList } from "../src/lineage/sync-service.js";
 import { PersistenceRepository } from "../src/persistence/index.js";
@@ -31,6 +31,9 @@ function config(overrides: Partial<MaxComputeConfig> = {}): MaxComputeConfig {
     command: "odpscmd",
     args: "--config=/run/secrets/odps.ini",
     project: "analytics",
+    collectionMode: "all",
+    collectionProjects: [],
+    discoveredProjects: [],
     endpoint: "https://service.cn-shanghai.maxcompute.aliyun.com/api",
     credentialCiphertext: null,
     credentialUpdatedAt: null,
@@ -52,18 +55,18 @@ class FixtureClient implements MaxComputeQueryClient {
 
   async query(statement: string): Promise<MaxComputeRow[]> {
     this.sql.push(statement);
-    if (statement.includes("INFORMATION_SCHEMA.tables ")) return [{
+    if (statement.includes("INFORMATION_SCHEMA.tables")) return [{
       table_catalog: "analytics", table_name: "dws_sales", table_type: "MANAGED_TABLE", table_comment: "销售汇总",
       owner_id: "owner-1", owner_name: "alice", is_partitioned: "true", create_time: "2025-01-01 08:00:00",
       last_modified_time: "", last_access_time: "", data_length: "", lifecycle: "30", storage_tier: "standard",
       cluster_type: "RANGE", number_buckets: "16", has_primary_key: "false", is_transactional: "false",
       is_delta_table: "false", table_storage: "native", table_format: "ORC",
     }];
-    if (statement.includes("INFORMATION_SCHEMA.columns ")) return [
+    if (statement.includes("INFORMATION_SCHEMA.columns")) return [
       { table_catalog: "analytics", table_name: "dws_sales", column_name: "customer_id", ordinal_position: "1", data_type: "STRING", column_comment: "客户", is_nullable: "true", is_partition_key: "false", is_primary_key: "false" },
       { table_catalog: "analytics", table_name: "dws_sales", column_name: "ds", ordinal_position: "2", data_type: "STRING", column_comment: "日期", is_nullable: "true", is_partition_key: "true", is_primary_key: "false" },
     ];
-    if (statement.includes("INFORMATION_SCHEMA.partitions ")) return [{ table_catalog: "analytics", table_name: "dws_sales", partition_count: "38", data_length: "4096", last_modified_time: "2026-08-12 06:10:00", last_access_time: "2026-08-12 09:00:00" }];
+    if (statement.includes("INFORMATION_SCHEMA.partitions")) return [{ table_catalog: "analytics", table_name: "dws_sales", partition_count: "38", data_length: "4096", last_modified_time: "2026-08-12 06:10:00", last_access_time: "2026-08-12 09:00:00" }];
     if (statement.includes("INFORMATION_SCHEMA.table_access_info")) return [{ table_catalog: "analytics", table_name: "dws_sales", access_count: "12", access_bytes: "2048", ds: "20260812" }];
     if (statement.includes("INFORMATION_SCHEMA.tasks_history")) return [{
       task_name: "sales_daily", task_type: "SQL", inst_id: "inst-001", status: "Terminated", owner_name: "scheduler",
@@ -109,6 +112,9 @@ describe("MaxCompute table lineage sync", () => {
 
   it("includes a compact output summary when odpscmd returns an unknown format", () => {
     expect(() => parseOdpsRows("unexpected console output", ["table_catalog"])).toThrow("输出摘要：unexpected console output");
+    expect(parseOdpsRowsFromChannels("", "TABLE_CATALOG\tTABLE_NAME\r\nanalytics\tdws_sales\r\n", ["table_catalog", "table_name"])).toEqual([
+      { table_catalog: "analytics", table_name: "dws_sales" },
+    ]);
   });
 
   it("persists rich metadata and derives idempotent input-to-output edges", async () => {
@@ -135,6 +141,20 @@ describe("MaxCompute table lineage sync", () => {
       "p.ods_order", "p.dwd_order", "p.local_table",
     ]);
     expect(parseTableList("p.custom.fact", "p")).toEqual([]);
+  });
+
+  it("queries every visible project or a selected project list from tenant Information Schema", async () => {
+    const repo = await repository();
+    const allProjects = new FixtureClient();
+    await new LineageSyncService({ repository: repo, client: allProjects, project: "analytics", projects: null, now: () => now }).sync("20260812");
+    expect(allProjects.sql.find((sql) => sql.includes("INFORMATION_SCHEMA.tables"))).not.toContain("WHERE table_catalog");
+    expect(allProjects.sql.find((sql) => sql.includes("INFORMATION_SCHEMA.tasks_history"))).toContain("SELECT task_catalog");
+
+    const selected = new FixtureClient();
+    await new LineageSyncService({ repository: repo, client: selected, project: "analytics", projects: ["analytics", "finance"], now: () => now }).sync("20260812");
+    expect(selected.sql.find((sql) => sql.includes("INFORMATION_SCHEMA.tables"))).toContain("table_catalog IN ('analytics', 'finance')");
+    expect(selected.sql.find((sql) => sql.includes("INFORMATION_SCHEMA.tasks_history"))).toContain("task_catalog IN ('analytics', 'finance')");
+    repo.close();
   });
 });
 

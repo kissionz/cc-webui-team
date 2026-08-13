@@ -157,6 +157,25 @@
 .advanced-settings summary { padding: 10px 12px; color: var(--muted); font-weight: 700; cursor: pointer; }
 .advanced-settings[open] summary { border-bottom: 1px solid var(--line); }
 .advanced-settings > div { padding: 12px; }
+.sync-project-scope { min-width: 0; margin: 0; padding: 14px; border: 1px solid var(--line); border-radius: 8px; }
+.sync-project-scope legend { padding: 0 6px; color: var(--text); font-weight: 720; }
+.sync-scope-options { display: flex; flex-wrap: wrap; gap: 10px 20px; margin-bottom: 12px; }
+.sync-scope-options label { display: flex; align-items: center; gap: 7px; color: var(--muted); }
+.sync-project-scope input { accent-color: var(--brand); }
+.sync-project-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); max-height: 220px; overflow: auto; border: 1px solid var(--line); border-radius: 7px; background: var(--panel-soft); }
+.sync-project-option { display: flex; align-items: flex-start; gap: 9px; min-width: 0; padding: 10px 12px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.sync-project-option:hover { background: var(--brand-soft); }
+.sync-project-option span { display: grid; min-width: 0; gap: 2px; }
+.sync-project-option strong, .sync-project-option small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sync-project-option small { color: var(--subtle); }
+.sync-project-scope > .helper { margin: 10px 0 0; }
+.sync-diagnostic { border: 1px solid #b9d2f5; border-radius: 8px; background: #f5f9ff; }
+.sync-diagnostic > summary { padding: 11px 13px; color: #174d8e; font-weight: 720; cursor: pointer; }
+.sync-diagnostic > div { display: grid; gap: 10px; padding: 0 13px 13px; }
+.diagnostic-summary { display: flex; justify-content: space-between; gap: 12px; color: #335780; }
+.diagnostic-summary small { color: #526f91; }
+.sync-diagnostic pre { max-height: 220px; margin: 0; padding: 12px; overflow: auto; border: 1px solid #d6e4f7; border-radius: 6px; background: #fff; color: #203a5b; font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
+.sync-diagnostic details summary { color: #335780; cursor: pointer; }
 .form-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .sync-history { display: grid; gap: 16px; }
 .sync-run-list { display: grid; }

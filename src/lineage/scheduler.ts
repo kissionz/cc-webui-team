@@ -114,7 +114,13 @@ export class LineageScheduler {
     const credential = this.options.secretBox.decrypt<MaxComputeCredentials>(config.credentialCiphertext);
     return withTemporaryOdpsConfig({ ...credential, endpoint: config.endpoint, project: config.project }, async (configPath) => {
       const client = new OdpsCommandClient({ command: config.command, args: config.args, project: config.project, configPath });
-      return new LineageSyncService({ repository: this.options.repository, client, project: config.project, now: this.now }).sync(dataDate);
+      return new LineageSyncService({
+        repository: this.options.repository,
+        client,
+        project: config.project,
+        projects: config.collectionMode === "all" ? null : config.collectionProjects,
+        now: this.now,
+      }).sync(dataDate);
     });
   }
 }

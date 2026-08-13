@@ -17,6 +17,7 @@ export interface LineageSyncServiceOptions {
   repository: PersistenceRepository;
   client: MaxComputeQueryClient;
   project: string;
+  projects?: readonly string[] | null;
   now?: () => number;
 }
 
@@ -26,16 +27,18 @@ export class LineageSyncService {
   constructor(private readonly options: LineageSyncServiceOptions) {
     this.now = options.now ?? Date.now;
     if (!/^[A-Za-z0-9_.-]+$/.test(options.project)) throw new Error("MaxCompute 项目名称格式不正确。");
+    if (options.projects?.some((project) => !/^[A-Za-z0-9_.-]+$/.test(project))) throw new Error("MaxCompute 采集项目名称格式不正确。");
   }
 
   async sync(dataDate: string): Promise<LineageSyncResult> {
     if (!/^\d{8}$/.test(dataDate)) throw new Error("同步日期必须使用 yyyyMMdd 格式。");
+    const projects = this.options.projects === undefined ? [this.options.project] : this.options.projects;
     const [tables, columns, partitions, access, jobs] = await Promise.all([
-      this.options.client.query(tablesSql(this.options.project), TABLE_FIELDS),
-      this.options.client.query(columnsSql(this.options.project), COLUMN_FIELDS),
-      this.options.client.query(partitionsSql(this.options.project), PARTITION_FIELDS),
-      this.options.client.query(accessSql(this.options.project, dataDate), ACCESS_FIELDS),
-      this.options.client.query(tasksSql(this.options.project, dataDate), TASK_FIELDS),
+      this.options.client.query(tablesSql(projects), TABLE_FIELDS),
+      this.options.client.query(columnsSql(projects), COLUMN_FIELDS),
+      this.options.client.query(partitionsSql(projects), PARTITION_FIELDS),
+      this.options.client.query(accessSql(projects, dataDate), ACCESS_FIELDS),
+      this.options.client.query(tasksSql(projects, dataDate), TASK_FIELDS),
     ]);
     const at = this.now();
     const partitionByTable = new Map(partitions.map((row) => [tableId(field(row, "table_catalog"), field(row, "table_name")), row]));
@@ -74,8 +77,9 @@ export class LineageSyncService {
     for (const row of jobs) {
       const instanceId = row.inst_id;
       if (!instanceId || this.options.repository.isLineageJobProcessed(instanceId)) continue;
-      const inputs = parseTableList(row.input_tables, this.options.project);
-      const outputs = parseTableList(row.output_tables, this.options.project);
+      const taskProject = row.task_catalog || this.options.project;
+      const inputs = parseTableList(row.input_tables, taskProject);
+      const outputs = parseTableList(row.output_tables, taskProject);
       const endedAt = maxComputeTime(row.end_time) ?? at;
       this.options.repository.transaction(() => {
         for (const output of outputs) {
@@ -126,48 +130,59 @@ const TABLE_FIELDS = ["table_catalog", "table_name", "table_type", "table_commen
 const COLUMN_FIELDS = ["table_catalog", "table_name", "column_name", "ordinal_position", "data_type", "column_comment", "is_nullable", "is_partition_key", "is_primary_key"] as const;
 const PARTITION_FIELDS = ["table_catalog", "table_name", "partition_count", "data_length", "last_modified_time", "last_access_time"] as const;
 const ACCESS_FIELDS = ["table_catalog", "table_name", "access_count", "access_bytes", "ds"] as const;
-const TASK_FIELDS = ["task_name", "task_type", "inst_id", "status", "owner_name", "end_time", "input_tables", "output_tables", "ext_node_id", "ext_node_name", "ext_node_onduty", "ext_bizdate"] as const;
+const TASK_FIELDS = ["task_catalog", "task_name", "task_type", "inst_id", "status", "owner_name", "end_time", "input_tables", "output_tables", "ext_node_id", "ext_node_name", "ext_node_onduty", "ext_bizdate"] as const;
 
 function cleanText(name: string): string { return `REGEXP_REPLACE(COALESCE(${name}, ''), '[\\\\t\\\\r\\\\n]+', ' ') AS ${name}`; }
 function quote(value: string): string { return `'${value.replaceAll("'", "''")}'`; }
 function timeText(name: string): string { return `COALESCE(TO_CHAR(${name}, 'yyyy-mm-dd hh:mi:ss'), '') AS ${name}`; }
 
-function tablesSql(project: string): string {
+function tablesSql(projects: readonly string[] | null): string {
   return `SELECT table_catalog, table_name, table_type, ${cleanText("table_comment")}, owner_id, owner_name,
     CAST(is_partitioned AS STRING) AS is_partitioned, ${timeText("create_time")}, ${timeText("last_modified_time")},
     ${timeText("last_access_time")}, CAST(data_length AS STRING) AS data_length, CAST(lifecycle AS STRING) AS lifecycle,
     storage_tier, cluster_type, CAST(number_buckets AS STRING) AS number_buckets,
     CAST(has_primary_key AS STRING) AS has_primary_key, CAST(is_transactional AS STRING) AS is_transactional,
     CAST(is_delta_table AS STRING) AS is_delta_table, table_storage, table_format
-    FROM SYSTEM_CATALOG.INFORMATION_SCHEMA.tables WHERE table_catalog=${quote(project)}`;
+    FROM SYSTEM_CATALOG.INFORMATION_SCHEMA.tables${where(catalogFilter("table_catalog", projects))}`;
 }
 
-function columnsSql(project: string): string {
+function columnsSql(projects: readonly string[] | null): string {
   return `SELECT table_catalog, table_name, column_name, CAST(ordinal_position AS STRING) AS ordinal_position,
     data_type, ${cleanText("column_comment")}, CAST(is_nullable AS STRING) AS is_nullable,
     CAST(is_partition_key AS STRING) AS is_partition_key, CAST(is_primary_key AS STRING) AS is_primary_key
-    FROM SYSTEM_CATALOG.INFORMATION_SCHEMA.columns WHERE table_catalog=${quote(project)}`;
+    FROM SYSTEM_CATALOG.INFORMATION_SCHEMA.columns${where(catalogFilter("table_catalog", projects))}`;
 }
 
-function partitionsSql(project: string): string {
+function partitionsSql(projects: readonly string[] | null): string {
   return `SELECT table_catalog, table_name, CAST(COUNT(1) AS STRING) AS partition_count,
     CAST(SUM(data_length) AS STRING) AS data_length,
     COALESCE(TO_CHAR(MAX(last_modified_time), 'yyyy-mm-dd hh:mi:ss'), '') AS last_modified_time,
     COALESCE(TO_CHAR(MAX(last_access_time), 'yyyy-mm-dd hh:mi:ss'), '') AS last_access_time
-    FROM SYSTEM_CATALOG.INFORMATION_SCHEMA.partitions WHERE table_catalog=${quote(project)} GROUP BY table_catalog, table_name`;
+    FROM SYSTEM_CATALOG.INFORMATION_SCHEMA.partitions${where(catalogFilter("table_catalog", projects))} GROUP BY table_catalog, table_name`;
 }
 
-function accessSql(project: string, dataDate: string): string {
+function accessSql(projects: readonly string[] | null, dataDate: string): string {
   return `SELECT table_catalog, table_name, CAST(access_count AS STRING) AS access_count,
     CAST(access_bytes AS STRING) AS access_bytes, ds FROM SYSTEM_CATALOG.INFORMATION_SCHEMA.table_access_info
-    WHERE table_catalog=${quote(project)} AND ds=${quote(dataDate)}`;
+    ${where(catalogFilter("table_catalog", projects), `ds=${quote(dataDate)}`)}`;
 }
 
-function tasksSql(project: string, dataDate: string): string {
-  return `SELECT ${cleanText("task_name")}, task_type, inst_id, status, owner_name, ${timeText("end_time")},
+function tasksSql(projects: readonly string[] | null, dataDate: string): string {
+  return `SELECT task_catalog, ${cleanText("task_name")}, task_type, inst_id, status, owner_name, ${timeText("end_time")},
     ${cleanText("input_tables")}, ${cleanText("output_tables")}, ext_node_id, ${cleanText("ext_node_name")},
     ext_node_onduty, ext_bizdate FROM SYSTEM_CATALOG.INFORMATION_SCHEMA.tasks_history
-    WHERE task_catalog=${quote(project)} AND ds=${quote(dataDate)} AND task_type IN ('SQL','SQLRT')`;
+    ${where(catalogFilter("task_catalog", projects), `ds=${quote(dataDate)}`, "task_type IN ('SQL','SQLRT')")}`;
+}
+
+function catalogFilter(field: string, projects: readonly string[] | null): string {
+  if (projects === null) return "";
+  if (!projects.length) return "1=0";
+  return `${field} IN (${projects.map(quote).join(", ")})`;
+}
+
+function where(...conditions: string[]): string {
+  const filtered = conditions.filter(Boolean);
+  return filtered.length ? ` WHERE ${filtered.join(" AND ")}` : "";
 }
 
 function tableFromRows(row: MaxComputeRow, partition: MaxComputeRow | undefined, current: LineageTable | null, at: number): LineageTable {

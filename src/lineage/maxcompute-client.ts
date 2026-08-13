@@ -21,6 +21,12 @@ export interface OdpsCommandClientOptions {
   project: string;
   configPath?: string;
   timeoutMs?: number;
+  onOutput?: (output: OdpsCommandOutput) => void;
+}
+
+export interface OdpsCommandOutput {
+  stdout: string;
+  stderr: string;
 }
 
 export interface MaxComputeCredentials {
@@ -140,16 +146,31 @@ export class OdpsCommandClient implements MaxComputeQueryClient {
       if (outputTooLarge) throw new OdpsCommandError("output_too_large", "odpscmd 返回内容超过 64 MB，已终止本次查询。");
       const stdoutText = decodeOdpsOutput(Buffer.concat(stdout));
       const stderrText = decodeOdpsOutput(Buffer.concat(stderr));
+      this.options.onOutput?.({ stdout: stdoutText, stderr: stderrText });
       if (exitCode !== 0) {
         const detail = stderrText.trim() || stdoutText.trim();
         throw new OdpsCommandError("failed", `odpscmd 查询失败（退出码 ${exitCode}）${detail ? `：${detail.slice(-2_000)}` : ""}`, exitCode);
       }
       if (options.validateOnly) return [];
-      return parseOdpsRows(stdoutText, fields);
+      return parseOdpsRowsFromChannels(stdoutText, stderrText, fields);
     } finally {
       await rm(queryRoot, { recursive: true, force: true });
     }
   }
+}
+
+export function parseOdpsRowsFromChannels(stdout: string, stderr: string, fields: readonly string[]): MaxComputeRow[] {
+  const candidates = [stdout, stderr, `${stdout}\n${stderr}`].filter((value, index, values) => value.trim() && values.indexOf(value) === index);
+  let lastError: unknown;
+  for (const candidate of candidates) {
+    try { return parseOdpsRows(candidate, fields); }
+    catch (error) {
+      if (!(error instanceof OdpsCommandError) || error.kind !== "invalid_output") throw error;
+      lastError = error;
+    }
+  }
+  if (lastError) throw lastError;
+  throw new OdpsCommandError("invalid_output", "odpscmd 查询已执行，但 stdout 和 stderr 均为空。");
 }
 
 export function parseOdpsRows(output: string, fields: readonly string[]): MaxComputeRow[] {

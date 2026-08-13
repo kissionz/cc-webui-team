@@ -438,6 +438,18 @@ const migrations: Migration[] = [
         ('member', 'system', 0, 0);
     `,
   },
+  {
+    version: 6,
+    name: "maxcompute_multi_project_collection",
+    sql: `
+      ALTER TABLE maxcompute_config ADD COLUMN collection_mode TEXT NOT NULL DEFAULT 'all'
+        CHECK (collection_mode IN ('all', 'selected'));
+      ALTER TABLE maxcompute_config ADD COLUMN collection_projects_json TEXT NOT NULL DEFAULT '[]'
+        CHECK (json_valid(collection_projects_json));
+      ALTER TABLE maxcompute_config ADD COLUMN discovered_projects_json TEXT NOT NULL DEFAULT '[]'
+        CHECK (json_valid(discovered_projects_json));
+    `,
+  },
 ];
 
 export function migrateSchema(database: Database.Database): void {

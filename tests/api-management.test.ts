@@ -240,6 +240,13 @@ describe("management API", () => {
     expect(stored?.credentialCiphertext).toMatch(/^v1\./);
     expect(stored?.credentialCiphertext).not.toContain("highly-secret");
 
+    const scoped = await call(api, "PATCH", "/api/lineage/config", "admin-token", {
+      collectionMode: "selected", collectionProjects: ["analytics", "finance"],
+    });
+    expect(scoped.status).toBe(200);
+    expect(JSON.parse(scoped.body).config).toMatchObject({ collectionMode: "selected", collectionProjects: ["analytics", "finance"] });
+    expect(repository.getMaxComputeConfig()).toMatchObject({ collectionMode: "selected", collectionProjects: ["analytics", "finance"] });
+
     const missingClient = await call(api, "PATCH", "/api/lineage/config", "admin-token", { command: "definitely-missing-odpscmd-test" });
     expect(missingClient.status).toBe(200);
     const tested = await call(api, "POST", "/api/lineage/connection-test", "admin-token", {});
@@ -305,6 +312,7 @@ function seed(repository: PersistenceRepository, workspace: string): void {
   repository.saveClaudeConfig(config);
   const maxCompute: MaxComputeConfig = {
     enabled: false, command: "odpscmd", args: "", project: "", endpoint: "", credentialCiphertext: null,
+    collectionMode: "all", collectionProjects: [], discoveredProjects: [],
     credentialUpdatedAt: null, scheduleTime: "06:15", timezone: "Asia/Shanghai", lastStartedAt: null,
     lastCompletedAt: null, lastStatus: "idle", lastError: null, lastDataDate: null, nextRunAt: null, updatedAt: now,
   };

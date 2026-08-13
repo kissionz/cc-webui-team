@@ -620,10 +620,12 @@ export class PersistenceRepository {
     this.database.prepare(`
       INSERT INTO maxcompute_config(singleton, enabled, command, args, project, schedule_time, timezone,
         last_started_at, last_completed_at, last_status, last_error, last_data_date, next_run_at, updated_at,
-        endpoint, credential_ciphertext, credential_updated_at)
+        endpoint, credential_ciphertext, credential_updated_at, collection_mode, collection_projects_json,
+        discovered_projects_json)
       VALUES (1, @enabled, @command, @args, @project, @scheduleTime, @timezone, @lastStartedAt,
         @lastCompletedAt, @lastStatus, @lastError, @lastDataDate, @nextRunAt, @updatedAt,
-        @endpoint, @credentialCiphertext, @credentialUpdatedAt)
+        @endpoint, @credentialCiphertext, @credentialUpdatedAt, @collectionMode, @collectionProjectsJson,
+        @discoveredProjectsJson)
       ON CONFLICT(singleton) DO UPDATE SET enabled=excluded.enabled, command=excluded.command,
         args=excluded.args, project=excluded.project, schedule_time=excluded.schedule_time,
         timezone=excluded.timezone, last_started_at=excluded.last_started_at,
@@ -631,8 +633,15 @@ export class PersistenceRepository {
         last_error=excluded.last_error, last_data_date=excluded.last_data_date,
         next_run_at=excluded.next_run_at, updated_at=excluded.updated_at,
         endpoint=excluded.endpoint, credential_ciphertext=excluded.credential_ciphertext,
-        credential_updated_at=excluded.credential_updated_at
-    `).run({ ...config, enabled: boolInt(config.enabled) });
+        credential_updated_at=excluded.credential_updated_at, collection_mode=excluded.collection_mode,
+        collection_projects_json=excluded.collection_projects_json,
+        discovered_projects_json=excluded.discovered_projects_json
+    `).run({
+      ...config,
+      enabled: boolInt(config.enabled),
+      collectionProjectsJson: json(config.collectionProjects),
+      discoveredProjectsJson: json(config.discoveredProjects),
+    });
   }
 
   getDirectoryPermissions(role: SystemRole): AppDirectory[] {
@@ -1023,7 +1032,7 @@ function permissionFromRow(r: Row): Permission { return { id:str(r.id!), session
 function fileChangeFromRow(r: Row): FileChange { return { id:str(r.id!), sessionId:str(r.session_id!), turnId:nullableStr(r.turn_id!), path:str(r.path!), previousPath:nullableStr(r.previous_path!), changeType:str(r.change_type!) as FileChange["changeType"], additions:nullableNum(r.additions!), deletions:nullableNum(r.deletions!), metadata:jsonObject(r.metadata_json!), createdAt:num(r.created_at!) }; }
 function auditFromRow(r: Row): AuditLog { return { id:str(r.id!), userId:nullableStr(r.user_id!), action:str(r.action!), targetType:str(r.target_type!), targetId:str(r.target_id!), metadata:jsonObject(r.metadata_json!), createdAt:num(r.created_at!) }; }
 function configFromRow(r: Row): ClaudeConfig { return { command:str(r.command!), args:str(r.args!), workspaceRoot:str(r.workspace_root!), modelContextTokens:num(r.model_context_tokens!), autoCompactRatio:num(r.auto_compact_ratio!), autoCompactEnabled:bool(r.auto_compact_enabled!), mcpToolAllowlist:parseJson(r.mcp_tool_allowlist_json!, []), enabled:bool(r.enabled!), available:bool(r.available!), version:str(r.version!), latencyMs:num(r.latency_ms!), authenticated:bool(r.authenticated!), lastCheckAt:nullableNum(r.last_check_at!), healthMessage:nullableStr(r.health_message!), updatedAt:num(r.updated_at!) }; }
-function maxComputeConfigFromRow(r: Row): MaxComputeConfig { return { enabled:bool(r.enabled!), command:str(r.command!), args:str(r.args!), project:str(r.project!), endpoint:str(r.endpoint!), credentialCiphertext:nullableStr(r.credential_ciphertext!), credentialUpdatedAt:nullableNum(r.credential_updated_at!), scheduleTime:str(r.schedule_time!), timezone:"Asia/Shanghai", lastStartedAt:nullableNum(r.last_started_at!), lastCompletedAt:nullableNum(r.last_completed_at!), lastStatus:str(r.last_status!) as MaxComputeConfig["lastStatus"], lastError:nullableStr(r.last_error!), lastDataDate:nullableStr(r.last_data_date!), nextRunAt:nullableNum(r.next_run_at!), updatedAt:num(r.updated_at!) }; }
+function maxComputeConfigFromRow(r: Row): MaxComputeConfig { return { enabled:bool(r.enabled!), command:str(r.command!), args:str(r.args!), project:str(r.project!), collectionMode:str(r.collection_mode!) as MaxComputeConfig["collectionMode"], collectionProjects:parseJson(r.collection_projects_json!, []), discoveredProjects:parseJson(r.discovered_projects_json!, []), endpoint:str(r.endpoint!), credentialCiphertext:nullableStr(r.credential_ciphertext!), credentialUpdatedAt:nullableNum(r.credential_updated_at!), scheduleTime:str(r.schedule_time!), timezone:"Asia/Shanghai", lastStartedAt:nullableNum(r.last_started_at!), lastCompletedAt:nullableNum(r.last_completed_at!), lastStatus:str(r.last_status!) as MaxComputeConfig["lastStatus"], lastError:nullableStr(r.last_error!), lastDataDate:nullableStr(r.last_data_date!), nextRunAt:nullableNum(r.next_run_at!), updatedAt:num(r.updated_at!) }; }
 function lineageTableFromRow(r: Row): LineageTable { return { id:str(r.id!), project:str(r.project_name!), name:str(r.table_name!), type:str(r.table_type!), comment:str(r.table_comment!), ownerId:nullableStr(r.owner_id!), ownerName:nullableStr(r.owner_name!), isPartitioned:bool(r.is_partitioned!), createTime:nullableNum(r.create_time!), lastModifiedTime:nullableNum(r.last_modified_time!), lastAccessTime:nullableNum(r.last_access_time!), dataLength:nullableNum(r.data_length!), partitionCount:num(r.partition_count!), lifecycle:nullableNum(r.lifecycle!), storageTier:nullableStr(r.storage_tier!), clusterType:nullableStr(r.cluster_type!), numberBuckets:nullableNum(r.number_buckets!), hasPrimaryKey:bool(r.has_primary_key!), isTransactional:bool(r.is_transactional!), isDeltaTable:bool(r.is_delta_table!), tableStorage:nullableStr(r.table_storage!), tableFormat:nullableStr(r.table_format!), lastScheduleTime:nullableNum(r.last_schedule_time!), lastScheduleStatus:nullableStr(r.last_schedule_status!), lastTaskName:nullableStr(r.last_task_name!), lastInstanceId:nullableStr(r.last_instance_id!), scheduleOwner:nullableStr(r.schedule_owner!), scheduleNodeId:nullableStr(r.schedule_node_id!), scheduleNodeName:nullableStr(r.schedule_node_name!), scheduleOnDuty:nullableStr(r.schedule_on_duty!), lastBizDate:nullableStr(r.last_biz_date!), accessCount:num(r.access_count!), accessBytes:num(r.access_bytes!), createdAt:num(r.created_at!), updatedAt:num(r.updated_at!) }; }
 function lineageColumnFromRow(r: Row): LineageColumn { return { tableId:str(r.table_id!), name:str(r.column_name!), ordinalPosition:num(r.ordinal_position!), dataType:str(r.data_type!), comment:str(r.column_comment!), nullable:bool(r.is_nullable!), partitionKey:bool(r.is_partition_key!), primaryKey:bool(r.is_primary_key!), updatedAt:num(r.updated_at!) }; }
 function lineageEdgeFromRow(r: Row): LineageEdge { return { sourceTableId:str(r.source_table_id!), targetTableId:str(r.target_table_id!), firstSeenAt:num(r.first_seen_at!), lastSeenAt:num(r.last_seen_at!), occurrenceCount:num(r.occurrence_count!), lastInstanceId:nullableStr(r.last_instance_id!), lastTaskName:nullableStr(r.last_task_name!), lastOwnerName:nullableStr(r.last_owner_name!), lastNodeId:nullableStr(r.last_node_id!), lastNodeName:nullableStr(r.last_node_name!), lastOnDuty:nullableStr(r.last_on_duty!), updatedAt:num(r.updated_at!) }; }

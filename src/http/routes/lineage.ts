@@ -1,12 +1,12 @@
-import { canSeeTeam, isSystemAdmin, type JsonObject, type LineageEdge, type LineageTable, type MaxComputeConfig } from "../../domain/index.js";
+import { canSeeTeam, isSystemAdmin, type JsonObject, type LineageEdge, type LineageTable, type MaxComputeConfig, type MaxComputeProject } from "../../domain/index.js";
 import type { PersistenceRepository } from "../../persistence/index.js";
 import type { ClaudeConfig } from "../../domain/index.js";
 import type { ColumnLineageAnalyzer } from "../../lineage/column-analyzer.js";
 import type { LineageScheduler } from "../../lineage/scheduler.js";
-import { OdpsCommandClient, OdpsCommandError, withTemporaryOdpsConfig, type MaxComputeCredentials } from "../../lineage/maxcompute-client.js";
+import { OdpsCommandClient, OdpsCommandError, withTemporaryOdpsConfig, type MaxComputeCredentials, type OdpsCommandOutput } from "../../lineage/maxcompute-client.js";
 import type { SecretBox } from "../../security/secret-box.js";
 import { HttpError, readJsonBody, sendJson } from "../core.js";
-import { assertOnlyKeys, inputBoolean, inputEnum, inputInteger, inputString, objectBody, optionalQuery, queryInteger } from "../validation.js";
+import { assertOnlyKeys, inputBoolean, inputEnum, inputInteger, inputString, inputStringList, objectBody, optionalQuery, queryInteger } from "../validation.js";
 import type { RouteDefinition, RouteRequest } from "./shared.js";
 import { routeId } from "./shared.js";
 
@@ -52,11 +52,15 @@ export class LineageRoutes {
     const current = this.options.repository.getMaxComputeConfig();
     if (!current) throw new HttpError(500, "MAXCOMPUTE_CONFIG_MISSING", "MaxCompute 配置尚未初始化。");
     const body = objectBody(await readJsonBody(request, this.options.maxBodySize));
-    assertOnlyKeys(body, ["enabled", "command", "args", "project", "endpoint", "scheduleTime", "accessKeyId", "accessKeySecret", "clearCredentials"]);
+    assertOnlyKeys(body, ["enabled", "command", "args", "project", "collectionMode", "collectionProjects", "endpoint", "scheduleTime", "accessKeyId", "accessKeySecret", "clearCredentials"]);
     const scheduleTime = body.scheduleTime === undefined ? current.scheduleTime : inputString(body.scheduleTime, "scheduleTime", 5, 5);
     if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(scheduleTime)) throw new HttpError(400, "INVALID_SCHEDULE_TIME", "调度时间必须使用 HH:mm 格式。");
     const project = body.project === undefined ? current.project : inputString(body.project, "project", 0, 128);
     if (project && !/^[A-Za-z0-9_.-]+$/.test(project)) throw new HttpError(400, "INVALID_PROJECT", "MaxCompute 项目名称格式不正确。");
+    const collectionMode = body.collectionMode === undefined ? current.collectionMode : inputEnum(body.collectionMode, ["all", "selected"] as const, "collectionMode");
+    const collectionProjects = body.collectionProjects === undefined ? current.collectionProjects : inputStringList(body.collectionProjects, "collectionProjects", 500);
+    if (collectionProjects.some((item) => !/^[A-Za-z0-9_.-]+$/.test(item))) throw new HttpError(400, "INVALID_PROJECT", "采集项目名称格式不正确。");
+    if (collectionMode === "selected" && !collectionProjects.length) throw new HttpError(400, "EMPTY_PROJECT_SELECTION", "指定项目模式下至少选择一个采集项目。");
     const endpoint = body.endpoint === undefined ? current.endpoint : validEndpoint(inputString(body.endpoint, "endpoint", 0, 512));
     const accessKeyId = body.accessKeyId === undefined ? "" : inputString(body.accessKeyId, "accessKeyId", 0, 256);
     const accessKeySecret = body.accessKeySecret === undefined ? "" : inputString(body.accessKeySecret, "accessKeySecret", 0, 512);
@@ -73,6 +77,8 @@ export class LineageRoutes {
       command: body.command === undefined ? current.command : inputString(body.command, "command", 1, 512),
       args: body.args === undefined ? current.args : inputString(body.args, "args", 0, 2_000),
       project,
+      collectionMode,
+      collectionProjects,
       endpoint,
       credentialCiphertext,
       credentialUpdatedAt: clearCredentials ? null : accessKeyId ? this.options.now() : current.credentialUpdatedAt,
@@ -82,7 +88,7 @@ export class LineageRoutes {
     this.options.repository.saveMaxComputeConfig(updated);
     this.options.scheduler.reschedule();
     const saved = this.options.repository.getMaxComputeConfig() ?? updated;
-    this.options.audit(auth.user.id, "lineage.config.updated", "maxcompute_config", "singleton", { enabled: saved.enabled, project: saved.project, scheduleTime: saved.scheduleTime });
+    this.options.audit(auth.user.id, "lineage.config.updated", "maxcompute_config", "singleton", { enabled: saved.enabled, project: saved.project, collectionMode: saved.collectionMode, collectionProjects: saved.collectionProjects, scheduleTime: saved.scheduleTime });
     sendJson(response, 200, { config: configDto(saved, true, this.options.secretBox) });
   }
 
@@ -92,10 +98,13 @@ export class LineageRoutes {
     if (!config?.project || !config.endpoint || !config.credentialCiphertext) throw new HttpError(400, "MAXCOMPUTE_CONFIG_INCOMPLETE", "请先保存项目、Endpoint 和 AccessKey。");
     const credential = this.options.secretBox.decrypt<MaxComputeCredentials>(config.credentialCiphertext);
     const startedAt = this.options.now();
+    let output: OdpsCommandOutput = { stdout: "", stderr: "" };
+    let projects: MaxComputeProject[] = [];
     try {
       await withTemporaryOdpsConfig({ ...credential, endpoint: config.endpoint, project: config.project }, async (configPath) => {
-        const client = new OdpsCommandClient({ command: config.command, args: config.args, project: config.project, configPath, timeoutMs: 90_000 });
-        await client.query(`SELECT table_catalog FROM SYSTEM_CATALOG.INFORMATION_SCHEMA.tables WHERE table_catalog='${config.project.replaceAll("'", "''")}' LIMIT 1`, ["table_catalog"], { validateOnly: true });
+        const client = new OdpsCommandClient({ command: config.command, args: config.args, project: config.project, configPath, timeoutMs: 90_000, onOutput: (value) => { output = value; } });
+        const rows = await client.query("SELECT catalog_name, status, region FROM SYSTEM_CATALOG.INFORMATION_SCHEMA.catalogs ORDER BY catalog_name", ["catalog_name", "status", "region"]);
+        projects = rows.map((row) => ({ name: row.catalog_name ?? "", status: row.status ?? "", region: row.region ?? "" })).filter((item) => item.name);
       });
     } catch (error) {
       this.options.audit(auth.user.id, "lineage.connection_tested", "maxcompute_config", "singleton", { project: config.project, endpoint: config.endpoint, success: false });
@@ -105,8 +114,20 @@ export class LineageRoutes {
       }
       throw error;
     }
+    const latest = this.options.repository.getMaxComputeConfig() ?? config;
+    this.options.repository.saveMaxComputeConfig({ ...latest, discoveredProjects: projects, updatedAt: this.options.now() });
     this.options.audit(auth.user.id, "lineage.connection_tested", "maxcompute_config", "singleton", { project: config.project, endpoint: config.endpoint, success: true });
-    sendJson(response, 200, { connected: true, latencyMs: this.options.now() - startedAt, checkedAt: this.options.now() });
+    sendJson(response, 200, {
+      connected: true,
+      latencyMs: this.options.now() - startedAt,
+      checkedAt: this.options.now(),
+      projects,
+      diagnostic: {
+        stdout: diagnosticPreview(output.stdout, credential),
+        stderr: diagnosticPreview(output.stderr, credential),
+        parsed: projects.slice(0, 20),
+      },
+    });
   }
 
   private manualSync({ response, auth }: RouteRequest): void {
@@ -210,6 +231,14 @@ function configDto(config: MaxComputeConfig, admin: boolean, secretBox: SecretBo
 }
 
 function maskAccessKey(value: string): string { return value.length <= 8 ? `${value.slice(0, 2)}••••` : `${value.slice(0, 4)}••••${value.slice(-4)}`; }
+function diagnosticPreview(value: string, credential: MaxComputeCredentials): string {
+  return value
+    .replaceAll(credential.accessKeySecret, "[REDACTED]")
+    .replaceAll(credential.accessKeyId, maskAccessKey(credential.accessKeyId))
+    .replaceAll(/access_key\s*=\s*\S+/gi, "access_key=[REDACTED]")
+    .trim()
+    .slice(-4_000);
+}
 function validEndpoint(value: string): string {
   if (!value) return "";
   try {
