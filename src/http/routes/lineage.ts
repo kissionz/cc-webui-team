@@ -3,7 +3,7 @@ import type { PersistenceRepository } from "../../persistence/index.js";
 import type { ClaudeConfig } from "../../domain/index.js";
 import type { ColumnLineageAnalyzer } from "../../lineage/column-analyzer.js";
 import type { LineageScheduler } from "../../lineage/scheduler.js";
-import { OdpsCommandClient, withTemporaryOdpsConfig, type MaxComputeCredentials } from "../../lineage/maxcompute-client.js";
+import { OdpsCommandClient, OdpsCommandError, withTemporaryOdpsConfig, type MaxComputeCredentials } from "../../lineage/maxcompute-client.js";
 import type { SecretBox } from "../../security/secret-box.js";
 import { HttpError, readJsonBody, sendJson } from "../core.js";
 import { assertOnlyKeys, inputBoolean, inputEnum, inputInteger, inputString, objectBody, optionalQuery, queryInteger } from "../validation.js";
@@ -92,10 +92,19 @@ export class LineageRoutes {
     if (!config?.project || !config.endpoint || !config.credentialCiphertext) throw new HttpError(400, "MAXCOMPUTE_CONFIG_INCOMPLETE", "请先保存项目、Endpoint 和 AccessKey。");
     const credential = this.options.secretBox.decrypt<MaxComputeCredentials>(config.credentialCiphertext);
     const startedAt = this.options.now();
-    await withTemporaryOdpsConfig({ ...credential, endpoint: config.endpoint, project: config.project }, async (configPath) => {
-      const client = new OdpsCommandClient({ command: config.command, args: config.args, project: config.project, configPath, timeoutMs: 90_000 });
-      await client.query(`SELECT table_catalog FROM SYSTEM_CATALOG.INFORMATION_SCHEMA.tables WHERE table_catalog='${config.project.replaceAll("'", "''")}' LIMIT 1`, ["table_catalog"]);
-    });
+    try {
+      await withTemporaryOdpsConfig({ ...credential, endpoint: config.endpoint, project: config.project }, async (configPath) => {
+        const client = new OdpsCommandClient({ command: config.command, args: config.args, project: config.project, configPath, timeoutMs: 90_000 });
+        await client.query(`SELECT table_catalog FROM SYSTEM_CATALOG.INFORMATION_SCHEMA.tables WHERE table_catalog='${config.project.replaceAll("'", "''")}' LIMIT 1`, ["table_catalog"]);
+      });
+    } catch (error) {
+      this.options.audit(auth.user.id, "lineage.connection_tested", "maxcompute_config", "singleton", { project: config.project, endpoint: config.endpoint, success: false });
+      if (error instanceof OdpsCommandError) {
+        const status = error.kind === "not_found" ? 400 : 502;
+        throw new HttpError(status, error.kind === "not_found" ? "ODPSCMD_NOT_FOUND" : "MAXCOMPUTE_CONNECTION_FAILED", error.message);
+      }
+      throw error;
+    }
     this.options.audit(auth.user.id, "lineage.connection_tested", "maxcompute_config", "singleton", { project: config.project, endpoint: config.endpoint, success: true });
     sendJson(response, 200, { connected: true, latencyMs: this.options.now() - startedAt, checkedAt: this.options.now() });
   }

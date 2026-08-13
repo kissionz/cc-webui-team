@@ -135,6 +135,7 @@ npm run db:restore -- \
 - 当前按默认 Schema 使用 `project.table` 标识。运行 `odpscmd` 的账号需要读取租户级 Information Schema 的权限。
 - 字段血缘不入库。每次查询只在所选团队 workspace 内启动一次只读 Claude Code 分析，仅允许 `Read`、`Glob`、`Grep`，并由服务端重新读取真实文件和行号后返回代码片段；缺少可验证代码证据的关系不会展示。
 - Docker 镜像已经包含 Java 17 和官方 `odpscmd`；直接在宿主机运行时需自行安装 Java 8+ 与 [MaxCompute 客户端](https://help.aliyun.com/zh/maxcompute/user-guide/maxcompute-client/)。租户级 Information Schema 授权见[阿里云文档](https://help.aliyun.com/zh/maxcompute/user-guide/tenant-level-information-schema/)。
+- Windows 非 Docker 部署时，在“高级执行设置”的命令栏直接填写 `odpscmd.bat` 的绝对路径（例如 `C:\\MaxCompute\\odpscmd\\bin\\odpscmd.bat`），额外启动参数留空；系统会自动通过 `cmd.exe` 调用批处理，并用临时 SQL 文件执行查询，无需安装 Visual Studio，也不要手动配置 `cmd.exe /c`。
 
 ## 权限与运行模型
 

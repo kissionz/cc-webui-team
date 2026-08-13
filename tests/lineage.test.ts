@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ClaudeConfig, MaxComputeConfig } from "../src/domain/index.js";
 import { ColumnLineageAnalyzer } from "../src/lineage/column-analyzer.js";
-import type { MaxComputeQueryClient, MaxComputeRow } from "../src/lineage/maxcompute-client.js";
+import { decodeOdpsOutput, resolveOdpsInvocation, type MaxComputeQueryClient, type MaxComputeRow } from "../src/lineage/maxcompute-client.js";
 import { LineageScheduler, nextShanghaiRun, previousShanghaiDate } from "../src/lineage/scheduler.js";
 import { LineageSyncService, parseTableList } from "../src/lineage/sync-service.js";
 import { PersistenceRepository } from "../src/persistence/index.js";
@@ -76,6 +76,24 @@ class FixtureClient implements MaxComputeQueryClient {
 }
 
 describe("MaxCompute table lineage sync", () => {
+  it("launches Windows batch clients through cmd.exe without requiring a manual wrapper", () => {
+    expect(resolveOdpsInvocation("C:\\MaxCompute Client\\bin\\odpscmd.bat", ["--project=analytics", "-f", "C:\\Temp\\query.sql"], "win32", "C:\\Windows\\System32\\cmd.exe")).toEqual({
+      command: "C:\\Windows\\System32\\cmd.exe",
+      args: ["/d", "/c", '"C:\\MaxCompute Client\\bin\\odpscmd.bat"', "--project=analytics", "-f", "C:\\Temp\\query.sql"],
+    });
+    expect(resolveOdpsInvocation("odpscmd", [], "win32")).toMatchObject({ command: "cmd.exe", args: ["/d", "/c", "odpscmd"] });
+    expect(resolveOdpsInvocation("C:\\MaxCompute\\odpscmd.exe", ["--help"], "win32")).toEqual({ command: "C:\\MaxCompute\\odpscmd.exe", args: ["--help"] });
+    expect(resolveOdpsInvocation("C:\\Windows\\System32\\cmd.exe", ["/d", "/s", "/c", "C:\\MaxCompute\\odpscmd.bat", "--project=analytics"], "win32")).toEqual({
+      command: "C:\\Windows\\System32\\cmd.exe",
+      args: ["/d", "/c", "C:\\MaxCompute\\odpscmd.bat", "--project=analytics"],
+    });
+  });
+
+  it("decodes UTF-8 and common Chinese Windows odpscmd output", () => {
+    expect(decodeOdpsOutput(Buffer.from("连接成功", "utf8"))).toBe("连接成功");
+    expect(decodeOdpsOutput(Buffer.from([0xb4, 0xed, 0xce, 0xf3]))).toBe("错误");
+  });
+
   it("persists rich metadata and derives idempotent input-to-output edges", async () => {
     const repo = await repository();
     const client = new FixtureClient();

@@ -239,6 +239,12 @@ describe("management API", () => {
     const stored = repository.getMaxComputeConfig();
     expect(stored?.credentialCiphertext).toMatch(/^v1\./);
     expect(stored?.credentialCiphertext).not.toContain("highly-secret");
+
+    const missingClient = await call(api, "PATCH", "/api/lineage/config", "admin-token", { command: "definitely-missing-odpscmd-test" });
+    expect(missingClient.status).toBe(200);
+    const tested = await call(api, "POST", "/api/lineage/connection-test", "admin-token", {});
+    expect(tested.status).toBe(400);
+    expect(JSON.parse(tested.body)).toMatchObject({ code: "ODPSCMD_NOT_FOUND" });
   });
 });
 
