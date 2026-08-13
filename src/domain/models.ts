@@ -230,3 +230,101 @@ export interface ClaudeConfig {
   healthMessage: string | null;
   updatedAt: Timestamp;
 }
+
+export type MaxComputeSyncStatus = "idle" | "running" | "success" | "failed";
+
+export interface MaxComputeConfig {
+  enabled: boolean;
+  command: string;
+  args: string;
+  project: string;
+  scheduleTime: string;
+  timezone: "Asia/Shanghai";
+  lastStartedAt: Timestamp | null;
+  lastCompletedAt: Timestamp | null;
+  lastStatus: MaxComputeSyncStatus;
+  lastError: string | null;
+  lastDataDate: string | null;
+  nextRunAt: Timestamp | null;
+  updatedAt: Timestamp;
+}
+
+export interface LineageTable {
+  id: string;
+  project: string;
+  name: string;
+  type: string;
+  comment: string;
+  ownerId: string | null;
+  ownerName: string | null;
+  isPartitioned: boolean;
+  createTime: Timestamp | null;
+  lastModifiedTime: Timestamp | null;
+  lastAccessTime: Timestamp | null;
+  dataLength: number | null;
+  partitionCount: number;
+  lifecycle: number | null;
+  storageTier: string | null;
+  clusterType: string | null;
+  numberBuckets: number | null;
+  hasPrimaryKey: boolean;
+  isTransactional: boolean;
+  isDeltaTable: boolean;
+  tableStorage: string | null;
+  tableFormat: string | null;
+  lastScheduleTime: Timestamp | null;
+  lastScheduleStatus: string | null;
+  lastTaskName: string | null;
+  lastInstanceId: string | null;
+  scheduleOwner: string | null;
+  scheduleNodeId: string | null;
+  scheduleNodeName: string | null;
+  scheduleOnDuty: string | null;
+  lastBizDate: string | null;
+  accessCount: number;
+  accessBytes: number;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+export interface LineageColumn {
+  tableId: string;
+  name: string;
+  ordinalPosition: number;
+  dataType: string;
+  comment: string;
+  nullable: boolean;
+  partitionKey: boolean;
+  primaryKey: boolean;
+  updatedAt: Timestamp;
+}
+
+export interface LineageEdge {
+  sourceTableId: string;
+  targetTableId: string;
+  firstSeenAt: Timestamp;
+  lastSeenAt: Timestamp;
+  occurrenceCount: number;
+  lastInstanceId: string | null;
+  lastTaskName: string | null;
+  lastOwnerName: string | null;
+  lastNodeId: string | null;
+  lastNodeName: string | null;
+  lastOnDuty: string | null;
+  updatedAt: Timestamp;
+}
+
+export interface LineageSyncRun {
+  id: string;
+  trigger: "schedule" | "manual";
+  requestedBy: string | null;
+  dataDate: string;
+  status: "running" | "success" | "failed";
+  tablesProcessed: number;
+  columnsProcessed: number;
+  jobsProcessed: number;
+  edgesProcessed: number;
+  error: string | null;
+  startedAt: Timestamp;
+  completedAt: Timestamp | null;
+}

@@ -285,6 +285,134 @@ const migrations: Migration[] = [
         CHECK (json_valid(runtime_defaults_json));
     `,
   },
+  {
+    version: 4,
+    name: "data_lineage",
+    sql: `
+      CREATE TABLE maxcompute_config (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+        command TEXT NOT NULL,
+        args TEXT NOT NULL DEFAULT '',
+        project TEXT NOT NULL DEFAULT '',
+        schedule_time TEXT NOT NULL DEFAULT '06:15',
+        timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai' CHECK (timezone = 'Asia/Shanghai'),
+        last_started_at INTEGER,
+        last_completed_at INTEGER,
+        last_status TEXT NOT NULL DEFAULT 'idle' CHECK (last_status IN ('idle', 'running', 'success', 'failed')),
+        last_error TEXT,
+        last_data_date TEXT,
+        next_run_at INTEGER,
+        updated_at INTEGER NOT NULL
+      ) STRICT;
+
+      CREATE TABLE lineage_tables (
+        id TEXT PRIMARY KEY,
+        project_name TEXT NOT NULL,
+        table_name TEXT NOT NULL,
+        table_type TEXT NOT NULL DEFAULT 'MANAGED_TABLE',
+        table_comment TEXT NOT NULL DEFAULT '',
+        owner_id TEXT,
+        owner_name TEXT,
+        is_partitioned INTEGER NOT NULL DEFAULT 0 CHECK (is_partitioned IN (0, 1)),
+        create_time INTEGER,
+        last_modified_time INTEGER,
+        last_access_time INTEGER,
+        data_length INTEGER,
+        partition_count INTEGER NOT NULL DEFAULT 0,
+        lifecycle INTEGER,
+        storage_tier TEXT,
+        cluster_type TEXT,
+        number_buckets INTEGER,
+        has_primary_key INTEGER NOT NULL DEFAULT 0 CHECK (has_primary_key IN (0, 1)),
+        is_transactional INTEGER NOT NULL DEFAULT 0 CHECK (is_transactional IN (0, 1)),
+        is_delta_table INTEGER NOT NULL DEFAULT 0 CHECK (is_delta_table IN (0, 1)),
+        table_storage TEXT,
+        table_format TEXT,
+        last_schedule_time INTEGER,
+        last_schedule_status TEXT,
+        last_task_name TEXT,
+        last_instance_id TEXT,
+        schedule_owner TEXT,
+        schedule_node_id TEXT,
+        schedule_node_name TEXT,
+        schedule_on_duty TEXT,
+        last_biz_date TEXT,
+        access_count INTEGER NOT NULL DEFAULT 0,
+        access_bytes INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(project_name, table_name)
+      ) STRICT;
+
+      CREATE TABLE lineage_columns (
+        table_id TEXT NOT NULL REFERENCES lineage_tables(id) ON DELETE CASCADE,
+        column_name TEXT NOT NULL,
+        ordinal_position INTEGER NOT NULL,
+        data_type TEXT NOT NULL,
+        column_comment TEXT NOT NULL DEFAULT '',
+        is_nullable INTEGER NOT NULL DEFAULT 1 CHECK (is_nullable IN (0, 1)),
+        is_partition_key INTEGER NOT NULL DEFAULT 0 CHECK (is_partition_key IN (0, 1)),
+        is_primary_key INTEGER NOT NULL DEFAULT 0 CHECK (is_primary_key IN (0, 1)),
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(table_id, column_name)
+      ) STRICT;
+
+      CREATE TABLE lineage_edges (
+        source_table_id TEXT NOT NULL REFERENCES lineage_tables(id) ON DELETE CASCADE,
+        target_table_id TEXT NOT NULL REFERENCES lineage_tables(id) ON DELETE CASCADE,
+        first_seen_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL,
+        occurrence_count INTEGER NOT NULL DEFAULT 1,
+        last_instance_id TEXT,
+        last_task_name TEXT,
+        last_owner_name TEXT,
+        last_node_id TEXT,
+        last_node_name TEXT,
+        last_on_duty TEXT,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(source_table_id, target_table_id),
+        CHECK(source_table_id <> target_table_id)
+      ) STRICT;
+
+      CREATE TABLE lineage_access_daily (
+        table_id TEXT NOT NULL REFERENCES lineage_tables(id) ON DELETE CASCADE,
+        ds TEXT NOT NULL,
+        access_count INTEGER NOT NULL DEFAULT 0,
+        access_bytes INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(table_id, ds)
+      ) STRICT;
+
+      CREATE TABLE lineage_sync_runs (
+        id TEXT PRIMARY KEY,
+        trigger_type TEXT NOT NULL CHECK (trigger_type IN ('schedule', 'manual')),
+        requested_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+        data_date TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('running', 'success', 'failed')),
+        tables_processed INTEGER NOT NULL DEFAULT 0,
+        columns_processed INTEGER NOT NULL DEFAULT 0,
+        jobs_processed INTEGER NOT NULL DEFAULT 0,
+        edges_processed INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        started_at INTEGER NOT NULL,
+        completed_at INTEGER
+      ) STRICT;
+
+      CREATE TABLE lineage_processed_jobs (
+        inst_id TEXT PRIMARY KEY,
+        data_date TEXT NOT NULL,
+        processed_at INTEGER NOT NULL
+      ) STRICT;
+
+      CREATE INDEX lineage_tables_name_idx ON lineage_tables(table_name COLLATE NOCASE, project_name COLLATE NOCASE);
+      CREATE INDEX lineage_tables_schedule_idx ON lineage_tables(last_schedule_time DESC);
+      CREATE INDEX lineage_edges_target_idx ON lineage_edges(target_table_id, last_seen_at DESC);
+      CREATE INDEX lineage_edges_source_idx ON lineage_edges(source_table_id, last_seen_at DESC);
+      CREATE INDEX lineage_sync_runs_started_idx ON lineage_sync_runs(started_at DESC);
+      CREATE INDEX lineage_processed_jobs_date_idx ON lineage_processed_jobs(data_date);
+    `,
+  },
 ];
 
 export function migrateSchema(database: Database.Database): void {

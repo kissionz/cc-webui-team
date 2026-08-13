@@ -100,3 +100,54 @@ test("移动端导航与会话抽屉可通过按钮开关", async ({ page, isMob
   await expect(page.getByRole("button", { name: "导出会话" })).toBeVisible();
   expect(await page.locator("body").evaluate((body) => body.scrollWidth <= body.clientWidth + 1)).toBe(true);
 });
+
+test("数据血缘在同一工作台完成配置、查询和手动触发", async ({ page, isMobile }) => {
+  await login(page);
+  if (isMobile) await page.getByRole("button", { name: "打开导航" }).click();
+  await page.getByRole("button", { name: "数据血缘" }).click();
+  await expect(page.getByRole("heading", { name: "数据血缘" })).toBeVisible();
+  await expect(page.locator(".lineage-workbench")).toHaveCount(1);
+
+  const settings = page.locator("details.lineage-sync-settings");
+  await settings.locator("summary").click();
+  await settings.getByLabel("执行项目").fill("analytics");
+  await settings.getByLabel("每日执行时间").fill("07:30");
+  await settings.getByRole("button", { name: "保存同步设置" }).click();
+  await expect(page.getByText("同步设置已保存")).toBeVisible();
+  await expect(settings.locator("summary")).toContainText("analytics · 每天 07:30");
+  await settings.locator("summary").click();
+
+  const table = (id: string, name: string) => ({
+    id, project: "analytics", name, type: "MANAGED_TABLE", comment: "E2E 示例", ownerId: null, ownerName: "alice",
+    isPartitioned: false, createTime: null, lastModifiedTime: null, lastAccessTime: null, dataLength: 1024,
+    partitionCount: 0, lifecycle: 30, storageTier: "standard", clusterType: null, numberBuckets: null,
+    hasPrimaryKey: false, isTransactional: false, isDeltaTable: false, tableStorage: "native", tableFormat: "ORC",
+    lastScheduleTime: null, lastScheduleStatus: "Terminated", lastTaskName: "daily_sales", lastInstanceId: "i1",
+    scheduleOwner: "scheduler", scheduleNodeId: "n1", scheduleNodeName: "销售日汇总", scheduleOnDuty: "u42",
+    lastBizDate: "20260812", accessCount: 24, accessBytes: 2048, createdAt: 1, updatedAt: 1,
+  });
+  const root = table("analytics.dws_sales", "dws_sales");
+  const upstream = table("analytics.ods_orders", "ods_orders");
+  await page.route("**/api/lineage/graph?*", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({
+      rootId: root.id, scope: "first", direction: "both", tables: [root, upstream], truncated: false,
+      edges: [{ sourceTableId: upstream.id, targetTableId: root.id, firstSeenAt: 1, lastSeenAt: 1, occurrenceCount: 1, lastInstanceId: "i1", lastTaskName: "daily_sales", lastOwnerName: "scheduler", lastNodeId: "n1", lastNodeName: "销售日汇总", lastOnDuty: "u42", updatedAt: 1 }],
+    }),
+  }));
+  await page.route("**/api/lineage/tables/analytics.dws_sales", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({ table: root, columns: [], relations: { upstream: 1, downstream: 0 } }),
+  }));
+  await page.getByLabel("查询表").fill("analytics.dws_sales");
+  await page.getByRole("button", { name: "查询血缘" }).click();
+  await expect(page.locator(".lineage-svg-node", { hasText: "dws_sales" })).toBeVisible();
+  await expect(page.locator(".lineage-inspector")).toContainText("销售日汇总");
+
+  const syncRequest = page.waitForRequest((request) => request.method() === "POST" && new URL(request.url()).pathname === "/api/lineage/sync");
+  await page.route("**/api/lineage/sync", (route) => route.fulfill({ status: 202, contentType: "application/json", body: JSON.stringify({ accepted: true }) }));
+  await page.getByRole("button", { name: "立即同步" }).click();
+  await syncRequest;
+  await expect(page.getByText("血缘同步已启动")).toBeVisible();
+  expect(await page.locator("body").evaluate((body) => body.scrollWidth <= body.clientWidth + 1)).toBe(true);
+});

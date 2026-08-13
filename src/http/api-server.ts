@@ -40,6 +40,9 @@ import { TeamRoutes } from "./routes/teams.js";
 import { SessionRoutes } from "./routes/sessions.js";
 import { findRoute, type RouteAuth, type RouteDefinition } from "./routes/shared.js";
 import { JsonLogger, redactRecord, type StructuredLogger } from "../observability/logger.js";
+import type { LineageScheduler } from "../lineage/scheduler.js";
+import type { ColumnLineageAnalyzer } from "../lineage/column-analyzer.js";
+import { LineageRoutes } from "./routes/lineage.js";
 
 const execFileAsync = promisify(execFile);
 export interface ApiServerOptions {
@@ -51,6 +54,8 @@ export interface ApiServerOptions {
   now?: () => number;
   logger?: StructuredLogger;
   backup?: MetricsSnapshotSource;
+  lineageScheduler: LineageScheduler;
+  columnLineageAnalyzer: ColumnLineageAnalyzer;
 }
 
 export class ApiServer {
@@ -108,7 +113,14 @@ export class ApiServer {
       sessionAudience: (session) => this.sessionAudience(session),
       teamAudience: (teamId) => this.teamAudience(teamId),
     });
-    this.modularRoutes = [...admin.definitions, ...exports.definitions, ...teams.definitions, ...sessions.definitions];
+    const lineage = new LineageRoutes({
+      ...routeOptions,
+      scheduler: options.lineageScheduler,
+      analyzer: options.columnLineageAnalyzer,
+      maxBodySize: this.config.maxBodySize,
+      claudeConfig: () => this.repository.getClaudeConfig(),
+    });
+    this.modularRoutes = [...admin.definitions, ...exports.definitions, ...teams.definitions, ...sessions.definitions, ...lineage.definitions];
   }
 
   async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {

@@ -11,6 +11,11 @@ import type {
   FileChange,
   JsonObject,
   JsonValue,
+  LineageColumn,
+  LineageEdge,
+  LineageSyncRun,
+  LineageTable,
+  MaxComputeConfig,
   Message,
   Page,
   PageRequest,
@@ -604,6 +609,229 @@ export class PersistenceRepository {
     });
   }
 
+  getMaxComputeConfig(): MaxComputeConfig | null {
+    const row = this.getOne("SELECT * FROM maxcompute_config WHERE singleton=1");
+    return row ? maxComputeConfigFromRow(row) : null;
+  }
+
+  saveMaxComputeConfig(config: MaxComputeConfig): void {
+    this.database.prepare(`
+      INSERT INTO maxcompute_config(singleton, enabled, command, args, project, schedule_time, timezone,
+        last_started_at, last_completed_at, last_status, last_error, last_data_date, next_run_at, updated_at)
+      VALUES (1, @enabled, @command, @args, @project, @scheduleTime, @timezone, @lastStartedAt,
+        @lastCompletedAt, @lastStatus, @lastError, @lastDataDate, @nextRunAt, @updatedAt)
+      ON CONFLICT(singleton) DO UPDATE SET enabled=excluded.enabled, command=excluded.command,
+        args=excluded.args, project=excluded.project, schedule_time=excluded.schedule_time,
+        timezone=excluded.timezone, last_started_at=excluded.last_started_at,
+        last_completed_at=excluded.last_completed_at, last_status=excluded.last_status,
+        last_error=excluded.last_error, last_data_date=excluded.last_data_date,
+        next_run_at=excluded.next_run_at, updated_at=excluded.updated_at
+    `).run({ ...config, enabled: boolInt(config.enabled) });
+  }
+
+  saveLineageTable(table: LineageTable): void {
+    this.database.prepare(`
+      INSERT INTO lineage_tables(id, project_name, table_name, table_type, table_comment, owner_id, owner_name,
+        is_partitioned, create_time, last_modified_time, last_access_time, data_length, partition_count,
+        lifecycle, storage_tier, cluster_type, number_buckets, has_primary_key, is_transactional, is_delta_table,
+        table_storage, table_format, last_schedule_time, last_schedule_status, last_task_name, last_instance_id,
+        schedule_owner, schedule_node_id, schedule_node_name, schedule_on_duty, last_biz_date, access_count,
+        access_bytes, created_at, updated_at)
+      VALUES (@id, @project, @name, @type, @comment, @ownerId, @ownerName, @isPartitioned, @createTime,
+        @lastModifiedTime, @lastAccessTime, @dataLength, @partitionCount, @lifecycle, @storageTier,
+        @clusterType, @numberBuckets, @hasPrimaryKey, @isTransactional, @isDeltaTable, @tableStorage,
+        @tableFormat, @lastScheduleTime, @lastScheduleStatus, @lastTaskName, @lastInstanceId, @scheduleOwner,
+        @scheduleNodeId, @scheduleNodeName, @scheduleOnDuty, @lastBizDate, @accessCount, @accessBytes,
+        @createdAt, @updatedAt)
+      ON CONFLICT(id) DO UPDATE SET project_name=excluded.project_name, table_name=excluded.table_name,
+        table_type=excluded.table_type, table_comment=excluded.table_comment, owner_id=excluded.owner_id,
+        owner_name=excluded.owner_name, is_partitioned=excluded.is_partitioned, create_time=excluded.create_time,
+        last_modified_time=excluded.last_modified_time, last_access_time=excluded.last_access_time,
+        data_length=excluded.data_length, partition_count=excluded.partition_count, lifecycle=excluded.lifecycle,
+        storage_tier=excluded.storage_tier, cluster_type=excluded.cluster_type,
+        number_buckets=excluded.number_buckets, has_primary_key=excluded.has_primary_key,
+        is_transactional=excluded.is_transactional, is_delta_table=excluded.is_delta_table,
+        table_storage=excluded.table_storage, table_format=excluded.table_format, updated_at=excluded.updated_at
+    `).run(lineageTableParams(table));
+  }
+
+  ensureLineageTable(id: string, at = this.now()): LineageTable {
+    const existing = this.getLineageTable(id);
+    if (existing) return existing;
+    const split = id.indexOf(".");
+    const project = split > 0 ? id.slice(0, split) : "default";
+    const name = split > 0 ? id.slice(split + 1) : id;
+    const table: LineageTable = {
+      id, project, name, type: "MANAGED_TABLE", comment: "", ownerId: null, ownerName: null,
+      isPartitioned: false, createTime: null, lastModifiedTime: null, lastAccessTime: null,
+      dataLength: null, partitionCount: 0, lifecycle: null, storageTier: null, clusterType: null,
+      numberBuckets: null, hasPrimaryKey: false, isTransactional: false, isDeltaTable: false,
+      tableStorage: null, tableFormat: null, lastScheduleTime: null, lastScheduleStatus: null,
+      lastTaskName: null, lastInstanceId: null, scheduleOwner: null, scheduleNodeId: null,
+      scheduleNodeName: null, scheduleOnDuty: null, lastBizDate: null, accessCount: 0,
+      accessBytes: 0, createdAt: at, updatedAt: at,
+    };
+    this.saveLineageTable(table);
+    return table;
+  }
+
+  getLineageTable(id: string): LineageTable | null {
+    const row = this.getOne("SELECT * FROM lineage_tables WHERE id=?", id);
+    return row ? lineageTableFromRow(row) : null;
+  }
+
+  searchLineageTables(query: string, limit = 20): LineageTable[] {
+    const value = `%${query.trim().replaceAll("%", "\\%").replaceAll("_", "\\_")}%`;
+    return this.getMany(`SELECT * FROM lineage_tables
+      WHERE table_name LIKE ? ESCAPE '\\' COLLATE NOCASE OR id LIKE ? ESCAPE '\\' COLLATE NOCASE
+      ORDER BY CASE WHEN table_name = ? COLLATE NOCASE THEN 0 WHEN table_name LIKE ? ESCAPE '\\' COLLATE NOCASE THEN 1 ELSE 2 END,
+        last_schedule_time DESC, table_name COLLATE NOCASE LIMIT ?`, value, value, query.trim(), `${query.trim()}%`, Math.max(1, Math.min(100, limit)))
+      .map(lineageTableFromRow);
+  }
+
+  listLineageColumns(tableId: string): LineageColumn[] {
+    return this.getMany("SELECT * FROM lineage_columns WHERE table_id=? ORDER BY ordinal_position, column_name", tableId)
+      .map(lineageColumnFromRow);
+  }
+
+  countLineageRelations(tableId: string): { upstream: number; downstream: number } {
+    const upstream = this.getOne("SELECT COUNT(*) count FROM lineage_edges WHERE target_table_id=?", tableId);
+    const downstream = this.getOne("SELECT COUNT(*) count FROM lineage_edges WHERE source_table_id=?", tableId);
+    return { upstream: num(upstream?.count ?? 0), downstream: num(downstream?.count ?? 0) };
+  }
+
+  replaceLineageColumns(tableId: string, columns: readonly LineageColumn[]): void {
+    this.transaction(() => {
+      this.database.prepare("DELETE FROM lineage_columns WHERE table_id=?").run(tableId);
+      const statement = this.database.prepare(`INSERT INTO lineage_columns(table_id, column_name, ordinal_position,
+        data_type, column_comment, is_nullable, is_partition_key, is_primary_key, updated_at)
+        VALUES (@tableId, @name, @ordinalPosition, @dataType, @comment, @nullable, @partitionKey, @primaryKey, @updatedAt)`);
+      for (const column of columns) statement.run({
+        ...column,
+        nullable: boolInt(column.nullable),
+        partitionKey: boolInt(column.partitionKey),
+        primaryKey: boolInt(column.primaryKey),
+      });
+    });
+  }
+
+  upsertLineageEdge(edge: LineageEdge): void {
+    if (edge.sourceTableId === edge.targetTableId) return;
+    this.ensureLineageTable(edge.sourceTableId, edge.firstSeenAt);
+    this.ensureLineageTable(edge.targetTableId, edge.firstSeenAt);
+    this.database.prepare(`
+      INSERT INTO lineage_edges(source_table_id, target_table_id, first_seen_at, last_seen_at,
+        occurrence_count, last_instance_id, last_task_name, last_owner_name, last_node_id,
+        last_node_name, last_on_duty, updated_at)
+      VALUES (@sourceTableId, @targetTableId, @firstSeenAt, @lastSeenAt, @occurrenceCount,
+        @lastInstanceId, @lastTaskName, @lastOwnerName, @lastNodeId, @lastNodeName, @lastOnDuty, @updatedAt)
+      ON CONFLICT(source_table_id, target_table_id) DO UPDATE SET
+        last_seen_at=MAX(lineage_edges.last_seen_at, excluded.last_seen_at),
+        occurrence_count=lineage_edges.occurrence_count + excluded.occurrence_count,
+        last_instance_id=CASE WHEN excluded.last_seen_at >= lineage_edges.last_seen_at THEN excluded.last_instance_id ELSE lineage_edges.last_instance_id END,
+        last_task_name=CASE WHEN excluded.last_seen_at >= lineage_edges.last_seen_at THEN excluded.last_task_name ELSE lineage_edges.last_task_name END,
+        last_owner_name=CASE WHEN excluded.last_seen_at >= lineage_edges.last_seen_at THEN excluded.last_owner_name ELSE lineage_edges.last_owner_name END,
+        last_node_id=CASE WHEN excluded.last_seen_at >= lineage_edges.last_seen_at THEN excluded.last_node_id ELSE lineage_edges.last_node_id END,
+        last_node_name=CASE WHEN excluded.last_seen_at >= lineage_edges.last_seen_at THEN excluded.last_node_name ELSE lineage_edges.last_node_name END,
+        last_on_duty=CASE WHEN excluded.last_seen_at >= lineage_edges.last_seen_at THEN excluded.last_on_duty ELSE lineage_edges.last_on_duty END,
+        updated_at=excluded.updated_at
+    `).run(edge);
+  }
+
+  updateLineageTableSchedule(tableId: string, input: {
+    at: number; status: string; taskName: string | null; instanceId: string | null; owner: string | null;
+    nodeId: string | null; nodeName: string | null; onDuty: string | null; bizDate: string | null;
+  }): void {
+    this.ensureLineageTable(tableId, input.at);
+    this.database.prepare(`UPDATE lineage_tables SET
+      last_schedule_time=CASE WHEN last_schedule_time IS NULL OR last_schedule_time <= @at THEN @at ELSE last_schedule_time END,
+      last_schedule_status=CASE WHEN last_schedule_time IS NULL OR last_schedule_time <= @at THEN @status ELSE last_schedule_status END,
+      last_task_name=CASE WHEN last_schedule_time IS NULL OR last_schedule_time <= @at THEN @taskName ELSE last_task_name END,
+      last_instance_id=CASE WHEN last_schedule_time IS NULL OR last_schedule_time <= @at THEN @instanceId ELSE last_instance_id END,
+      schedule_owner=CASE WHEN last_schedule_time IS NULL OR last_schedule_time <= @at THEN @owner ELSE schedule_owner END,
+      schedule_node_id=CASE WHEN last_schedule_time IS NULL OR last_schedule_time <= @at THEN @nodeId ELSE schedule_node_id END,
+      schedule_node_name=CASE WHEN last_schedule_time IS NULL OR last_schedule_time <= @at THEN @nodeName ELSE schedule_node_name END,
+      schedule_on_duty=CASE WHEN last_schedule_time IS NULL OR last_schedule_time <= @at THEN @onDuty ELSE schedule_on_duty END,
+      last_biz_date=CASE WHEN last_schedule_time IS NULL OR last_schedule_time <= @at THEN @bizDate ELSE last_biz_date END,
+      updated_at=@at WHERE id=@tableId`).run({ tableId, ...input });
+  }
+
+  isLineageJobProcessed(instanceId: string): boolean {
+    return Boolean(this.getOne("SELECT inst_id FROM lineage_processed_jobs WHERE inst_id=?", instanceId));
+  }
+
+  markLineageJobProcessed(instanceId: string, dataDate: string, at = this.now()): void {
+    this.database.prepare("INSERT OR IGNORE INTO lineage_processed_jobs(inst_id, data_date, processed_at) VALUES (?, ?, ?)")
+      .run(instanceId, dataDate, at);
+  }
+
+  upsertLineageAccess(tableId: string, ds: string, accessCount: number, accessBytes: number, at = this.now()): void {
+    this.ensureLineageTable(tableId, at);
+    this.database.prepare(`INSERT INTO lineage_access_daily(table_id, ds, access_count, access_bytes, updated_at)
+      VALUES (?, ?, ?, ?, ?) ON CONFLICT(table_id, ds) DO UPDATE SET access_count=excluded.access_count,
+      access_bytes=excluded.access_bytes, updated_at=excluded.updated_at`).run(tableId, ds, accessCount, accessBytes, at);
+    this.database.prepare(`UPDATE lineage_tables SET
+      access_count=(SELECT COALESCE(SUM(access_count),0) FROM lineage_access_daily WHERE table_id=?),
+      access_bytes=(SELECT COALESCE(SUM(access_bytes),0) FROM lineage_access_daily WHERE table_id=?),
+      updated_at=? WHERE id=?`).run(tableId, tableId, at, tableId);
+  }
+
+  listLineageEdges(rootId: string, direction: "up" | "down" | "both", depth: number, limit: number): Array<LineageEdge & { depth: number }> {
+    const all: Array<LineageEdge & { depth: number }> = [];
+    const directions = direction === "both" ? ["up", "down"] as const : [direction] as const;
+    for (const item of directions) {
+      const join = item === "down" ? "e.source_table_id=w.node" : "e.target_table_id=w.node";
+      const next = item === "down" ? "e.target_table_id" : "e.source_table_id";
+      const anchor = item === "down" ? "e.source_table_id=?" : "e.target_table_id=?";
+      const rows = this.getMany(`WITH RECURSIVE w(source_table_id, target_table_id, node, depth, path) AS (
+        SELECT e.source_table_id, e.target_table_id, ${next}, 1, '|' || e.source_table_id || '|' || e.target_table_id || '|'
+        FROM lineage_edges e WHERE ${anchor}
+        UNION ALL
+        SELECT e.source_table_id, e.target_table_id, ${next}, w.depth + 1, w.path || ${next} || '|'
+        FROM lineage_edges e JOIN w ON ${join}
+        WHERE w.depth < ? AND instr(w.path, '|' || ${next} || '|') = 0
+      ) SELECT e.*, MIN(w.depth) graph_depth FROM w JOIN lineage_edges e
+        ON e.source_table_id=w.source_table_id AND e.target_table_id=w.target_table_id
+        GROUP BY e.source_table_id, e.target_table_id ORDER BY graph_depth, e.last_seen_at DESC LIMIT ?`, rootId, depth, limit);
+      all.push(...rows.map((row) => ({ ...lineageEdgeFromRow(row), depth: num(row.graph_depth!) })));
+    }
+    return [...new Map(all.map((edge) => [`${edge.sourceTableId}>${edge.targetTableId}`, edge])).values()]
+      .sort((a, b) => a.depth - b.depth || b.lastSeenAt - a.lastSeenAt).slice(0, limit);
+  }
+
+  findLineagePath(sourceId: string, targetId: string, maximumDepth = 12): LineageEdge[] {
+    const row = this.getOne(`WITH RECURSIVE p(node, route, depth) AS (
+      SELECT ?, ?, 0
+      UNION ALL
+      SELECT e.target_table_id, p.route || '>' || e.target_table_id, p.depth + 1
+      FROM p JOIN lineage_edges e ON e.source_table_id=p.node
+      WHERE p.depth < ? AND instr('>' || p.route || '>', '>' || e.target_table_id || '>') = 0
+    ) SELECT route FROM p WHERE node=? ORDER BY depth LIMIT 1`, sourceId, sourceId, maximumDepth, targetId);
+    if (!row) return [];
+    const ids = str(row.route!).split(">");
+    const edges: LineageEdge[] = [];
+    for (let index = 0; index < ids.length - 1; index += 1) {
+      const edge = this.getOne("SELECT * FROM lineage_edges WHERE source_table_id=? AND target_table_id=?", ids[index]!, ids[index + 1]!);
+      if (edge) edges.push(lineageEdgeFromRow(edge));
+    }
+    return edges;
+  }
+
+  saveLineageSyncRun(run: LineageSyncRun): void {
+    this.database.prepare(`INSERT INTO lineage_sync_runs(id, trigger_type, requested_by, data_date, status,
+      tables_processed, columns_processed, jobs_processed, edges_processed, error, started_at, completed_at)
+      VALUES (@id, @trigger, @requestedBy, @dataDate, @status, @tablesProcessed, @columnsProcessed,
+        @jobsProcessed, @edgesProcessed, @error, @startedAt, @completedAt)
+      ON CONFLICT(id) DO UPDATE SET status=excluded.status, tables_processed=excluded.tables_processed,
+        columns_processed=excluded.columns_processed, jobs_processed=excluded.jobs_processed,
+        edges_processed=excluded.edges_processed, error=excluded.error, completed_at=excluded.completed_at`).run(run);
+  }
+
+  listLineageSyncRuns(limit = 10): LineageSyncRun[] {
+    return this.getMany("SELECT * FROM lineage_sync_runs ORDER BY started_at DESC LIMIT ?", Math.max(1, Math.min(100, limit)))
+      .map(lineageSyncRunFromRow);
+  }
+
   search(request: SearchRequest): Page<SearchHit> {
     const query = ftsQuery(request.query);
     if (!query) return { items: [], nextCursor: null };
@@ -771,7 +999,14 @@ function permissionFromRow(r: Row): Permission { return { id:str(r.id!), session
 function fileChangeFromRow(r: Row): FileChange { return { id:str(r.id!), sessionId:str(r.session_id!), turnId:nullableStr(r.turn_id!), path:str(r.path!), previousPath:nullableStr(r.previous_path!), changeType:str(r.change_type!) as FileChange["changeType"], additions:nullableNum(r.additions!), deletions:nullableNum(r.deletions!), metadata:jsonObject(r.metadata_json!), createdAt:num(r.created_at!) }; }
 function auditFromRow(r: Row): AuditLog { return { id:str(r.id!), userId:nullableStr(r.user_id!), action:str(r.action!), targetType:str(r.target_type!), targetId:str(r.target_id!), metadata:jsonObject(r.metadata_json!), createdAt:num(r.created_at!) }; }
 function configFromRow(r: Row): ClaudeConfig { return { command:str(r.command!), args:str(r.args!), workspaceRoot:str(r.workspace_root!), modelContextTokens:num(r.model_context_tokens!), autoCompactRatio:num(r.auto_compact_ratio!), autoCompactEnabled:bool(r.auto_compact_enabled!), mcpToolAllowlist:parseJson(r.mcp_tool_allowlist_json!, []), enabled:bool(r.enabled!), available:bool(r.available!), version:str(r.version!), latencyMs:num(r.latency_ms!), authenticated:bool(r.authenticated!), lastCheckAt:nullableNum(r.last_check_at!), healthMessage:nullableStr(r.health_message!), updatedAt:num(r.updated_at!) }; }
+function maxComputeConfigFromRow(r: Row): MaxComputeConfig { return { enabled:bool(r.enabled!), command:str(r.command!), args:str(r.args!), project:str(r.project!), scheduleTime:str(r.schedule_time!), timezone:"Asia/Shanghai", lastStartedAt:nullableNum(r.last_started_at!), lastCompletedAt:nullableNum(r.last_completed_at!), lastStatus:str(r.last_status!) as MaxComputeConfig["lastStatus"], lastError:nullableStr(r.last_error!), lastDataDate:nullableStr(r.last_data_date!), nextRunAt:nullableNum(r.next_run_at!), updatedAt:num(r.updated_at!) }; }
+function lineageTableFromRow(r: Row): LineageTable { return { id:str(r.id!), project:str(r.project_name!), name:str(r.table_name!), type:str(r.table_type!), comment:str(r.table_comment!), ownerId:nullableStr(r.owner_id!), ownerName:nullableStr(r.owner_name!), isPartitioned:bool(r.is_partitioned!), createTime:nullableNum(r.create_time!), lastModifiedTime:nullableNum(r.last_modified_time!), lastAccessTime:nullableNum(r.last_access_time!), dataLength:nullableNum(r.data_length!), partitionCount:num(r.partition_count!), lifecycle:nullableNum(r.lifecycle!), storageTier:nullableStr(r.storage_tier!), clusterType:nullableStr(r.cluster_type!), numberBuckets:nullableNum(r.number_buckets!), hasPrimaryKey:bool(r.has_primary_key!), isTransactional:bool(r.is_transactional!), isDeltaTable:bool(r.is_delta_table!), tableStorage:nullableStr(r.table_storage!), tableFormat:nullableStr(r.table_format!), lastScheduleTime:nullableNum(r.last_schedule_time!), lastScheduleStatus:nullableStr(r.last_schedule_status!), lastTaskName:nullableStr(r.last_task_name!), lastInstanceId:nullableStr(r.last_instance_id!), scheduleOwner:nullableStr(r.schedule_owner!), scheduleNodeId:nullableStr(r.schedule_node_id!), scheduleNodeName:nullableStr(r.schedule_node_name!), scheduleOnDuty:nullableStr(r.schedule_on_duty!), lastBizDate:nullableStr(r.last_biz_date!), accessCount:num(r.access_count!), accessBytes:num(r.access_bytes!), createdAt:num(r.created_at!), updatedAt:num(r.updated_at!) }; }
+function lineageColumnFromRow(r: Row): LineageColumn { return { tableId:str(r.table_id!), name:str(r.column_name!), ordinalPosition:num(r.ordinal_position!), dataType:str(r.data_type!), comment:str(r.column_comment!), nullable:bool(r.is_nullable!), partitionKey:bool(r.is_partition_key!), primaryKey:bool(r.is_primary_key!), updatedAt:num(r.updated_at!) }; }
+function lineageEdgeFromRow(r: Row): LineageEdge { return { sourceTableId:str(r.source_table_id!), targetTableId:str(r.target_table_id!), firstSeenAt:num(r.first_seen_at!), lastSeenAt:num(r.last_seen_at!), occurrenceCount:num(r.occurrence_count!), lastInstanceId:nullableStr(r.last_instance_id!), lastTaskName:nullableStr(r.last_task_name!), lastOwnerName:nullableStr(r.last_owner_name!), lastNodeId:nullableStr(r.last_node_id!), lastNodeName:nullableStr(r.last_node_name!), lastOnDuty:nullableStr(r.last_on_duty!), updatedAt:num(r.updated_at!) }; }
+function lineageSyncRunFromRow(r: Row): LineageSyncRun { return { id:str(r.id!), trigger:str(r.trigger_type!) as LineageSyncRun["trigger"], requestedBy:nullableStr(r.requested_by!), dataDate:str(r.data_date!), status:str(r.status!) as LineageSyncRun["status"], tablesProcessed:num(r.tables_processed!), columnsProcessed:num(r.columns_processed!), jobsProcessed:num(r.jobs_processed!), edgesProcessed:num(r.edges_processed!), error:nullableStr(r.error!), startedAt:num(r.started_at!), completedAt:nullableNum(r.completed_at!) }; }
 function searchHitFromRow(r: Row): SearchHit { return { kind:str(r.kind!) as SearchHit["kind"], sessionId:str(r.session_id!), messageId:nullableStr(r.message_id!), title:str(r.title!), excerpt:str(r.excerpt!), rank:num(r.rank!), timestamp:num(r.hit_time!) }; }
+
+function lineageTableParams(table: LineageTable): Record<string, unknown> { return { ...table, isPartitioned:boolInt(table.isPartitioned), hasPrimaryKey:boolInt(table.hasPrimaryKey), isTransactional:boolInt(table.isTransactional), isDeltaTable:boolInt(table.isDeltaTable) }; }
 
 function sessionParams(s: ConversationSession): Record<string, unknown> { return { ...s, toolApprovalsJson: json(s.toolApprovals) }; }
 function permissionParams(p: Permission): Record<string, unknown> { return { ...p, toolInputJson:json(p.toolInput), sdkPermission:boolInt(p.sdkPermission), permissionSuggestionsJson:json(p.permissionSuggestions), fallbackResume:boolInt(p.fallbackResume), metadataJson:json(p.metadata) }; }

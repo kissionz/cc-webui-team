@@ -13,6 +13,7 @@ import { createAdminController } from "./admin-controller.js";
 import { createAppShellViews } from "./app-shell-views.js";
 import { renderMarkdown } from "./markdown.js";
 import { escapeHtml } from "./render.js";
+import { createLineageFeature } from "./lineage-feature.js";
 const icons = {
   teams: '<svg class="icon" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
   settings: '<svg class="icon" viewBox="0 0 24 24"><path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.87l-.06-.06A2 2 0 0 1 7.03 3.84l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15 4.6a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.14.37.35.7.6 1 .3.27.7.4 1.1.4H21a2 2 0 1 1 0 4h-.09A1.7 1.7 0 0 0 19.4 15Z"/></svg>',
@@ -27,6 +28,7 @@ const icons = {
   activity: '<svg class="icon" viewBox="0 0 24 24"><path d="M22 12h-4l-3 8L9 4l-3 8H2"/></svg>',
   info: '<svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>',
   panel: '<svg class="icon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>',
+  lineage: '<svg class="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="6" height="6" rx="1"/><rect x="15" y="15" width="6" height="6" rx="1"/><rect x="15" y="3" width="6" height="6" rx="1"/><path d="M9 6h6M6 9v3a6 6 0 0 0 6 6h3"/></svg>',
   chevron: '<svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>',
 };
 
@@ -121,7 +123,7 @@ function loadState(): AppState {
 function applyLocationToState(target: AppState): void {
   const params = new URLSearchParams(window.location.search);
   const view = params.get("view");
-  if (view && ["teams", "team", "settings", "users", "audit"].includes(view)) target.activeView = view as AppView;
+  if (view && ["teams", "team", "lineage", "settings", "users", "audit"].includes(view)) target.activeView = view as AppView;
   if (params.get("team")) target.selectedTeamId = params.get("team") || "";
   if (params.get("session")) target.selectedSessionId = params.get("session") || "";
   target.sessionSearch = params.get("q") || "";
@@ -185,6 +187,7 @@ async function refresh(): Promise<void> {
       await loadSessions({ reset: true });
       if (state.selectedSessionId) await loadMessages(state.selectedSessionId, { reset: true });
     }
+    if (state.activeView === "lineage") await lineageFeature.load();
     syncLocation();
     render();
     connectEvents();
@@ -536,8 +539,19 @@ adminViews = createAdminViews({
   fallback: renderTeams,
 });
 
+const lineageFeature = createLineageFeature({
+  state: () => state,
+  isAdmin: isSystemAdmin,
+  appRoot,
+  topbar,
+  escape: escapeHtml,
+  fmt,
+  toast,
+  scheduleRender,
+});
+
 const uiShell = createUiShell({
-  state: () => state, adminViews, renderLogin, renderTeams, renderTeamDetail, renderTeamRail, renderChat,
+  state: () => state, adminViews, renderLineage: lineageFeature.render, renderLogin, renderTeams, renderTeamDetail, renderTeamRail, renderChat,
   renderRightRail, renderMessage, renderModal, renderPermissionOverlay, activeModal: () => activeModal,
   modalTeamId: () => modalTeamId, renderToasts, sortSessionsNewestFirst, uiMemory,
 });
@@ -603,9 +617,16 @@ document.addEventListener("submit", (event) => {
     workspace: () => saveWorkspace(form),
     "audit-filter": () => adminController.filterAudit(form),
     "team-template": () => adminController.saveTemplate(form),
+    "lineage-query": () => lineageFeature.submitQuery(form),
+    "lineage-config": () => lineageFeature.saveConfig(form),
   };
   const action = actions[kind];
-  if (action) void runAction(`form:${kind}:${form.dataset.userId || form.dataset.team || state.selectedSessionId}`, form, action, kind === "message" || kind === "login" || kind === "team-template" ? undefined : "保存成功");
+  if (action) void runAction(
+    `form:${kind}:${form.dataset.userId || form.dataset.team || state.selectedSessionId}`,
+    form,
+    action,
+    ["message", "login", "team-template", "lineage-query", "lineage-config"].includes(kind) ? undefined : "保存成功",
+  );
 });
 
 document.addEventListener("input", (event) => {
@@ -620,6 +641,7 @@ document.addEventListener("input", (event) => {
     window.clearTimeout(sessionSearchTimer);
     sessionSearchTimer = window.setTimeout(() => void runAction("session-filter", target, changeSessionFilters), 280);
   }
+  if (target.matches("[data-lineage-table-search]")) lineageFeature.search(target.value);
 });
 
 document.addEventListener("toggle", (event) => {
@@ -652,6 +674,11 @@ document.addEventListener("close", (event) => {
 document.addEventListener("click", (event) => {
   const origin = event.target;
   if (!(origin instanceof Element)) return;
+  const lineageNode = origin.closest<SVGElement>("[data-lineage-node]");
+  if (lineageNode?.dataset.lineageNode) {
+    void lineageFeature.selectNode(lineageNode.dataset.lineageNode).catch(showError);
+    return;
+  }
   const dialog = origin instanceof HTMLDialogElement ? origin : origin.closest<HTMLDialogElement>("dialog");
   if (dialog && origin === dialog) {
     activeModal = "";
@@ -670,6 +697,7 @@ document.addEventListener("click", (event) => {
         scheduleRender();
       });
     }
+    if (target.dataset.view === "lineage") void lineageFeature.load().catch(showError);
     return;
   }
   if (target.dataset.openTeam) {
@@ -727,6 +755,14 @@ document.addEventListener("click", (event) => {
     render();
     return;
   }
+  if (target.dataset.lineageMode === "table" || target.dataset.lineageMode === "column") {
+    lineageFeature.setMode(target.dataset.lineageMode);
+    return;
+  }
+  if (target.dataset.lineageColumn) {
+    lineageFeature.chooseColumn(target.dataset.lineageColumn);
+    return;
+  }
 
   const key = `click:${actionName || target.dataset.permission || target.dataset.deleteSession || target.dataset.deleteTeam || target.dataset.toggleUser || target.dataset.copyMessage || "action"}`;
   void runAction(key, target, async () => {
@@ -751,7 +787,13 @@ document.addEventListener("click", (event) => {
     } else if (actionName === "health-check") {
       await api("/api/claude/health-check", { method: "POST", body: "{}" });
       await refresh();
-    } else if (target.dataset.deleteSession) await deleteSession(target.dataset.deleteSession);
+    } else if (actionName === "lineage-sync") await lineageFeature.triggerSync();
+    else if (actionName === "lineage-close-detail") lineageFeature.closeDetail();
+    else if (actionName === "lineage-zoom-in") lineageFeature.zoomBy(0.15);
+    else if (actionName === "lineage-zoom-out") lineageFeature.zoomBy(-0.15);
+    else if (actionName === "lineage-fit") lineageFeature.fit();
+    else if (actionName === "lineage-download") lineageFeature.downloadGraph();
+    else if (target.dataset.deleteSession) await deleteSession(target.dataset.deleteSession);
     else if (target.dataset.deleteTeam) await deleteTeam(target.dataset.deleteTeam);
     else if (target.dataset.removeMemberTeam && target.dataset.removeMemberUser) await removeMember(target.dataset.removeMemberTeam, target.dataset.removeMemberUser);
     else if (target.dataset.copyMessage) {
@@ -777,6 +819,7 @@ window.addEventListener("popstate", () => {
   applyLocationToState(state);
   render();
   if (state.activeView === "team") void loadSessions({ reset: true }).then(() => state.selectedSessionId ? loadMessages(state.selectedSessionId, { reset: true }) : undefined).then(() => scheduleTeamRender({ rail: true, chat: true, right: true }, 0)).catch(showError);
+  if (state.activeView === "lineage") void lineageFeature.load().catch(showError);
 });
 
 void refresh();

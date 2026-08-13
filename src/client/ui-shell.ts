@@ -5,6 +5,7 @@ type TeamParts = { rail: boolean; chat: boolean; right: boolean };
 export interface UiShellDeps {
   state(): AppState;
   adminViews: { settings(): string; users(): string; audit(): string };
+  renderLineage(): string;
   renderLogin(error?: string): void;
   renderTeams(): string;
   renderTeamDetail(): string;
@@ -23,7 +24,7 @@ export interface UiShellDeps {
 
 export function createUiShell(deps: UiShellDeps) {
   const state = createLiveState(deps.state);
-  const { adminViews, renderLogin, renderTeams, renderTeamDetail, renderTeamRail, renderChat, renderRightRail,
+  const { adminViews, renderLineage, renderLogin, renderTeams, renderTeamDetail, renderTeamRail, renderChat, renderRightRail,
     renderMessage, renderModal, renderPermissionOverlay, renderToasts, sortSessionsNewestFirst, uiMemory } = deps;
   const activeModal = deps.activeModal;
   const modalTeamId = deps.modalTeamId;
@@ -51,6 +52,7 @@ function render(): void {
   if (state.activeView === "settings") html = adminViews.settings();
   else if (state.activeView === "users") html = adminViews.users();
   else if (state.activeView === "audit") html = adminViews.audit();
+  else if (state.activeView === "lineage") html = renderLineage();
   else if (state.activeView === "team") html = renderTeamDetail();
   else html = renderTeams();
   appElement().innerHTML = html + renderModal(activeModal(), modalTeamId()) + renderPermissionOverlay();

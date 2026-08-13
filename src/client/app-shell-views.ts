@@ -23,7 +23,7 @@ export function createAppShellViews(deps: AppShellViewDeps) {
     const adminNav = user?.role === "admin"
       ? `${navButton("settings", icons.settings, "Agent 设置")}${navButton("users", icons.users, "用户管理")}${navButton("audit", icons.check, "审计日志")}`
       : "";
-    const nav = `${navButton("teams", icons.teams, "团队工作台")}${adminNav}`;
+    const nav = `${navButton("teams", icons.teams, "团队工作台")}${navButton("lineage", icons.lineage, "数据血缘")}${adminNav}`;
     const sidebarLabel = state.sidebarCollapsed ? "展开导航栏" : "收起导航栏";
     const mobileLabel = state.mobileNavOpen ? "关闭导航" : "打开导航";
 

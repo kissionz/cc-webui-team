@@ -6,13 +6,14 @@
 
 ```text
 Browser (TypeScript SPA)
-  ├─ REST：登录、团队、会话、审批、导出、审计、指标
+  ├─ REST：登录、团队、会话、数据血缘、审批、导出、审计、指标
   └─ SSE：消息增量、状态、审批和计划更新
             │
 Node.js 24 / TypeScript
   ├─ 鉴权、角色与团队数据隔离
   ├─ 全局 / 团队 / 用户三级并发调度
   ├─ Claude Agent SDK 运行时、增量批处理与会话恢复
+  ├─ MaxCompute 元数据日同步、表血缘查询与字段血缘只读分析
   ├─ 有界 SSE 背压、结构化日志与管理指标
   └─ SQLite WAL：事务、全文检索、游标分页、在线备份
             │
@@ -89,6 +90,8 @@ Windows 可运行 `scripts/prepare-host-claude.ps1`。包含宿主机绝对路�
 - `CLAUDE_COMMAND`：通常留空或写 `claude`，让 SDK 使用自带运行时；只有使用明确存在的自定义可执行文件时才填写路径。
 - `CLAUDE_ALLOW_UNSANDBOXED_WINDOWS`：Windows 原生环境不支持 Claude Code sandbox。推荐改用 WSL2；仅当主机和团队成员均受信任时才设为 `true`，允许 SDK 无沙箱回退。
 - `MCP_TOOL_ALLOWLIST`：平台预授权工具；其余工具由会话内审批。
+- `MAXCOMPUTE_PROJECT`、`MAXCOMPUTE_COMMAND`、`MAXCOMPUTE_ARGS`：表血缘抽取所用项目和 `odpscmd` 启动方式。AccessId 等凭据只放在部署机的 `odps_config.ini` 或密钥挂载中，不写入平台数据库。
+- `MAXCOMPUTE_ENABLED`、`MAXCOMPUTE_SCHEDULE_TIME`：是否启用每日同步及 Asia/Shanghai 执行时间；管理员可在“数据血缘”页面继续调整，并可随时手动触发。默认 06:15 抽取前一天数据。
 - `BACKUP_ENABLED`、`BACKUP_INTERVAL_HOURS`、`BACKUP_RETENTION`：在线备份开关、周期和保留数量。
 
 公网部署建议由 Caddy、Nginx 或同类反向代理终止 TLS，并将数据目录和 workspace 纳入独立备份策略。SQLite 的 `-wal` 与 `-shm` 文件属于数据库运行状态，不应单独复制；优先使用 SQLite 在线备份或在停机后整体备份。
@@ -121,6 +124,13 @@ npm run db:restore -- \
 - 会话可导出为 Markdown 或完整 JSON。
 - 管理员可以批量归档/恢复非运行中会话；无法操作的会话会逐项返回原因。
 - 团队模板只保存非敏感运行默认值，并按团队隔离；不会复制凭据、命令或 workspace 路径。
+
+## 数据血缘
+
+- 表血缘每天从 `SYSTEM_CATALOG.INFORMATION_SCHEMA` 的 `TABLES`、`COLUMNS`、`PARTITIONS`、`TABLE_ACCESS_INFO` 和 `TASKS_HISTORY` 抽取。系统把任务输入表到输出表固化为关系，并保存 Owner、最近调度、最近访问、分区与存储等元数据。
+- `TASKS_HISTORY` 只保留近期数据，首次上线后应尽快完成一次手动同步；重复抽取同一 `inst_id` 不会重复累计关系。
+- 当前按默认 Schema 使用 `project.table` 标识。运行 `odpscmd` 的账号需要读取租户级 Information Schema 的权限。
+- 字段血缘不入库。每次查询只在所选团队 workspace 内启动一次只读 Claude Code 分析，仅允许 `Read`、`Glob`、`Grep`，并由服务端重新读取真实文件和行号后返回代码片段；缺少可验证代码证据的关系不会展示。
 
 ## 权限与运行模型
 

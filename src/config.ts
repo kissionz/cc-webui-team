@@ -80,6 +80,13 @@ export interface AppConfig {
   autoCompactRatio: number;
   autoCompactEnabled: boolean;
   mcpToolAllowlist: string[];
+  maxCompute: {
+    enabled: boolean;
+    command: string;
+    args: string;
+    project: string;
+    scheduleTime: string;
+  };
   backup: {
     enabled: boolean;
     directory: string;
@@ -122,6 +129,13 @@ export function loadConfig(rootDir = process.cwd()): AppConfig {
     autoCompactRatio: boundedNumber("AUTO_COMPACT_RATIO", 0.62, 0.1, 0.9),
     autoCompactEnabled: process.env.AUTO_COMPACT_ENABLED !== "false",
     mcpToolAllowlist: csv("MCP_TOOL_ALLOWLIST"),
+    maxCompute: {
+      enabled: process.env.MAXCOMPUTE_ENABLED === "true",
+      command: process.env.MAXCOMPUTE_COMMAND || "odpscmd",
+      args: process.env.MAXCOMPUTE_ARGS || "",
+      project: process.env.MAXCOMPUTE_PROJECT || "",
+      scheduleTime: scheduleTime("MAXCOMPUTE_SCHEDULE_TIME", "06:15"),
+    },
     backup: {
       enabled: process.env.BACKUP_ENABLED !== "false",
       directory: resolve(process.env.BACKUP_DIR || join(dataDir, "backups")),
@@ -129,4 +143,10 @@ export function loadConfig(rootDir = process.cwd()): AppConfig {
       retention: boundedInteger("BACKUP_RETENTION", 14, 1, 365),
     },
   };
+}
+
+function scheduleTime(name: string, fallback: string): string {
+  const value = process.env[name] || fallback;
+  if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value)) throw new Error(`${name} must use HH:mm.`);
+  return value;
 }

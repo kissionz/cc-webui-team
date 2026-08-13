@@ -11,6 +11,8 @@ import { ClaudeRuntimeManager, type RuntimeEvent } from "./runtime/claude-runtim
 import { ensureInitialData } from "./services/bootstrap.js";
 import { recoverQueuedRuntimeTurns } from "./services/runtime-recovery.js";
 import { SqliteRuntimeStore } from "./services/runtime-store.js";
+import { ColumnLineageAnalyzer } from "./lineage/column-analyzer.js";
+import { LineageScheduler } from "./lineage/scheduler.js";
 
 const nodeMajor = Number.parseInt(process.versions.node.split(".")[0] ?? "0", 10);
 if (nodeMajor < 24) {
@@ -28,6 +30,23 @@ const { repository, result: initialization } = await PersistenceRepository.open(
   legacyJsonPath: config.legacyJsonFile,
 });
 await ensureInitialData(repository, config);
+if (!repository.getMaxComputeConfig()) {
+  repository.saveMaxComputeConfig({
+    enabled: config.maxCompute.enabled,
+    command: config.maxCompute.command,
+    args: config.maxCompute.args,
+    project: config.maxCompute.project,
+    scheduleTime: config.maxCompute.scheduleTime,
+    timezone: "Asia/Shanghai",
+    lastStartedAt: null,
+    lastCompletedAt: null,
+    lastStatus: "idle",
+    lastError: null,
+    lastDataDate: null,
+    nextRunAt: null,
+    updatedAt: Date.now(),
+  });
+}
 
 const logger = new JsonLogger();
 const events = new SseHub();
@@ -61,7 +80,13 @@ const backups = new BackupScheduler({
   onCompleted: (result) => logger.info("database.backup.completed", { path: result.path, sizeBytes: result.sizeBytes, createdAt: result.createdAt }),
   onError: (error) => logger.error("database.backup.failed", { error: error instanceof Error ? { name: error.name, message: error.message } : String(error) }),
 });
-apiServer = new ApiServer({ repository, config, runtime, events, logger, backup: backups });
+const columnLineageAnalyzer = new ColumnLineageAnalyzer();
+const lineageScheduler = new LineageScheduler({
+  repository,
+  onCompleted: (run) => logger.info("lineage.sync.completed", { runId: run.id, dataDate: run.dataDate, tables: run.tablesProcessed, columns: run.columnsProcessed, jobs: run.jobsProcessed, edges: run.edgesProcessed }),
+  onError: (run) => logger.error("lineage.sync.failed", { runId: run.id, dataDate: run.dataDate, error: run.error }),
+});
+apiServer = new ApiServer({ repository, config, runtime, events, logger, backup: backups, lineageScheduler, columnLineageAnalyzer });
 const recovery = recoverQueuedRuntimeTurns(repository, runtime, logger);
 if (recovery.recovered || recovery.failed) {
   logger.info("runtime.queued_turns_recovered", { ...recovery });
@@ -83,6 +108,7 @@ await new Promise<void>((resolve, reject) => {
   });
 });
 if (config.backup.enabled) await backups.start();
+lineageScheduler.start();
 
 logger.info("server.started", { host: config.host, port: config.port, backupEnabled: config.backup.enabled });
 if (initialization.importedLegacyJson) {
@@ -104,7 +130,7 @@ function shutdown(signal: string): void {
       runtime.stop(sessionId, `Server shutdown (${signal}).`);
     }
     events.close();
-    await backups.close();
+    await Promise.all([backups.close(), lineageScheduler.close()]);
     await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
     const deadline = Date.now() + 5_000;
     while ((runtime.scheduler.listQueued().length || runtime.scheduler.listRunning().length) && Date.now() < deadline) {

@@ -1,4 +1,4 @@
-export type AppView = "teams" | "team" | "settings" | "users" | "audit";
+export type AppView = "teams" | "team" | "lineage" | "settings" | "users" | "audit";
 export type SystemRole = "admin" | "member";
 export type TeamRole = "owner" | "admin" | "member" | "viewer";
 export type SessionStatus = "idle" | "queued" | "running" | "compacting" | "waiting_permission" | "completed" | "failed" | "stopped" | "interrupted";
@@ -39,6 +39,15 @@ export interface TeamTemplate {
   createdAt?: number;
   updatedAt?: number;
 }
+export interface MaxComputeConfigView { enabled: boolean; command?: string; args?: string; project: string; scheduleTime: string; timezone: "Asia/Shanghai"; lastStartedAt?: number | null; lastCompletedAt?: number | null; lastStatus: "idle" | "running" | "success" | "failed"; lastError?: string | null; lastDataDate?: string | null; nextRunAt?: number | null; updatedAt: number }
+export interface LineageTable { id: string; project: string; name: string; type: string; comment: string; ownerId?: string | null; ownerName?: string | null; isPartitioned: boolean; createTime?: number | null; lastModifiedTime?: number | null; lastAccessTime?: number | null; dataLength?: number | null; partitionCount: number; lifecycle?: number | null; storageTier?: string | null; clusterType?: string | null; numberBuckets?: number | null; hasPrimaryKey: boolean; isTransactional: boolean; isDeltaTable: boolean; tableStorage?: string | null; tableFormat?: string | null; lastScheduleTime?: number | null; lastScheduleStatus?: string | null; lastTaskName?: string | null; lastInstanceId?: string | null; scheduleOwner?: string | null; scheduleNodeId?: string | null; scheduleNodeName?: string | null; scheduleOnDuty?: string | null; lastBizDate?: string | null; accessCount: number; accessBytes: number; createdAt: number; updatedAt: number }
+export interface LineageColumn { tableId: string; name: string; ordinalPosition: number; dataType: string; comment: string; nullable: boolean; partitionKey: boolean; primaryKey: boolean; updatedAt: number }
+export interface LineageEdge { sourceTableId: string; targetTableId: string; firstSeenAt: number; lastSeenAt: number; occurrenceCount: number; lastInstanceId?: string | null; lastTaskName?: string | null; lastOwnerName?: string | null; lastNodeId?: string | null; lastNodeName?: string | null; lastOnDuty?: string | null; depth?: number; collapsed?: number }
+export interface LineageGraph { rootId: string; scope: string; direction: string; tables: LineageTable[]; edges: LineageEdge[]; truncated: boolean }
+export interface LineageSyncRun { id: string; trigger: "schedule" | "manual"; requestedBy?: string | null; dataDate: string; status: "running" | "success" | "failed"; tablesProcessed: number; columnsProcessed: number; jobsProcessed: number; edgesProcessed: number; error?: string | null; startedAt: number; completedAt?: number | null }
+export interface ColumnLineageEvidence { id: string; path: string; startLine: number; endLine: number; language: string; snippet: string; explanation: string }
+export interface ColumnLineageRelation { sourceTable: string; sourceColumn: string; targetTable: string; targetColumn: string; transformation: string; confidence: "high" | "medium" | "low"; evidenceIds: string[] }
+export interface ColumnLineageResult { status: "found" | "partial" | "not_found"; table: string; column: string; summary: string; relations: ColumnLineageRelation[]; evidence: ColumnLineageEvidence[]; warnings: string[] }
 export interface SessionGroup { id: string; label: string; minimum: number; defaultExpanded: boolean; sessions: Session[] }
 export interface MessageTurn { id: string; user?: Message; messages: Message[] }
 export interface ScrollPosition { top: number; left: number; distanceFromBottom: number }
