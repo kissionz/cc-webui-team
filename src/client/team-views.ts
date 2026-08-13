@@ -610,6 +610,22 @@ function renderModal(kind: string, teamId = state.selectedTeamId): string {
       </dialog>
     `;
   }
+  if (kind === "user") {
+    if (!isSystemAdmin()) return "";
+    return `
+      <dialog class="modal" data-modal-dialog aria-labelledby="user-dialog-title">
+        <form class="modal-form" data-form="user">
+          <div class="modal-head"><div><h3 id="user-dialog-title">创建用户</h3><p class="helper">填写账号信息并分配初始系统角色。</p></div></div>
+          <div class="modal-body grid">
+            <div class="grid two"><div class="field"><label for="new-user-name">用户名</label><input class="input" id="new-user-name" name="username" autocomplete="off" required /></div><div class="field"><label for="new-user-display">显示名</label><input class="input" id="new-user-display" name="displayName" required /></div></div>
+            <div class="field"><label for="new-user-email">邮箱（可选）</label><input class="input" id="new-user-email" name="email" type="email" autocomplete="off" /></div>
+            <div class="grid two"><div class="field"><label for="new-user-password">初始密码</label><input class="input" id="new-user-password" name="password" type="password" minlength="12" autocomplete="new-password" required /></div><div class="field"><label for="new-user-role">系统角色</label><select class="select" id="new-user-role" name="role"><option value="member">Member</option><option value="admin">Admin</option></select></div></div>
+          </div>
+          <div class="modal-actions"><button class="button" type="button" data-close-modal>取消</button><button class="button primary" type="submit">创建用户</button></div>
+        </form>
+      </dialog>
+    `;
+  }
   if (kind === "workspace") return renderWorkspaceModal(teamId);
   const team = state.teams.find((item) => item.id === teamId);
   const memberRows = state.members

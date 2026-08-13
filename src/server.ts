@@ -13,6 +13,7 @@ import { recoverQueuedRuntimeTurns } from "./services/runtime-recovery.js";
 import { SqliteRuntimeStore } from "./services/runtime-store.js";
 import { ColumnLineageAnalyzer } from "./lineage/column-analyzer.js";
 import { LineageScheduler } from "./lineage/scheduler.js";
+import { SecretBox } from "./security/secret-box.js";
 
 const nodeMajor = Number.parseInt(process.versions.node.split(".")[0] ?? "0", 10);
 if (nodeMajor < 24) {
@@ -29,6 +30,7 @@ const { repository, result: initialization } = await PersistenceRepository.open(
   databasePath: config.databaseFile,
   legacyJsonPath: config.legacyJsonFile,
 });
+const secretBox = await SecretBox.open({ environmentKey: config.credentialEncryptionKey, keyFile: config.credentialKeyFile });
 await ensureInitialData(repository, config);
 if (!repository.getMaxComputeConfig()) {
   repository.saveMaxComputeConfig({
@@ -36,6 +38,9 @@ if (!repository.getMaxComputeConfig()) {
     command: config.maxCompute.command,
     args: config.maxCompute.args,
     project: config.maxCompute.project,
+    endpoint: "",
+    credentialCiphertext: null,
+    credentialUpdatedAt: null,
     scheduleTime: config.maxCompute.scheduleTime,
     timezone: "Asia/Shanghai",
     lastStartedAt: null,
@@ -83,10 +88,11 @@ const backups = new BackupScheduler({
 const columnLineageAnalyzer = new ColumnLineageAnalyzer();
 const lineageScheduler = new LineageScheduler({
   repository,
+  secretBox,
   onCompleted: (run) => logger.info("lineage.sync.completed", { runId: run.id, dataDate: run.dataDate, tables: run.tablesProcessed, columns: run.columnsProcessed, jobs: run.jobsProcessed, edges: run.edgesProcessed }),
   onError: (run) => logger.error("lineage.sync.failed", { runId: run.id, dataDate: run.dataDate, error: run.error }),
 });
-apiServer = new ApiServer({ repository, config, runtime, events, logger, backup: backups, lineageScheduler, columnLineageAnalyzer });
+apiServer = new ApiServer({ repository, config, runtime, events, logger, backup: backups, lineageScheduler, columnLineageAnalyzer, secretBox });
 const recovery = recoverQueuedRuntimeTurns(repository, runtime, logger);
 if (recovery.recovered || recovery.failed) {
   logger.info("runtime.queued_turns_recovered", { ...recovery });

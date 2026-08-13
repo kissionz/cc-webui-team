@@ -6,13 +6,16 @@ import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { digestSessionToken } from "../src/auth/session-token.js";
 import type { AppConfig } from "../src/config.js";
-import type { Agent, ClaudeConfig, ConversationSession, Team, TeamMember, User } from "../src/domain/index.js";
+import type { Agent, ClaudeConfig, ConversationSession, MaxComputeConfig, Team, TeamMember, User } from "../src/domain/index.js";
 import { SseHub } from "../src/events/sse.js";
 import { ApiServer } from "../src/http/api-server.js";
 import { PersistenceRepository } from "../src/persistence/index.js";
 import type { ClaudeRuntimeManager } from "../src/runtime/claude-runtime.js";
 import { redactRecord } from "../src/observability/logger.js";
 import { SqliteRuntimeStore } from "../src/services/runtime-store.js";
+import { LineageScheduler } from "../src/lineage/scheduler.js";
+import { ColumnLineageAnalyzer } from "../src/lineage/column-analyzer.js";
+import { SecretBox } from "../src/security/secret-box.js";
 
 const roots: string[] = [];
 const now = 1_900_000_000_000;
@@ -48,10 +51,18 @@ describe("management API", () => {
       sessionTtlMs: 60_000, maxBodySize: 1024 * 1024, cookieSecure: false,
       allowedOrigins: ["http://localhost:8068"], concurrency: { global: 2, perTeam: 1, perUser: 1 },
       modelContextTokens: 1_000_000, autoCompactRatio: 0.62, autoCompactEnabled: true, mcpToolAllowlist: [],
+      credentialEncryptionKey: "", credentialKeyFile: join(root, "credential.key"),
+      maxCompute: { enabled: false, command: "odpscmd", args: "", project: "", scheduleTime: "06:15" },
       backup: { enabled: false, directory: join(root, "backups"), intervalMs: 60_000, retention: 2 },
     };
     events = new SseHub();
-    api = new ApiServer({ repository, config, runtime: runtime as unknown as ClaudeRuntimeManager, events, now: () => now, logger: { info() {}, warn() {}, error() {} } });
+    const secretBox = SecretBox.fromKey(Buffer.alloc(32, 7));
+    api = new ApiServer({
+      repository, config, runtime: runtime as unknown as ClaudeRuntimeManager, events, now: () => now,
+      logger: { info() {}, warn() {}, error() {} },
+      lineageScheduler: new LineageScheduler({ repository, secretBox, now: () => now }),
+      columnLineageAnalyzer: new ColumnLineageAnalyzer(), secretBox,
+    });
   });
 
   afterEach(async () => {
@@ -191,6 +202,44 @@ describe("management API", () => {
     expect(crossOrigin.status).toBe(403);
     expect(JSON.parse(crossOrigin.body)).toMatchObject({ code: "ORIGIN_NOT_ALLOWED" });
   });
+
+  it("enforces configurable role directory visibility in bootstrap and lineage APIs", async () => {
+    const initial = await call(api, "GET", "/api/bootstrap", "member-token");
+    expect(JSON.parse(initial.body).allowedDirectories).toEqual(["teams"]);
+    const denied = await call(api, "GET", "/api/lineage/status", "member-token");
+    expect(denied.status).toBe(403);
+
+    const updated = await call(api, "PATCH", "/api/admin/directory-permissions/member", "admin-token", { directories: ["teams", "lineage", "system"] });
+    expect(updated.status).toBe(200);
+    expect(JSON.parse(updated.body).directories).toEqual(["teams", "lineage"]);
+    const allowed = await call(api, "GET", "/api/lineage/status", "member-token");
+    expect(allowed.status).toBe(200);
+    const refreshed = await call(api, "GET", "/api/bootstrap", "member-token");
+    expect(JSON.parse(refreshed.body).allowedDirectories).toEqual(["lineage", "teams"]);
+  });
+
+  it("changes another user's role, revokes sessions, and protects the current administrator", async () => {
+    const changed = await call(api, "PATCH", "/api/users/owner/role", "admin-token", { role: "admin" });
+    expect(changed.status).toBe(200);
+    expect(repository.getUser("owner")?.role).toBe("admin");
+    const self = await call(api, "PATCH", "/api/users/admin/role", "admin-token", { role: "member" });
+    expect(self.status).toBe(409);
+    expect(JSON.parse(self.body)).toMatchObject({ code: "CANNOT_CHANGE_OWN_ROLE" });
+  });
+
+  it("stores MaxCompute credentials encrypted and never returns the secret", async () => {
+    const saved = await call(api, "PATCH", "/api/lineage/config", "admin-token", {
+      project: "analytics", endpoint: "https://service.cn-shanghai.maxcompute.aliyun.com/api",
+      accessKeyId: "LTAI-test-id", accessKeySecret: "highly-secret", scheduleTime: "05:45",
+    });
+    expect(saved.status).toBe(200);
+    expect(saved.body).not.toContain("highly-secret");
+    expect(saved.body).not.toContain("LTAI-test-id");
+    expect(JSON.parse(saved.body).config).toMatchObject({ credentialConfigured: true, scheduleTime: "05:45" });
+    const stored = repository.getMaxComputeConfig();
+    expect(stored?.credentialCiphertext).toMatch(/^v1\./);
+    expect(stored?.credentialCiphertext).not.toContain("highly-secret");
+  });
 });
 
 async function call(
@@ -248,6 +297,12 @@ function seed(repository: PersistenceRepository, workspace: string): void {
   repository.appendMessage({ id: "message", sessionId: base.id, senderType: "user", senderId: admin.id, content: "hello", metadata: {}, createdAt: now, updatedAt: null });
   const config: ClaudeConfig = { command: "secret-command-path", args: "--safe", workspaceRoot: workspace, modelContextTokens: 1_000_000, autoCompactRatio: 0.62, autoCompactEnabled: true, mcpToolAllowlist: [], enabled: true, available: true, version: "1", latencyMs: 1, authenticated: true, lastCheckAt: now, healthMessage: null, updatedAt: now };
   repository.saveClaudeConfig(config);
+  const maxCompute: MaxComputeConfig = {
+    enabled: false, command: "odpscmd", args: "", project: "", endpoint: "", credentialCiphertext: null,
+    credentialUpdatedAt: null, scheduleTime: "06:15", timezone: "Asia/Shanghai", lastStartedAt: null,
+    lastCompletedAt: null, lastStatus: "idle", lastError: null, lastDataDate: null, nextRunAt: null, updatedAt: now,
+  };
+  repository.saveMaxComputeConfig(maxCompute);
   repository.saveAuthSession({ token: digestSessionToken("admin-token"), userId: admin.id, expiresAt: now + 60_000, createdAt: now, lastSeenAt: now });
   repository.saveAuthSession({ token: digestSessionToken("member-token"), userId: member.id, expiresAt: now + 60_000, createdAt: now, lastSeenAt: now });
 }

@@ -1,4 +1,7 @@
 import { spawn } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 
 import { splitArguments } from "../runtime/runtime-helpers.js";
@@ -13,7 +16,18 @@ export interface OdpsCommandClientOptions {
   command: string;
   args: string;
   project: string;
+  configPath?: string;
   timeoutMs?: number;
+}
+
+export interface MaxComputeCredentials {
+  accessKeyId: string;
+  accessKeySecret: string;
+}
+
+export interface TemporaryOdpsConfigOptions extends MaxComputeCredentials {
+  endpoint: string;
+  project: string;
 }
 
 export class OdpsCommandClient implements MaxComputeQueryClient {
@@ -23,7 +37,7 @@ export class OdpsCommandClient implements MaxComputeQueryClient {
     if (!this.options.project) throw new Error("MaxCompute 项目名称尚未配置。");
     if (!fields.length) return [];
     const output = `set odps.sql.select.output.format={"needHeader":true,"fieldDelim":"\\t"};\n${sql.trim().replace(/;?\s*$/, ";")}`;
-    const args = [...splitArguments(this.options.args), `--project=${this.options.project}`, "-e", output];
+    const args = [...splitArguments(this.options.args), ...(this.options.configPath ? [`--config=${this.options.configPath}`] : []), `--project=${this.options.project}`, "-e", output];
     const child = spawn(this.options.command, args, {
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
@@ -65,5 +79,27 @@ export class OdpsCommandClient implements MaxComputeQueryClient {
       throw new Error("无法识别 odpscmd 输出。请确认客户端可用，并在 odps_config.ini 中关闭 use_instance_tunnel。");
     }
     return rows;
+  }
+}
+
+export async function withTemporaryOdpsConfig<T>(options: TemporaryOdpsConfigOptions, task: (configPath: string) => Promise<T>): Promise<T> {
+  for (const [name, value] of Object.entries(options)) {
+    if (!value.trim() || /[\r\n]/.test(value)) throw new Error(`${name} 配置不正确。`);
+  }
+  const root = await mkdtemp(join(tmpdir(), "cc-maxcompute-"));
+  const path = join(root, "odps_config.ini");
+  const content = [
+    `project_name=${options.project}`,
+    `access_id=${options.accessKeyId}`,
+    `access_key=${options.accessKeySecret}`,
+    `end_point=${options.endpoint}`,
+    "https_check=true",
+    "use_instance_tunnel=false",
+  ].join("\n");
+  try {
+    await writeFile(path, content, { mode: 0o600, flag: "wx" });
+    return await task(path);
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 }

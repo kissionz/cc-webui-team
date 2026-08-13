@@ -413,6 +413,31 @@ const migrations: Migration[] = [
       CREATE INDEX lineage_processed_jobs_date_idx ON lineage_processed_jobs(data_date);
     `,
   },
+  {
+    version: 5,
+    name: "system_permissions_and_encrypted_datasource",
+    sql: `
+      ALTER TABLE maxcompute_config ADD COLUMN endpoint TEXT NOT NULL DEFAULT '';
+      ALTER TABLE maxcompute_config ADD COLUMN credential_ciphertext TEXT;
+      ALTER TABLE maxcompute_config ADD COLUMN credential_updated_at INTEGER;
+
+      CREATE TABLE role_directory_permissions (
+        role TEXT NOT NULL CHECK (role IN ('admin', 'member')),
+        directory_key TEXT NOT NULL CHECK (directory_key IN ('teams', 'lineage', 'system')),
+        visible INTEGER NOT NULL CHECK (visible IN (0, 1)),
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(role, directory_key)
+      ) STRICT;
+
+      INSERT INTO role_directory_permissions(role, directory_key, visible, updated_at) VALUES
+        ('admin', 'teams', 1, 0),
+        ('admin', 'lineage', 1, 0),
+        ('admin', 'system', 1, 0),
+        ('member', 'teams', 1, 0),
+        ('member', 'lineage', 0, 0),
+        ('member', 'system', 0, 0);
+    `,
+  },
 ];
 
 export function migrateSchema(database: Database.Database): void {

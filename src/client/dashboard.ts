@@ -2,7 +2,7 @@ import type {
   Agent, AppState, AppView, HtmlValue, Permission, RealtimeEvent, Session, SessionStatus,
   SessionVisibility, TeamRole, Toast, User,
 } from "./types.js";
-import { api, downloadApi } from "./api.js";
+import { ApiError, api, downloadApi } from "./api.js";
 import { RealtimeConnection } from "./events.js";
 import { createAdminViews } from "./admin-views.js";
 import { createTeamViews } from "./team-views.js";
@@ -50,6 +50,8 @@ const seedState = (): AppState => ({
   teamRailOpen: false,
   rightRailOpen: false,
   mobileNavOpen: false,
+  allowedDirectories: ["teams"],
+  roleDirectoryPermissions: { admin: ["teams", "lineage", "system"], member: ["teams"] },
   users: [],
   teams: [],
   members: [],
@@ -123,7 +125,7 @@ function loadState(): AppState {
 function applyLocationToState(target: AppState): void {
   const params = new URLSearchParams(window.location.search);
   const view = params.get("view");
-  if (view && ["teams", "team", "lineage", "settings", "users", "audit"].includes(view)) target.activeView = view as AppView;
+  if (view && ["teams", "team", "lineage", "settings", "sync", "users", "audit", "permissions"].includes(view)) target.activeView = view as AppView;
   if (params.get("team")) target.selectedTeamId = params.get("team") || "";
   if (params.get("session")) target.selectedSessionId = params.get("session") || "";
   target.sessionSearch = params.get("q") || "";
@@ -187,7 +189,7 @@ async function refresh(): Promise<void> {
       await loadSessions({ reset: true });
       if (state.selectedSessionId) await loadMessages(state.selectedSessionId, { reset: true });
     }
-    if (state.activeView === "lineage") await lineageFeature.load();
+    if (state.activeView === "lineage" || state.activeView === "sync") await lineageFeature.load();
     syncLocation();
     render();
     connectEvents();
@@ -197,15 +199,15 @@ async function refresh(): Promise<void> {
       realtime = null;
     }
     setState({ currentUserId: null });
-    if (error instanceof Error && !/401|unauth/i.test(error.message)) toast(error.message, "error");
+    if (!(error instanceof ApiError && error.status === 401) && error instanceof Error) toast(error.message, "error");
   }
 }
 
 function normalizeSelection(): void {
   if (state.selectedTeamId && !state.teams.some((team) => team.id === state.selectedTeamId)) state.selectedTeamId = state.teams[0]?.id || "";
-  if (state.activeView === "settings" && !isSystemAdmin()) state.activeView = "teams";
-  if (state.activeView === "users" && !isSystemAdmin()) state.activeView = "teams";
-  if (state.activeView === "audit" && !isSystemAdmin()) state.activeView = "teams";
+  const systemViews: AppView[] = ["settings", "sync", "users", "audit", "permissions"];
+  if (systemViews.includes(state.activeView) && !state.allowedDirectories.includes("system")) state.activeView = "teams";
+  if (state.activeView === "lineage" && !state.allowedDirectories.includes("lineage")) state.activeView = "teams";
   if (state.activeView === "team" && !state.selectedTeamId) state.activeView = "teams";
 }
 
@@ -517,6 +519,17 @@ const {
   renderMessage, renderPermissionOverlay, renderModal,
 } = teamViews;
 
+const lineageFeature = createLineageFeature({
+  state: () => state,
+  isAdmin: isSystemAdmin,
+  appRoot,
+  topbar,
+  escape: escapeHtml,
+  fmt,
+  toast,
+  scheduleRender,
+});
+
 adminViews = createAdminViews({
   state: () => state,
   metrics: adminController.metrics,
@@ -536,18 +549,8 @@ adminViews = createAdminViews({
   topbar,
   icons,
   auditQuery: adminController.auditQuery,
+  renderDataSync: lineageFeature.renderDataSync,
   fallback: renderTeams,
-});
-
-const lineageFeature = createLineageFeature({
-  state: () => state,
-  isAdmin: isSystemAdmin,
-  appRoot,
-  topbar,
-  escape: escapeHtml,
-  fmt,
-  toast,
-  scheduleRender,
 });
 
 const uiShell = createUiShell({
@@ -571,7 +574,7 @@ const clientActions = createClientActions({
 const {
   login, createTeam, createSession, sendMessage, decidePermission, deleteSession, deleteTeam, removeMember,
   toggleSessionVisibility, toggleSessionArchive, removeToolApproval, retrySession, copyText, createUser,
-  changeOwnPassword, resetUserPassword, addMember, saveConfig, saveWorkspace,
+  changeOwnPassword, resetUserPassword, updateUserRole, saveDirectoryPermissions, addMember, saveConfig, saveWorkspace,
 } = clientActions;
 
 async function runAction(key: string, element: HTMLElement, action: () => Promise<void>, successMessage?: string): Promise<void> {
@@ -619,13 +622,14 @@ document.addEventListener("submit", (event) => {
     "team-template": () => adminController.saveTemplate(form),
     "lineage-query": () => lineageFeature.submitQuery(form),
     "lineage-config": () => lineageFeature.saveConfig(form),
+    "directory-permissions": () => saveDirectoryPermissions(form),
   };
   const action = actions[kind];
   if (action) void runAction(
     `form:${kind}:${form.dataset.userId || form.dataset.team || state.selectedSessionId}`,
     form,
     action,
-    ["message", "login", "team-template", "lineage-query", "lineage-config"].includes(kind) ? undefined : "保存成功",
+    ["message", "login", "team-template", "lineage-query", "lineage-config", "directory-permissions"].includes(kind) ? undefined : "保存成功",
   );
 });
 
@@ -658,6 +662,10 @@ document.addEventListener("change", (event) => {
     return;
   }
   if (!(target instanceof HTMLSelectElement)) return;
+  if (target.matches("[data-user-role]")) {
+    void runAction(`user-role:${target.dataset.userRole}`, target, () => updateUserRole(target.dataset.userRole || "", target.value));
+    return;
+  }
   if (target.matches("[data-session-member-filter]")) state.sessionMemberFilter = target.value || "all";
   else if (target.matches("[data-session-status-filter]")) state.sessionStatusFilter = target.value as AppState["sessionStatusFilter"];
   else if (target.matches("[data-session-archive-filter]")) state.sessionArchiveFilter = target.value as AppState["sessionArchiveFilter"];
@@ -697,7 +705,7 @@ document.addEventListener("click", (event) => {
         scheduleRender();
       });
     }
-    if (target.dataset.view === "lineage") void lineageFeature.load().catch(showError);
+    if (target.dataset.view === "lineage" || target.dataset.view === "sync") void lineageFeature.load().catch(showError);
     return;
   }
   if (target.dataset.openTeam) {
@@ -788,6 +796,7 @@ document.addEventListener("click", (event) => {
       await api("/api/claude/health-check", { method: "POST", body: "{}" });
       await refresh();
     } else if (actionName === "lineage-sync") await lineageFeature.triggerSync();
+    else if (actionName === "lineage-test-connection") await lineageFeature.testConnection();
     else if (actionName === "lineage-close-detail") lineageFeature.closeDetail();
     else if (actionName === "lineage-zoom-in") lineageFeature.zoomBy(0.15);
     else if (actionName === "lineage-zoom-out") lineageFeature.zoomBy(-0.15);
@@ -819,7 +828,7 @@ window.addEventListener("popstate", () => {
   applyLocationToState(state);
   render();
   if (state.activeView === "team") void loadSessions({ reset: true }).then(() => state.selectedSessionId ? loadMessages(state.selectedSessionId, { reset: true }) : undefined).then(() => scheduleTeamRender({ rail: true, chat: true, right: true }, 0)).catch(showError);
-  if (state.activeView === "lineage") void lineageFeature.load().catch(showError);
+  if (state.activeView === "lineage" || state.activeView === "sync") void lineageFeature.load().catch(showError);
 });
 
 void refresh();

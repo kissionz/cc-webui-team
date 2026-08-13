@@ -6,6 +6,7 @@ async function login(page: import("@playwright/test").Page): Promise<void> {
   await page.getByLabel("密码").fill("e2e-admin-password");
   await page.getByRole("button", { name: "登录工作台" }).click();
   await expect(page.getByRole("heading", { name: "团队工作台" })).toBeVisible();
+  await expect(page.getByText("登录已失效，请重新登录。")).toHaveCount(0);
 }
 
 test("管理员可登录、筛选会话并查看审计", async ({ page, isMobile }) => {
@@ -24,7 +25,8 @@ test("管理员可登录、筛选会话并查看审计", async ({ page, isMobile
   const download = page.waitForEvent("download");
   await page.getByRole("button", { name: "导出会话" }).click();
   expect((await download).suggestedFilename()).toMatch(/\.md$/);
-  await page.getByRole("button", { name: "审计日志" }).click();
+  await page.getByRole("button", { name: "系统设置" }).click();
+  await page.locator(".system-subnav [data-view='audit']").click();
   await expect(page.getByRole("heading", { name: "审计日志" })).toBeVisible();
   await page.getByRole("button", { name: "筛选日志" }).click();
   await expect(page.getByText("system.initialized")).toBeVisible();
@@ -55,7 +57,7 @@ test("新建会话后可以立即发送第一条消息", async ({ page, isMobile
 test("管理员可查看指标、应用模板并批量归档", async ({ page, isMobile }) => {
   test.skip(isMobile, "桌面端覆盖管理批量操作");
   await login(page);
-  await page.getByRole("button", { name: "Agent 设置" }).click();
+  await page.getByRole("button", { name: "系统设置" }).click();
   await expect(page.getByRole("heading", { name: "运行概览" })).toBeVisible();
   await page.getByText("新建团队模板").click();
   await page.getByLabel("名称").fill("E2E 默认策略");
@@ -101,21 +103,26 @@ test("移动端导航与会话抽屉可通过按钮开关", async ({ page, isMob
   expect(await page.locator("body").evaluate((body) => body.scrollWidth <= body.clientWidth + 1)).toBe(true);
 });
 
-test("数据血缘在同一工作台完成配置、查询和手动触发", async ({ page, isMobile }) => {
+test("数据同步集中配置后可查询血缘并手动触发", async ({ page, isMobile }) => {
   await login(page);
+  if (isMobile) await page.getByRole("button", { name: "打开导航" }).click();
+  await page.getByRole("button", { name: "系统设置" }).click();
+  await page.locator(".system-subnav [data-view='sync']").click();
+  await page.getByLabel("Project").fill("analytics");
+  await page.getByLabel("Endpoint").fill("https://service.cn-shanghai.maxcompute.aliyun.com/api");
+  await page.getByLabel("AccessKey ID").fill("LTAI-e2e-test");
+  await page.getByLabel("AccessKey Secret").fill("e2e-secret-value");
+  await page.getByLabel("启用每日自动同步").check();
+  await page.getByLabel(/每日执行时间/).fill("07:30");
+  await page.getByRole("button", { name: "保存数据源与调度" }).click();
+  await expect(page.getByText("同步设置已保存")).toBeVisible();
+  await expect(page.locator(".sync-summary-card", { hasText: "自动调度" })).toContainText("07:30");
+
   if (isMobile) await page.getByRole("button", { name: "打开导航" }).click();
   await page.getByRole("button", { name: "数据血缘" }).click();
   await expect(page.getByRole("heading", { name: "数据血缘" })).toBeVisible();
   await expect(page.locator(".lineage-workbench")).toHaveCount(1);
-
-  const settings = page.locator("details.lineage-sync-settings");
-  await settings.locator("summary").click();
-  await settings.getByLabel("执行项目").fill("analytics");
-  await settings.getByLabel("每日执行时间").fill("07:30");
-  await settings.getByRole("button", { name: "保存同步设置" }).click();
-  await expect(page.getByText("同步设置已保存")).toBeVisible();
-  await expect(settings.locator("summary")).toContainText("analytics · 每天 07:30");
-  await settings.locator("summary").click();
+  await expect(page.locator("details.lineage-sync-settings")).toHaveCount(0);
 
   const table = (id: string, name: string) => ({
     id, project: "analytics", name, type: "MANAGED_TABLE", comment: "E2E 示例", ownerId: null, ownerName: "alice",
@@ -150,4 +157,21 @@ test("数据血缘在同一工作台完成配置、查询和手动触发", async
   await syncRequest;
   await expect(page.getByText("血缘同步已启动")).toBeVisible();
   expect(await page.locator("body").evaluate((body) => body.scrollWidth <= body.clientWidth + 1)).toBe(true);
+});
+
+test("系统设置统一管理用户与目录权限", async ({ page, isMobile }) => {
+  test.skip(isMobile, "桌面端覆盖单行用户管理布局");
+  await login(page);
+  await page.getByRole("button", { name: "系统设置" }).click();
+  expect((await page.locator(".system-subnav-item").first().boundingBox())?.height ?? 0).toBeLessThan(70);
+  await page.locator(".system-subnav [data-view='users']").click();
+  await expect(page.locator(".user-row").first()).toBeVisible();
+  const rowBox = await page.locator(".user-row").first().boundingBox();
+  expect(rowBox?.height ?? 0).toBeLessThan(100);
+  await page.getByRole("button", { name: "创建用户" }).click();
+  await expect(page.getByRole("dialog", { name: "创建用户" })).toBeVisible();
+  await page.getByRole("button", { name: "取消" }).click();
+  await page.locator(".system-subnav [data-view='permissions']").click();
+  await expect(page.getByRole("heading", { name: "角色目录权限" })).toBeVisible();
+  await expect(page.locator("form[data-form='directory-permissions'] input[name='lineage']")).not.toBeChecked();
 });

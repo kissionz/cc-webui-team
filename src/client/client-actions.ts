@@ -191,11 +191,26 @@ async function createUser(form: HTMLFormElement): Promise<void> {
     username,
     password: String(data.get("password") || ""),
     displayName: String(data.get("displayName")).trim(),
-    email: `${username}@example.com`,
+    email: String(data.get("email") || "").trim(),
     role: String(data.get("role")),
   };
   await api("/api/users", { method: "POST", body: JSON.stringify(payload) });
+  setActiveModal("");
   form.reset();
+  await refresh();
+}
+
+async function updateUserRole(userId: string, role: string): Promise<void> {
+  await api(`/api/users/${encodeURIComponent(userId)}/role`, { method: "PATCH", body: JSON.stringify({ role }) });
+  toast("用户角色已更新，原登录态已注销", "success");
+  await refresh();
+}
+
+async function saveDirectoryPermissions(form: HTMLFormElement): Promise<void> {
+  const data = new FormData(form);
+  const directories = ["teams", ...(data.get("lineage") === "on" ? ["lineage"] : [])];
+  await api("/api/admin/directory-permissions/member", { method: "PATCH", body: JSON.stringify({ directories }) });
+  toast("Member 目录权限已更新", "success");
   await refresh();
 }
 
@@ -263,6 +278,6 @@ async function saveWorkspace(form: HTMLFormElement): Promise<void> {
   return {
     login, createTeam, createSession, sendMessage, decidePermission, deleteSession, deleteTeam, removeMember,
     toggleSessionVisibility, toggleSessionArchive, removeToolApproval, retrySession, copyText, createUser,
-    changeOwnPassword, resetUserPassword, addMember, saveConfig, saveWorkspace,
+    changeOwnPassword, resetUserPassword, updateUserRole, saveDirectoryPermissions, addMember, saveConfig, saveWorkspace,
   };
 }

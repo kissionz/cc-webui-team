@@ -45,7 +45,6 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
       <section class="content lineage-page">
         <div class="lineage-workbench">
           ${renderQueryBar()}
-          ${deps.isAdmin() ? renderSyncSettings() : ""}
           <div class="lineage-stage ${detail || columnResult ? "has-inspector" : ""}">
             <section class="lineage-canvas" aria-label="血缘关系图">
               ${renderCanvas()}
@@ -83,22 +82,31 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
       <label class="lineage-field lineage-target-field"><span>目标表（路径查询）</span><input class="input" name="target" list="lineage-table-options" value="${deps.escape(targetText)}" placeholder="选择路径终点" /></label>`;
   }
 
-  function renderSyncSettings(): string {
+  function renderDataSync(): string {
     const config = status?.config;
-    if (!config) return "";
+    if (!config) return `<section class="content"><div class="card card-padding-lg"><p class="helper">正在读取 MaxCompute 数据同步配置…</p></div></section>`;
     const lastRun = status?.runs[0];
-    return `<details class="lineage-sync-settings"><summary><span>MaxCompute 同步设置</span><span class="meta">${config.project ? deps.escape(config.project) : "尚未配置项目"} · 每天 ${deps.escape(config.scheduleTime)}</span></summary>
-      <form class="lineage-settings-form" data-form="lineage-config">
-        <label class="toggle-row"><input type="checkbox" name="enabled" ${config.enabled ? "checked" : ""} />启用每日自动同步</label>
-        <label class="lineage-field"><span>执行项目</span><input class="input" name="project" value="${deps.escape(config.project)}" placeholder="MaxCompute project" required /></label>
-        <label class="lineage-field"><span>每日执行时间</span><input class="input" type="time" name="scheduleTime" value="${deps.escape(config.scheduleTime)}" required /></label>
-        <label class="lineage-field"><span>odpscmd 命令</span><input class="input" name="command" value="${deps.escape(config.command || "odpscmd")}" required /></label>
-        <label class="lineage-field lineage-args-field"><span>启动参数</span><input class="input" name="args" value="${deps.escape(config.args || "")}" placeholder="例如 --config=/run/secrets/odps_config.ini" /></label>
-        <button class="button primary" type="submit">保存同步设置</button>
-      </form>
-      <div class="lineage-run-summary"><span>凭据继续由部署机的 odps_config.ini 管理，不写入系统库。</span>${lastRun ? `<span>最近任务：${lastRun.status === "success" ? "成功" : lastRun.status === "failed" ? "失败" : "运行中"}，处理 ${lastRun.tablesProcessed} 张表、${lastRun.edgesProcessed} 条关系</span>` : ""}</div>
-      ${config.lastError ? `<div class="inline-alert error"><strong>最近同步失败</strong><span>${deps.escape(config.lastError)}</span></div>` : ""}
-    </details>`;
+    const credentialState = config.credentialConfigured
+      ? `<span class="sync-pill success"><i></i>已保存 ${deps.escape(config.accessKeyIdMasked || "AccessKey")}</span>`
+      : `<span class="sync-pill neutral"><i></i>尚未配置凭据</span>`;
+    return `<section class="content data-sync-page">
+      <div class="sync-overview">
+        <article class="card sync-summary-card"><span>连接状态</span><strong>${credentialState}</strong><small>${config.endpoint ? deps.escape(config.endpoint) : "请配置服务 Endpoint"}</small></article>
+        <article class="card sync-summary-card"><span>自动调度</span><strong>${config.enabled ? `每天 ${deps.escape(config.scheduleTime)}` : "已关闭"}</strong><small>${config.nextRunAt ? `下次 ${deps.fmt(config.nextRunAt)}` : "保存后计算下次执行时间"}</small></article>
+        <article class="card sync-summary-card"><span>最近同步</span><strong>${lastRun ? (lastRun.status === "success" ? "成功" : lastRun.status === "failed" ? "失败" : "运行中") : "尚未执行"}</strong><small>${lastRun ? `${lastRun.tablesProcessed} 张表 · ${lastRun.edgesProcessed} 条关系` : "可保存配置后手动触发"}</small></article>
+      </div>
+      <div class="sync-settings-grid">
+        <form class="card card-padding-lg data-source-form" data-form="lineage-config">
+          <div class="section-title"><div><h3>MaxCompute 数据源</h3><p class="helper">AccessKey 加密保存，运行 odpscmd 时仅写入权限为 0600 的临时配置文件，任务结束立即删除。</p></div>${credentialState}</div>
+          <div class="grid two"><div class="field"><label for="mc-project">Project</label><input class="input" id="mc-project" name="project" value="${deps.escape(config.project)}" placeholder="your_maxcompute_project" required /></div><div class="field"><label for="mc-endpoint">Endpoint</label><input class="input" id="mc-endpoint" name="endpoint" type="url" value="${deps.escape(config.endpoint || "")}" placeholder="https://service.cn-shanghai.maxcompute.aliyun.com/api" required /></div></div>
+          <div class="grid two"><div class="field"><label for="mc-ak-id">AccessKey ID</label><input class="input" id="mc-ak-id" name="accessKeyId" autocomplete="off" placeholder="${deps.escape(config.accessKeyIdMasked || "留空则保留现有凭据")}" /></div><div class="field"><label for="mc-ak-secret">AccessKey Secret</label><input class="input" id="mc-ak-secret" name="accessKeySecret" type="password" autocomplete="new-password" placeholder="${config.credentialConfigured ? "留空则保留现有凭据" : "请输入 AccessKey Secret"}" /></div></div>
+          <div class="sync-schedule-row"><label class="toggle-row"><input type="checkbox" name="enabled" ${config.enabled ? "checked" : ""} />启用每日自动同步</label><div class="field"><label for="mc-schedule">每日执行时间（Asia/Shanghai）</label><input class="input" id="mc-schedule" type="time" name="scheduleTime" value="${deps.escape(config.scheduleTime)}" required /></div></div>
+          <details class="advanced-settings"><summary>高级执行设置</summary><div class="grid two"><div class="field"><label for="mc-command">odpscmd 命令</label><input class="input" id="mc-command" name="command" value="${deps.escape(config.command || "odpscmd")}" required /></div><div class="field"><label for="mc-args">额外启动参数</label><input class="input" id="mc-args" name="args" value="${deps.escape(config.args || "")}" placeholder="通常留空" /></div></div></details>
+          <div class="form-actions"><button class="button primary" type="submit">保存数据源与调度</button><button class="button" type="button" data-action="lineage-test-connection">验证连接</button><button class="button" type="button" data-action="lineage-sync" ${status?.running ? "disabled" : ""}>${status?.running ? "正在同步" : "立即同步"}</button></div>
+        </form>
+        <aside class="card card-padding-lg sync-history"><div class="section-title"><h3>最近执行</h3><span class="meta">数据日期 T-1</span></div><div class="sync-run-list">${status?.runs.map((run) => `<div class="sync-run-row"><span class="run-dot ${run.status}"></span><div><strong>${run.trigger === "manual" ? "手动同步" : "自动调度"}</strong><small>${deps.fmt(run.startedAt)} · 数据日 ${deps.escape(run.dataDate)}</small></div><span>${run.status === "success" ? "成功" : run.status === "failed" ? "失败" : "运行中"}</span></div>`).join("") || '<p class="empty-inline">暂无执行记录</p>'}</div>${config.lastError ? `<div class="inline-alert error"><strong>最近同步失败</strong><span>${deps.escape(config.lastError)}</span></div>` : ""}<div class="security-note"><strong>凭据安全</strong><p>生产环境建议设置 <code>CREDENTIAL_ENCRYPTION_KEY</code> 并使用独立 RAM 用户、最小权限和定期轮换。页面与接口不会回传 Secret。</p></div></aside>
+      </div>
+    </section>`;
   }
 
   function renderCanvas(): string {
@@ -200,10 +208,16 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
 
   async function saveConfig(form: HTMLFormElement): Promise<void> {
     const data = new FormData(form);
-    const response = await api<{ config: MaxComputeConfigView }>("/api/lineage/config", { method: "PATCH", body: JSON.stringify({ enabled: data.get("enabled") === "on", project: String(data.get("project") || ""), scheduleTime: String(data.get("scheduleTime") || ""), command: String(data.get("command") || ""), args: String(data.get("args") || "") }) });
+    const response = await api<{ config: MaxComputeConfigView }>("/api/lineage/config", { method: "PATCH", body: JSON.stringify({ enabled: data.get("enabled") === "on", project: String(data.get("project") || ""), endpoint: String(data.get("endpoint") || ""), accessKeyId: String(data.get("accessKeyId") || ""), accessKeySecret: String(data.get("accessKeySecret") || ""), scheduleTime: String(data.get("scheduleTime") || ""), command: String(data.get("command") || ""), args: String(data.get("args") || "") }) });
     status = { ...(status ?? { running: false, runs: [] }), config: response.config };
     deps.toast("同步设置已保存", "success");
     deps.scheduleRender();
+  }
+
+  async function testConnection(): Promise<void> {
+    const result = await api<{ connected: boolean; latencyMs: number }>("/api/lineage/connection-test", { method: "POST", body: "{}" });
+    deps.toast(`MaxCompute 连接成功（${result.latencyMs} ms）`, "success");
+    await load();
   }
 
   async function triggerSync(): Promise<void> {
@@ -256,7 +270,7 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
 
   function dateText(value?: number | null): string { return value ? deps.fmt(value) : "暂无"; }
 
-  return { render, load, submitQuery, saveConfig, triggerSync, search, selectNode, setMode, closeDetail, chooseColumn, zoomBy, fit, downloadGraph };
+  return { render, renderDataSync, load, submitQuery, saveConfig, testConnection, triggerSync, search, selectNode, setMode, closeDetail, chooseColumn, zoomBy, fit, downloadGraph };
 }
 
 function syncStatus(status: LineageStatus | null): string {

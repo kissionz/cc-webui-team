@@ -90,8 +90,9 @@ Windows 可运行 `scripts/prepare-host-claude.ps1`。包含宿主机绝对路�
 - `CLAUDE_COMMAND`：通常留空或写 `claude`，让 SDK 使用自带运行时；只有使用明确存在的自定义可执行文件时才填写路径。
 - `CLAUDE_ALLOW_UNSANDBOXED_WINDOWS`：Windows 原生环境不支持 Claude Code sandbox。推荐改用 WSL2；仅当主机和团队成员均受信任时才设为 `true`，允许 SDK 无沙箱回退。
 - `MCP_TOOL_ALLOWLIST`：平台预授权工具；其余工具由会话内审批。
-- `MAXCOMPUTE_PROJECT`、`MAXCOMPUTE_COMMAND`、`MAXCOMPUTE_ARGS`：表血缘抽取所用项目和 `odpscmd` 启动方式。AccessId 等凭据只放在部署机的 `odps_config.ini` 或密钥挂载中，不写入平台数据库。
-- `MAXCOMPUTE_ENABLED`、`MAXCOMPUTE_SCHEDULE_TIME`：是否启用每日同步及 Asia/Shanghai 执行时间；管理员可在“数据血缘”页面继续调整，并可随时手动触发。默认 06:15 抽取前一天数据。
+- `MAXCOMPUTE_PROJECT`、`MAXCOMPUTE_COMMAND`、`MAXCOMPUTE_ARGS`：表血缘抽取所用项目和 `odpscmd` 启动方式；也可在“系统设置 → 数据同步”直接配置。
+- `MAXCOMPUTE_ENABLED`、`MAXCOMPUTE_SCHEDULE_TIME`：是否启用每日同步及 Asia/Shanghai 执行时间；管理员可在“系统设置 → 数据同步”调整、验证连接并随时手动触发。默认 06:15 抽取前一天数据。
+- `CREDENTIAL_ENCRYPTION_KEY`：可选的 32 字节 Base64 主密钥。MaxCompute AccessKey 使用 AES-256-GCM 加密后保存；留空时自动生成 `DATA_DIR/credential.key`（0600）。生产环境建议由部署密钥管理注入并纳入备份恢复流程。
 - `BACKUP_ENABLED`、`BACKUP_INTERVAL_HOURS`、`BACKUP_RETENTION`：在线备份开关、周期和保留数量。
 
 公网部署建议由 Caddy、Nginx 或同类反向代理终止 TLS，并将数据目录和 workspace 纳入独立备份策略。SQLite 的 `-wal` 与 `-shm` 文件属于数据库运行状态，不应单独复制；优先使用 SQLite 在线备份或在停机后整体备份。
@@ -127,14 +128,18 @@ npm run db:restore -- \
 
 ## 数据血缘
 
+- 管理员在“系统设置 → 数据同步”填写 Project、MaxCompute 服务 Endpoint、AccessKey ID/Secret 和调度时间。保存后可先“验证连接”，再手动同步；查询页面不再混放管理配置。
+- AccessKey Secret 不会回传前端，也不会出现在命令行参数或日志中。系统使用 AES-256-GCM 加密后入库；执行时生成 0600 临时 `odps_config.ini`，进程结束后立即删除。生产环境仍应使用独立 RAM 用户、最小权限并定期轮换 AccessKey。
 - 表血缘每天从 `SYSTEM_CATALOG.INFORMATION_SCHEMA` 的 `TABLES`、`COLUMNS`、`PARTITIONS`、`TABLE_ACCESS_INFO` 和 `TASKS_HISTORY` 抽取。系统把任务输入表到输出表固化为关系，并保存 Owner、最近调度、最近访问、分区与存储等元数据。
 - `TASKS_HISTORY` 只保留近期数据，首次上线后应尽快完成一次手动同步；重复抽取同一 `inst_id` 不会重复累计关系。
 - 当前按默认 Schema 使用 `project.table` 标识。运行 `odpscmd` 的账号需要读取租户级 Information Schema 的权限。
 - 字段血缘不入库。每次查询只在所选团队 workspace 内启动一次只读 Claude Code 分析，仅允许 `Read`、`Glob`、`Grep`，并由服务端重新读取真实文件和行号后返回代码片段；缺少可验证代码证据的关系不会展示。
+- Docker 镜像已经包含 Java 17 和官方 `odpscmd`；直接在宿主机运行时需自行安装 Java 8+ 与 [MaxCompute 客户端](https://help.aliyun.com/zh/maxcompute/user-guide/maxcompute-client/)。租户级 Information Schema 授权见[阿里云文档](https://help.aliyun.com/zh/maxcompute/user-guide/tenant-level-information-schema/)。
 
 ## 权限与运行模型
 
 - 系统角色：管理员、成员。
+- “系统设置 → 权限设置”可配置 Member 是否可见并访问数据血缘；团队工作台固定可见，系统设置固定仅管理员可见。菜单隐藏与后端接口鉴权同时生效。
 - 团队角色：所有者、管理员、成员、查看者。
 - 私有会话仅创建者和系统管理员可见；团队会话按团队成员关系可见。
 - 同一会话只允许一个活跃任务；并发超限时进入公平队列。

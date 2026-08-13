@@ -4,7 +4,7 @@ import { createLiveState } from "./live-state.js";
 type TeamParts = { rail: boolean; chat: boolean; right: boolean };
 export interface UiShellDeps {
   state(): AppState;
-  adminViews: { settings(): string; users(): string; audit(): string };
+  adminViews: { settings(): string; sync(): string; users(): string; audit(): string; permissions(): string };
   renderLineage(): string;
   renderLogin(error?: string): void;
   renderTeams(): string;
@@ -50,8 +50,10 @@ function render(): void {
   }
   let html = "";
   if (state.activeView === "settings") html = adminViews.settings();
+  else if (state.activeView === "sync") html = adminViews.sync();
   else if (state.activeView === "users") html = adminViews.users();
   else if (state.activeView === "audit") html = adminViews.audit();
+  else if (state.activeView === "permissions") html = adminViews.permissions();
   else if (state.activeView === "lineage") html = renderLineage();
   else if (state.activeView === "team") html = renderTeamDetail();
   else html = renderTeams();

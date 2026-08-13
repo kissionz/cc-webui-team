@@ -1,11 +1,13 @@
 import { createId } from "../domain/index.js";
 import type { LineageSyncRun, MaxComputeConfig } from "../domain/index.js";
 import type { PersistenceRepository } from "../persistence/index.js";
-import { OdpsCommandClient } from "./maxcompute-client.js";
+import type { SecretBox } from "../security/secret-box.js";
+import { OdpsCommandClient, withTemporaryOdpsConfig, type MaxComputeCredentials } from "./maxcompute-client.js";
 import { LineageSyncService, type LineageSyncResult } from "./sync-service.js";
 
 export interface LineageSchedulerOptions {
   repository: PersistenceRepository;
+  secretBox?: SecretBox;
   now?: () => number;
   onCompleted?: (run: LineageSyncRun) => void;
   onError?: (run: LineageSyncRun) => void;
@@ -53,6 +55,9 @@ export class LineageScheduler {
     const config = this.options.repository.getMaxComputeConfig();
     if (!config) return Promise.reject(new Error("MaxCompute 配置不存在。"));
     if (!config.project) return Promise.reject(new Error("请先配置 MaxCompute 项目名称。"));
+    if (!this.options.sync && (!config.endpoint || !config.credentialCiphertext || !this.options.secretBox)) {
+      return Promise.reject(new Error("请先保存 MaxCompute 数据源并验证连接。"));
+    }
     const dataDate = previousShanghaiDate(this.now());
     const startedAt = this.now();
     const run: LineageSyncRun = {
@@ -104,8 +109,13 @@ export class LineageScheduler {
   }
 
   private defaultSync(config: MaxComputeConfig, dataDate: string): Promise<LineageSyncResult> {
-    const client = new OdpsCommandClient({ command: config.command, args: config.args, project: config.project });
-    return new LineageSyncService({ repository: this.options.repository, client, project: config.project, now: this.now }).sync(dataDate);
+    if (!config.credentialCiphertext || !this.options.secretBox) return Promise.reject(new Error("请先配置 MaxCompute AccessKey 并验证连接。"));
+    if (!config.endpoint) return Promise.reject(new Error("请先配置 MaxCompute Endpoint。"));
+    const credential = this.options.secretBox.decrypt<MaxComputeCredentials>(config.credentialCiphertext);
+    return withTemporaryOdpsConfig({ ...credential, endpoint: config.endpoint, project: config.project }, async (configPath) => {
+      const client = new OdpsCommandClient({ command: config.command, args: config.args, project: config.project, configPath });
+      return new LineageSyncService({ repository: this.options.repository, client, project: config.project, now: this.now }).sync(dataDate);
+    });
   }
 }
 

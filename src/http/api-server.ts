@@ -14,9 +14,11 @@ import {
   createId,
   isSystemAdmin,
   type AuditLog,
+  type AppDirectory,
   type ClaudeConfig,
   type ConversationSession,
   type JsonObject,
+  type SystemRole,
   type User,
 } from "../domain/index.js";
 import type { RuntimeEvent } from "../runtime/claude-runtime.js";
@@ -43,6 +45,7 @@ import { JsonLogger, redactRecord, type StructuredLogger } from "../observabilit
 import type { LineageScheduler } from "../lineage/scheduler.js";
 import type { ColumnLineageAnalyzer } from "../lineage/column-analyzer.js";
 import { LineageRoutes } from "./routes/lineage.js";
+import type { SecretBox } from "../security/secret-box.js";
 
 const execFileAsync = promisify(execFile);
 export interface ApiServerOptions {
@@ -56,6 +59,7 @@ export interface ApiServerOptions {
   backup?: MetricsSnapshotSource;
   lineageScheduler: LineageScheduler;
   columnLineageAnalyzer: ColumnLineageAnalyzer;
+  secretBox: SecretBox;
 }
 
 export class ApiServer {
@@ -117,6 +121,7 @@ export class ApiServer {
       ...routeOptions,
       scheduler: options.lineageScheduler,
       analyzer: options.columnLineageAnalyzer,
+      secretBox: options.secretBox,
       maxBodySize: this.config.maxBodySize,
       claudeConfig: () => this.repository.getClaudeConfig(),
     });
@@ -214,11 +219,15 @@ export class ApiServer {
     if (method === "PATCH" && path === "/api/claude/config") return this.updateClaudeConfig(request, response, auth.user);
     if (method === "POST" && path === "/api/claude/health-check") return this.checkClaudeHealth(response, auth.user);
     if (method === "POST" && path === "/api/users") return this.createUser(request, response, auth.user);
+    if (method === "GET" && path === "/api/admin/directory-permissions") return this.directoryPermissions(response, auth.user);
+    if (method === "PATCH" && path === "/api/admin/directory-permissions/member") return this.updateDirectoryPermissions(request, response, auth.user);
 
     let match = path.match(/^\/api\/users\/([^/]+)\/password$/);
     if (match && method === "PATCH") return this.resetUserPassword(request, response, auth.user, decodePart(match[1]));
     match = path.match(/^\/api\/users\/([^/]+)\/status$/);
     if (match && method === "PATCH") return this.toggleUserStatus(response, auth.user, decodePart(match[1]));
+    match = path.match(/^\/api\/users\/([^/]+)\/role$/);
+    if (match && method === "PATCH") return this.updateUserRole(request, response, auth.user, decodePart(match[1]));
     throw new HttpError(404, "NOT_FOUND", "接口不存在。");
   }
 
@@ -238,6 +247,11 @@ export class ApiServer {
     const admin = isSystemAdmin(user);
     sendJson(response, 200, {
       currentUserId: user.id,
+      allowedDirectories: this.repository.getDirectoryPermissions(user.role),
+      roleDirectoryPermissions: admin ? {
+        admin: this.repository.getDirectoryPermissions("admin"),
+        member: this.repository.getDirectoryPermissions("member"),
+      } : undefined,
       users,
       teams,
       members,
@@ -299,6 +313,43 @@ export class ApiServer {
     if (status === "disabled") this.repository.revokeAuthSessionsForUser(target.id);
     this.audit(user.id, "user.status_changed", "user", target.id, { status });
     sendJson(response, 200, { user: publicUser(updated) });
+  }
+
+  private async updateUserRole(request: IncomingMessage, response: ServerResponse, user: User, userId: string): Promise<void> {
+    if (!isSystemAdmin(user)) throw forbidden();
+    const target = this.requireUser(userId);
+    const body = record(await readJsonBody(request, this.config.maxBodySize));
+    const role = enumValue(body.role, ["admin", "member"] as const, "role");
+    if (target.id === user.id && role !== target.role) throw new HttpError(409, "CANNOT_CHANGE_OWN_ROLE", "不能修改当前登录账号的系统角色。");
+    if (target.role === "admin" && target.status === "active" && role !== "admin" && this.repository.listUsers().filter((candidate) => candidate.role === "admin" && candidate.status === "active").length <= 1) {
+      throw new HttpError(409, "LAST_ADMIN", "系统必须保留至少一个启用中的管理员。");
+    }
+    const updated = { ...target, role, updatedAt: this.now() };
+    this.repository.saveUser(updated);
+    this.repository.revokeAuthSessionsForUser(target.id);
+    this.audit(user.id, "user.role_changed", "user", target.id, { role });
+    sendJson(response, 200, { user: publicUser(updated) });
+  }
+
+  private directoryPermissions(response: ServerResponse, user: User): void {
+    if (!isSystemAdmin(user)) throw forbidden();
+    sendJson(response, 200, {
+      permissions: {
+        admin: this.repository.getDirectoryPermissions("admin"),
+        member: this.repository.getDirectoryPermissions("member"),
+      },
+    });
+  }
+
+  private async updateDirectoryPermissions(request: IncomingMessage, response: ServerResponse, user: User): Promise<void> {
+    if (!isSystemAdmin(user)) throw forbidden();
+    const body = record(await readJsonBody(request, this.config.maxBodySize));
+    if (!Array.isArray(body.directories)) throw invalid("directories 必须是目录数组。");
+    const requested = body.directories.map((directory) => enumValue(directory, ["teams", "lineage", "system"] as const, "directory"));
+    const directories: AppDirectory[] = ["teams", ...requested.filter((directory): directory is AppDirectory => directory === "lineage")];
+    this.repository.saveDirectoryPermissions("member", directories, this.now());
+    this.audit(user.id, "role.directories_updated", "system_role", "member", { directories });
+    sendJson(response, 200, { role: "member" satisfies SystemRole, directories });
   }
 
   private async updateClaudeConfig(request: IncomingMessage, response: ServerResponse, user: User): Promise<void> {

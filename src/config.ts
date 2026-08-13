@@ -80,6 +80,8 @@ export interface AppConfig {
   autoCompactRatio: number;
   autoCompactEnabled: boolean;
   mcpToolAllowlist: string[];
+  credentialEncryptionKey: string;
+  credentialKeyFile: string;
   maxCompute: {
     enabled: boolean;
     command: string;
@@ -129,6 +131,8 @@ export function loadConfig(rootDir = process.cwd()): AppConfig {
     autoCompactRatio: boundedNumber("AUTO_COMPACT_RATIO", 0.62, 0.1, 0.9),
     autoCompactEnabled: process.env.AUTO_COMPACT_ENABLED !== "false",
     mcpToolAllowlist: csv("MCP_TOOL_ALLOWLIST"),
+    credentialEncryptionKey: process.env.CREDENTIAL_ENCRYPTION_KEY || "",
+    credentialKeyFile: resolve(process.env.CREDENTIAL_KEY_FILE || join(dataDir, "credential.key")),
     maxCompute: {
       enabled: process.env.MAXCOMPUTE_ENABLED === "true",
       command: process.env.MAXCOMPUTE_COMMAND || "odpscmd",

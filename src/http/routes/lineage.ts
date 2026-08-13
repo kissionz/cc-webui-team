@@ -3,6 +3,8 @@ import type { PersistenceRepository } from "../../persistence/index.js";
 import type { ClaudeConfig } from "../../domain/index.js";
 import type { ColumnLineageAnalyzer } from "../../lineage/column-analyzer.js";
 import type { LineageScheduler } from "../../lineage/scheduler.js";
+import { OdpsCommandClient, withTemporaryOdpsConfig, type MaxComputeCredentials } from "../../lineage/maxcompute-client.js";
+import type { SecretBox } from "../../security/secret-box.js";
 import { HttpError, readJsonBody, sendJson } from "../core.js";
 import { assertOnlyKeys, inputBoolean, inputEnum, inputInteger, inputString, objectBody, optionalQuery, queryInteger } from "../validation.js";
 import type { RouteDefinition, RouteRequest } from "./shared.js";
@@ -12,6 +14,7 @@ export interface LineageRoutesOptions {
   repository: PersistenceRepository;
   scheduler: LineageScheduler;
   analyzer: ColumnLineageAnalyzer;
+  secretBox: SecretBox;
   maxBodySize: number;
   now: () => number;
   claudeConfig: () => ClaudeConfig | null;
@@ -26,6 +29,7 @@ export class LineageRoutes {
       { method: "GET", path: "/api/lineage/status", handle: (input) => this.status(input) },
       { method: "PATCH", path: "/api/lineage/config", handle: (input) => this.updateConfig(input) },
       { method: "POST", path: "/api/lineage/sync", handle: (input) => this.manualSync(input) },
+      { method: "POST", path: "/api/lineage/connection-test", handle: (input) => this.testConnection(input) },
       { method: "GET", path: "/api/lineage/tables", handle: (input) => this.searchTables(input) },
       { method: "GET", path: /^\/api\/lineage\/tables\/([^/]+)$/, handle: (input) => this.tableDetail(input) },
       { method: "GET", path: "/api/lineage/graph", handle: (input) => this.graph(input) },
@@ -34,9 +38,10 @@ export class LineageRoutes {
   }
 
   private status({ response, auth }: RouteRequest): void {
+    this.assertDirectoryAccess(auth.user);
     const config = this.options.repository.getMaxComputeConfig();
     sendJson(response, 200, {
-      config: config ? configDto(config, isSystemAdmin(auth.user)) : null,
+      config: config ? configDto(config, isSystemAdmin(auth.user), this.options.secretBox) : null,
       running: this.options.scheduler.isRunning(),
       runs: this.options.repository.listLineageSyncRuns(8),
     });
@@ -47,17 +52,30 @@ export class LineageRoutes {
     const current = this.options.repository.getMaxComputeConfig();
     if (!current) throw new HttpError(500, "MAXCOMPUTE_CONFIG_MISSING", "MaxCompute 配置尚未初始化。");
     const body = objectBody(await readJsonBody(request, this.options.maxBodySize));
-    assertOnlyKeys(body, ["enabled", "command", "args", "project", "scheduleTime"]);
+    assertOnlyKeys(body, ["enabled", "command", "args", "project", "endpoint", "scheduleTime", "accessKeyId", "accessKeySecret", "clearCredentials"]);
     const scheduleTime = body.scheduleTime === undefined ? current.scheduleTime : inputString(body.scheduleTime, "scheduleTime", 5, 5);
     if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(scheduleTime)) throw new HttpError(400, "INVALID_SCHEDULE_TIME", "调度时间必须使用 HH:mm 格式。");
     const project = body.project === undefined ? current.project : inputString(body.project, "project", 0, 128);
     if (project && !/^[A-Za-z0-9_.-]+$/.test(project)) throw new HttpError(400, "INVALID_PROJECT", "MaxCompute 项目名称格式不正确。");
+    const endpoint = body.endpoint === undefined ? current.endpoint : validEndpoint(inputString(body.endpoint, "endpoint", 0, 512));
+    const accessKeyId = body.accessKeyId === undefined ? "" : inputString(body.accessKeyId, "accessKeyId", 0, 256);
+    const accessKeySecret = body.accessKeySecret === undefined ? "" : inputString(body.accessKeySecret, "accessKeySecret", 0, 512);
+    const clearCredentials = body.clearCredentials === undefined ? false : inputBoolean(body.clearCredentials, "clearCredentials");
+    if (Boolean(accessKeyId) !== Boolean(accessKeySecret)) throw new HttpError(400, "INCOMPLETE_CREDENTIAL", "AccessKey ID 和 AccessKey Secret 必须同时填写。");
+    const credentialCiphertext = clearCredentials
+      ? null
+      : accessKeyId && accessKeySecret
+        ? this.options.secretBox.encrypt({ accessKeyId, accessKeySecret } satisfies MaxComputeCredentials)
+        : current.credentialCiphertext;
     const updated: MaxComputeConfig = {
       ...current,
       enabled: body.enabled === undefined ? current.enabled : inputBoolean(body.enabled, "enabled"),
       command: body.command === undefined ? current.command : inputString(body.command, "command", 1, 512),
       args: body.args === undefined ? current.args : inputString(body.args, "args", 0, 2_000),
       project,
+      endpoint,
+      credentialCiphertext,
+      credentialUpdatedAt: clearCredentials ? null : accessKeyId ? this.options.now() : current.credentialUpdatedAt,
       scheduleTime,
       updatedAt: this.options.now(),
     };
@@ -65,7 +83,21 @@ export class LineageRoutes {
     this.options.scheduler.reschedule();
     const saved = this.options.repository.getMaxComputeConfig() ?? updated;
     this.options.audit(auth.user.id, "lineage.config.updated", "maxcompute_config", "singleton", { enabled: saved.enabled, project: saved.project, scheduleTime: saved.scheduleTime });
-    sendJson(response, 200, { config: configDto(saved, true) });
+    sendJson(response, 200, { config: configDto(saved, true, this.options.secretBox) });
+  }
+
+  private async testConnection({ response, auth }: RouteRequest): Promise<void> {
+    if (!isSystemAdmin(auth.user)) throw forbidden();
+    const config = this.options.repository.getMaxComputeConfig();
+    if (!config?.project || !config.endpoint || !config.credentialCiphertext) throw new HttpError(400, "MAXCOMPUTE_CONFIG_INCOMPLETE", "请先保存项目、Endpoint 和 AccessKey。");
+    const credential = this.options.secretBox.decrypt<MaxComputeCredentials>(config.credentialCiphertext);
+    const startedAt = this.options.now();
+    await withTemporaryOdpsConfig({ ...credential, endpoint: config.endpoint, project: config.project }, async (configPath) => {
+      const client = new OdpsCommandClient({ command: config.command, args: config.args, project: config.project, configPath, timeoutMs: 90_000 });
+      await client.query(`SELECT table_catalog FROM SYSTEM_CATALOG.INFORMATION_SCHEMA.tables WHERE table_catalog='${config.project.replaceAll("'", "''")}' LIMIT 1`, ["table_catalog"]);
+    });
+    this.options.audit(auth.user.id, "lineage.connection_tested", "maxcompute_config", "singleton", { project: config.project, endpoint: config.endpoint, success: true });
+    sendJson(response, 200, { connected: true, latencyMs: this.options.now() - startedAt, checkedAt: this.options.now() });
   }
 
   private manualSync({ response, auth }: RouteRequest): void {
@@ -76,20 +108,27 @@ export class LineageRoutes {
     sendJson(response, 202, { accepted: true });
   }
 
-  private searchTables({ response, url }: RouteRequest): void {
+  private searchTables({ response, url, auth }: RouteRequest): void {
+    this.assertDirectoryAccess(auth.user);
     const query = optionalQuery(url, "q", 256) ?? "";
     const tables = query ? this.options.repository.searchLineageTables(query, queryInteger(url, "limit", 20, 1, 100)) : [];
     sendJson(response, 200, { tables });
   }
 
-  private tableDetail({ response, match }: RouteRequest): void {
+  private assertDirectoryAccess(user: RouteRequest["auth"]["user"]): void {
+    if (!this.options.repository.canAccessDirectory(user.role, "lineage")) throw forbidden();
+  }
+
+  private tableDetail({ response, match, auth }: RouteRequest): void {
+    this.assertDirectoryAccess(auth.user);
     const id = routeId(match, 1);
     const table = this.options.repository.getLineageTable(id);
     if (!table) throw new HttpError(404, "LINEAGE_TABLE_NOT_FOUND", "未找到该表的血缘元数据。");
     sendJson(response, 200, { table, columns: this.options.repository.listLineageColumns(id), relations: this.options.repository.countLineageRelations(id) });
   }
 
-  private graph({ response, url }: RouteRequest): void {
+  private graph({ response, url, auth }: RouteRequest): void {
+    this.assertDirectoryAccess(auth.user);
     const scope = inputEnum(url.searchParams.get("scope") ?? "first", ["first", "deep", "terminal", "path"] as const, "scope");
     const direction = inputEnum(url.searchParams.get("direction") ?? "both", ["up", "down", "both"] as const, "direction");
     const depth = scope === "first" ? 1 : queryInteger(url, "depth", 6, 1, 12);
@@ -117,6 +156,7 @@ export class LineageRoutes {
   }
 
   private async analyzeColumn({ request, response, auth }: RouteRequest): Promise<void> {
+    this.assertDirectoryAccess(auth.user);
     const body = objectBody(await readJsonBody(request, this.options.maxBodySize));
     assertOnlyKeys(body, ["teamId", "table", "column"]);
     const teamId = inputString(body.teamId, "teamId", 1, 128);
@@ -148,8 +188,26 @@ function terminalEdges(rootId: string, edges: Array<LineageEdge & { depth: numbe
   });
 }
 
-function configDto(config: MaxComputeConfig, admin: boolean): Record<string, unknown> {
-  return { ...config, ...(admin ? {} : { command: undefined, args: undefined }) };
+function configDto(config: MaxComputeConfig, admin: boolean, secretBox: SecretBox): Record<string, unknown> {
+  let accessKeyIdMasked: string | null = null;
+  if (admin && config.credentialCiphertext) {
+    try {
+      const credential = secretBox.decrypt<MaxComputeCredentials>(config.credentialCiphertext);
+      accessKeyIdMasked = maskAccessKey(credential.accessKeyId);
+    } catch { accessKeyIdMasked = "凭据无法解密"; }
+  }
+  const { credentialCiphertext: _secret, ...safe } = config;
+  return { ...safe, credentialConfigured: Boolean(config.credentialCiphertext), accessKeyIdMasked, ...(admin ? {} : { command: undefined, args: undefined, endpoint: undefined, credentialUpdatedAt: undefined }) };
+}
+
+function maskAccessKey(value: string): string { return value.length <= 8 ? `${value.slice(0, 2)}••••` : `${value.slice(0, 4)}••••${value.slice(-4)}`; }
+function validEndpoint(value: string): string {
+  if (!value) return "";
+  try {
+    const url = new URL(value);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error();
+    return value.replace(/\/$/, "");
+  } catch { throw new HttpError(400, "INVALID_ENDPOINT", "Endpoint 必须是有效的 HTTP 或 HTTPS 地址。"); }
 }
 
 function tableStub(id: string): LineageTable {

@@ -5,6 +5,7 @@ export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue
 export type JsonObject = { [key: string]: JsonValue };
 
 export type SystemRole = "admin" | "member";
+export type AppDirectory = "teams" | "lineage" | "system";
 export type UserStatus = "active" | "disabled";
 export type TeamRole = "owner" | "admin" | "member" | "viewer";
 export type WorkspaceMode = "shared" | "isolated";
@@ -238,6 +239,9 @@ export interface MaxComputeConfig {
   command: string;
   args: string;
   project: string;
+  endpoint: string;
+  credentialCiphertext: string | null;
+  credentialUpdatedAt: Timestamp | null;
   scheduleTime: string;
   timezone: "Asia/Shanghai";
   lastStartedAt: Timestamp | null;
