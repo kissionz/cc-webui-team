@@ -110,7 +110,12 @@ export class LineageRoutes {
       this.options.audit(auth.user.id, "lineage.connection_tested", "maxcompute_config", "singleton", { project: config.project, endpoint: config.endpoint, success: false });
       if (error instanceof OdpsCommandError) {
         const status = error.kind === "not_found" ? 400 : 502;
-        throw new HttpError(status, error.kind === "not_found" ? "ODPSCMD_NOT_FOUND" : "MAXCOMPUTE_CONNECTION_FAILED", error.message);
+        throw new HttpError(
+          status,
+          error.kind === "not_found" ? "ODPSCMD_NOT_FOUND" : "MAXCOMPUTE_CONNECTION_FAILED",
+          error.message,
+          { diagnostic: { stdout: diagnosticPreview(output.stdout, credential), stderr: diagnosticPreview(output.stderr, credential), parsed: [] } },
+        );
       }
       throw error;
     }

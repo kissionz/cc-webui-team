@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ClaudeConfig, MaxComputeConfig } from "../src/domain/index.js";
 import { ColumnLineageAnalyzer } from "../src/lineage/column-analyzer.js";
-import { decodeOdpsOutput, parseOdpsRows, parseOdpsRowsFromChannels, resolveOdpsInvocation, type MaxComputeQueryClient, type MaxComputeRow } from "../src/lineage/maxcompute-client.js";
+import { buildOdpsScript, decodeOdpsOutput, extractOdpsFailure, parseOdpsRows, parseOdpsRowsFromChannels, resolveOdpsInvocation, type MaxComputeQueryClient, type MaxComputeRow } from "../src/lineage/maxcompute-client.js";
 import { LineageScheduler, nextShanghaiRun, previousShanghaiDate } from "../src/lineage/scheduler.js";
 import { LineageSyncService, parseTableList } from "../src/lineage/sync-service.js";
 import { PersistenceRepository } from "../src/persistence/index.js";
@@ -95,6 +95,12 @@ describe("MaxCompute table lineage sync", () => {
   it("decodes UTF-8 and common Chinese Windows odpscmd output", () => {
     expect(decodeOdpsOutput(Buffer.from("连接成功", "utf8"))).toBe("连接成功");
     expect(decodeOdpsOutput(Buffer.from([0xb4, 0xed, 0xce, 0xf3]))).toBe("错误");
+  });
+
+  it("enables tenant namespace and treats SQL failures as errors even when odpscmd exits zero", () => {
+    expect(buildOdpsScript("SELECT * FROM SYSTEM_CATALOG.INFORMATION_SCHEMA.catalogs")).toContain("set odps.namespace.schema=true;");
+    expect(extractOdpsFailure("OK\r\nFAILED: ODPS-0130161: Parse exception", "")).toBe("FAILED: ODPS-0130161: Parse exception");
+    expect(extractOdpsFailure("OK\r\ntable_catalog\r\n", "")).toBe("");
   });
 
   it("parses odpscmd tab, case-insensitive pipe, headerless, and empty outputs", () => {

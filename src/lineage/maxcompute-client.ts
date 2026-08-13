@@ -98,7 +98,7 @@ export class OdpsCommandClient implements MaxComputeQueryClient {
   async query(sql: string, fields: readonly string[], options: MaxComputeQueryOptions = {}): Promise<MaxComputeRow[]> {
     if (!this.options.project) throw new Error("MaxCompute 项目名称尚未配置。");
     if (!fields.length) return [];
-    const output = `set odps.sql.select.output.format={"needHeader":true,"fieldDelim":"\\t"};\n${sql.trim().replace(/;?\s*$/, ";")}`;
+    const output = buildOdpsScript(sql);
     const queryRoot = await mkdtemp(join(tmpdir(), "cc-maxcompute-query-"));
     const queryPath = join(queryRoot, "query.sql");
     try {
@@ -147,9 +147,11 @@ export class OdpsCommandClient implements MaxComputeQueryClient {
       const stdoutText = decodeOdpsOutput(Buffer.concat(stdout));
       const stderrText = decodeOdpsOutput(Buffer.concat(stderr));
       this.options.onOutput?.({ stdout: stdoutText, stderr: stderrText });
-      if (exitCode !== 0) {
-        const detail = stderrText.trim() || stdoutText.trim();
-        throw new OdpsCommandError("failed", `odpscmd 查询失败（退出码 ${exitCode}）${detail ? `：${detail.slice(-2_000)}` : ""}`, exitCode);
+      const businessFailure = extractOdpsFailure(stdoutText, stderrText);
+      if (exitCode !== 0 || businessFailure) {
+        const detail = businessFailure || stderrText.trim() || stdoutText.trim();
+        const exitLabel = exitCode === 0 ? "SQL 执行失败" : `查询失败（退出码 ${exitCode}）`;
+        throw new OdpsCommandError("failed", `odpscmd ${exitLabel}${detail ? `：${detail.slice(-2_000)}` : ""}`, exitCode);
       }
       if (options.validateOnly) return [];
       return parseOdpsRowsFromChannels(stdoutText, stderrText, fields);
@@ -157,6 +159,20 @@ export class OdpsCommandClient implements MaxComputeQueryClient {
       await rm(queryRoot, { recursive: true, force: true });
     }
   }
+}
+
+export function buildOdpsScript(sql: string): string {
+  return [
+    "set odps.namespace.schema=true;",
+    'set odps.sql.select.output.format={"needHeader":true,"fieldDelim":"\\t"};',
+    sql.trim().replace(/;?\s*$/, ";"),
+  ].join("\n");
+}
+
+export function extractOdpsFailure(stdout: string, stderr: string): string {
+  const output = `${stdout}\n${stderr}`.trim();
+  const match = output.match(/(?:^|\n)\s*(FAILED\s*:|ERROR\s*:|ODPS-\d{6,}\b)/i);
+  return match?.index === undefined ? "" : output.slice(match.index).trim().slice(-2_000);
 }
 
 export function parseOdpsRowsFromChannels(stdout: string, stderr: string, fields: readonly string[]): MaxComputeRow[] {

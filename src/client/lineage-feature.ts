@@ -1,4 +1,4 @@
-import { api } from "./api.js";
+import { ApiError, api } from "./api.js";
 import type {
   AppState, ColumnLineageResult, HtmlValue, LineageColumn, LineageGraph, LineageSyncRun,
   LineageTable, MaxComputeConfigView,
@@ -226,11 +226,19 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
   async function testConnection(): Promise<void> {
     const form = document.querySelector<HTMLFormElement>('[data-form="lineage-config"]');
     if (form) await saveConfig(form, false);
-    const result = await api<{ connected: boolean; latencyMs: number; projects: Array<{ name: string; status: string; region: string }>; diagnostic: ConnectionDiagnostic }>("/api/lineage/connection-test", { method: "POST", body: "{}" });
-    connectionDiagnostic = result.diagnostic;
-    deps.toast(`连接成功，发现 ${result.projects.length} 个项目（${result.latencyMs} ms）`, "success");
-    await load();
-    deps.scheduleRender();
+    try {
+      const result = await api<{ connected: boolean; latencyMs: number; projects: Array<{ name: string; status: string; region: string }>; diagnostic: ConnectionDiagnostic }>("/api/lineage/connection-test", { method: "POST", body: "{}" });
+      connectionDiagnostic = result.diagnostic;
+      deps.toast(`连接成功，发现 ${result.projects.length} 个项目（${result.latencyMs} ms）`, "success");
+      await load();
+      deps.scheduleRender();
+    } catch (error) {
+      if (error instanceof ApiError && isConnectionDiagnostic(error.details)) {
+        connectionDiagnostic = error.details.diagnostic;
+        deps.scheduleRender();
+      }
+      throw error;
+    }
   }
 
   async function triggerSync(): Promise<void> {
@@ -284,6 +292,12 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
   function dateText(value?: number | null): string { return value ? deps.fmt(value) : "暂无"; }
 
   return { render, renderDataSync, load, submitQuery, saveConfig, testConnection, triggerSync, search, selectNode, setMode, closeDetail, chooseColumn, zoomBy, fit, downloadGraph };
+}
+
+function isConnectionDiagnostic(value: unknown): value is { diagnostic: ConnectionDiagnostic } {
+  if (!value || typeof value !== "object" || !("diagnostic" in value)) return false;
+  const diagnostic = (value as { diagnostic?: unknown }).diagnostic;
+  return Boolean(diagnostic && typeof diagnostic === "object" && "stdout" in diagnostic && "stderr" in diagnostic && "parsed" in diagnostic);
 }
 
 function syncStatus(status: LineageStatus | null): string {
