@@ -195,8 +195,10 @@ export function parseOdpsRows(output: string, fields: readonly string[]): MaxCom
     .replace(/^\uFEFF/, "")
     .split(/\r?\n/)
     .map((line) => line.replace(/\r$/, ""));
+  const fixedWidthRows = parseFixedWidthOdpsTable(lines, fields);
+  if (fixedWidthRows) return fixedWidthRows;
   const rows: MaxComputeRow[] = [];
-  let delimiter: "tab" | "pipe" | null = null;
+  let delimiter: "tab" | "pipe" | "space" | null = null;
   let headerFound = false;
   let successMarkerFound = false;
   for (const line of lines) {
@@ -230,12 +232,69 @@ export function parseOdpsRows(output: string, fields: readonly string[]): MaxCom
   throw new OdpsCommandError("invalid_output", `odpscmd 查询已执行，但无法识别返回格式。${summary ? `输出摘要：${summary}` : "未返回可解析的标准输出。"}`);
 }
 
-function splitOdpsLine(line: string): { delimiter: "tab" | "pipe"; values: string[] } | null {
+function parseFixedWidthOdpsTable(lines: string[], fields: readonly string[]): MaxComputeRow[] | null {
+  for (let top = 0; top < lines.length; top += 1) {
+    const boundaries = separatorBoundaries(lines[top] ?? "");
+    if (boundaries.length !== fields.length + 1) continue;
+    const headerIndex = nextContentLine(lines, top + 1);
+    if (headerIndex < 0) continue;
+    const header = fixedWidthValues(lines[headerIndex] ?? "", boundaries);
+    if (!header || !headerMatches(header, fields)) continue;
+    const dividerIndex = nextMatchingSeparator(lines, headerIndex + 1, boundaries);
+    if (dividerIndex < 0) continue;
+    const rows: MaxComputeRow[] = [];
+    for (let index = dividerIndex + 1; index < lines.length; index += 1) {
+      const line = lines[index] ?? "";
+      if (sameBoundaries(separatorBoundaries(line), boundaries)) return rows;
+      if (isOdpsNoise(line)) continue;
+      const values = fixedWidthValues(line, boundaries);
+      if (values) addOdpsRow(rows, fields, values);
+    }
+    return rows;
+  }
+  return null;
+}
+
+function separatorBoundaries(line: string): number[] {
+  if (!/^\s*\+(?:[-=]+\+)+\s*$/.test(line)) return [];
+  const positions: number[] = [];
+  for (let index = 0; index < line.length; index += 1) if (line[index] === "+") positions.push(index);
+  return positions;
+}
+
+function nextContentLine(lines: string[], from: number): number {
+  for (let index = from; index < lines.length; index += 1) if ((lines[index] ?? "").trim()) return index;
+  return -1;
+}
+
+function nextMatchingSeparator(lines: string[], from: number, boundaries: number[]): number {
+  for (let index = from; index < lines.length; index += 1) {
+    if (sameBoundaries(separatorBoundaries(lines[index] ?? ""), boundaries)) return index;
+  }
+  return -1;
+}
+
+function sameBoundaries(left: number[], right: number[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function fixedWidthValues(line: string, boundaries: number[]): string[] | null {
+  if (line.length < (boundaries.at(-1) ?? 0)) return null;
+  const values: string[] = [];
+  for (let index = 0; index < boundaries.length - 1; index += 1) {
+    values.push(line.slice((boundaries[index] ?? 0) + 1, boundaries[index + 1]).trim());
+  }
+  return values;
+}
+
+function splitOdpsLine(line: string): { delimiter: "tab" | "pipe" | "space"; values: string[] } | null {
   if (line.includes("\t")) return { delimiter: "tab", values: line.split("\t").map((value) => value.trim()) };
   const trimmed = line.trim();
   if (trimmed.startsWith("|") && trimmed.endsWith("|")) {
     return { delimiter: "pipe", values: trimmed.slice(1, -1).split("|").map((value) => value.trim()) };
   }
+  const aligned = trimmed.split(/\s{2,}/).map((value) => value.trim());
+  if (aligned.length > 1) return { delimiter: "space", values: aligned };
   return null;
 }
 
@@ -252,7 +311,8 @@ function isSeparator(values: string[]): boolean {
 }
 
 function isOdpsNoise(line: string): boolean {
-  return !line.trim() || /^OK\b|^ID\b|^Log view:|^Time taken:/i.test(line.trim());
+  const trimmed = line.trim();
+  return !trimmed || /^OK\b|^ID\b|^Log view:|^Time taken:/i.test(trimmed) || /^\d{4}-\d{2}-\d{2}.*\b(?:M\d+|R\d+_\d+)_job_.*\[(?:RUNNING|TERMINATED)\]/i.test(trimmed);
 }
 
 function addOdpsRow(rows: MaxComputeRow[], fields: readonly string[], values: string[]): void {

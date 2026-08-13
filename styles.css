@@ -165,6 +165,9 @@
 .sync-project-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); max-height: 220px; overflow: auto; border: 1px solid var(--line); border-radius: 7px; background: var(--panel-soft); }
 .sync-project-option { display: flex; align-items: flex-start; gap: 9px; min-width: 0; padding: 10px 12px; border-bottom: 1px solid var(--line); cursor: pointer; }
 .sync-project-option:hover { background: var(--brand-soft); }
+.sync-project-option.readonly { cursor: default; }
+.sync-project-option.readonly:hover { background: transparent; }
+.sync-project-option.readonly input { opacity: .68; }
 .sync-project-option span { display: grid; min-width: 0; gap: 2px; }
 .sync-project-option strong, .sync-project-option small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sync-project-option small { color: var(--subtle); }

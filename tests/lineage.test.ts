@@ -114,6 +114,27 @@ describe("MaxCompute table lineage sync", () => {
       { table_catalog: "analytics", table_name: "dws_sales" },
     ]);
     expect(parseOdpsRows("OK\r\n", ["table_catalog", "table_name"])).toEqual([]);
+    expect(parseOdpsRows("catalog_name      status    region\r\nbtn_bft           NORMAL    cn-shanghai\r\n", ["catalog_name", "status", "region"])).toEqual([
+      { catalog_name: "btn_bft", status: "NORMAL", region: "cn-shanghai" },
+    ]);
+  });
+
+  it("prefers the fixed-width result table over tab-separated odps job progress", () => {
+    const separator = "+--------------------+--------+------------+";
+    const row = (first: string, second: string, third: string) => ` ${first.padEnd(20)} ${second.padEnd(8)} ${third.padEnd(12)} `;
+    const output = [
+      "2026-08-13 18:15:33\tM1_job_0:0/3/3[TERMINATED]\tR2_1_job_0:0/0/1[RUNNING]",
+      separator,
+      row("catalog_name", "status", "region"),
+      separator,
+      row("btn_bft", "NORMAL", "cn-shanghai"),
+      row("btn_bi", "NORMAL", "cn-shanghai"),
+      separator,
+    ].join("\r\n");
+    expect(parseOdpsRows(output, ["catalog_name", "status", "region"])).toEqual([
+      { catalog_name: "btn_bft", status: "NORMAL", region: "cn-shanghai" },
+      { catalog_name: "btn_bi", status: "NORMAL", region: "cn-shanghai" },
+    ]);
   });
 
   it("includes a compact output summary when odpscmd returns an unknown format", () => {

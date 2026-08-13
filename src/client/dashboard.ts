@@ -655,6 +655,10 @@ document.addEventListener("toggle", (event) => {
 
 document.addEventListener("change", (event) => {
   const target = event.target;
+  if (target instanceof HTMLInputElement && target.name === "collectionMode" && (target.value === "all" || target.value === "selected")) {
+    lineageFeature.setCollectionMode(target.value);
+    return;
+  }
   if (target instanceof HTMLInputElement && target.matches("[data-session-select]")) {
     const id = target.dataset.sessionSelect;
     if (id) target.checked ? selectedSessionIds.add(id) : selectedSessionIds.delete(id);

@@ -94,7 +94,7 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
     const discovered = config.discoveredProjects || [];
     const selected = new Set(config.collectionProjects?.length ? config.collectionProjects : discovered.map((project) => project.name));
     const projectChoices = discovered.length
-      ? discovered.map((project) => `<label class="sync-project-option"><input type="checkbox" name="collectionProjects" value="${deps.escape(project.name)}" ${selected.has(project.name) ? "checked" : ""} /><span><strong>${deps.escape(project.name)}</strong><small>${deps.escape([project.region, project.status].filter(Boolean).join(" · ") || "可访问")}</small></span></label>`).join("")
+      ? discovered.map((project) => `<label class="sync-project-option ${config.collectionMode === "all" ? "readonly" : ""}"><input type="checkbox" name="collectionProjects" value="${deps.escape(project.name)}" ${config.collectionMode === "all" || selected.has(project.name) ? "checked" : ""} ${config.collectionMode === "all" ? "disabled" : ""} /><span><strong>${deps.escape(project.name)}</strong><small>${deps.escape([project.region, project.status].filter(Boolean).join(" · ") || "可访问")}</small></span></label>`).join("")
       : '<p class="empty-inline">保存连接后点击“发现项目”，系统会读取当前 AK 可见的项目。</p>';
     const diagnostic = connectionDiagnostic ? `<details class="sync-diagnostic" open><summary>最近一次采集预览</summary><div><div class="diagnostic-summary"><span>${connectionDiagnostic.parsed.length} 个项目已解析</span><small>仅显示连接验证的 CATALOGS 查询，不包含 AccessKey</small></div><pre>${deps.escape(connectionDiagnostic.stdout || connectionDiagnostic.stderr || "命令执行成功，但客户端未返回控制台文本。")}</pre><details><summary>查看解析后的 JSON</summary><pre>${deps.escape(JSON.stringify(connectionDiagnostic.parsed, null, 2))}</pre></details></div></details>` : "";
     return `<section class="content data-sync-page">
@@ -266,6 +266,13 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
   }
 
   function setMode(value: "table" | "column"): void { mode = value; graph = null; columnResult = null; deps.scheduleRender(); }
+  function setCollectionMode(value: "all" | "selected"): void {
+    document.querySelectorAll<HTMLInputElement>('[name="collectionProjects"]').forEach((input) => {
+      input.disabled = value === "all";
+      if (value === "all") input.checked = true;
+      input.closest(".sync-project-option")?.classList.toggle("readonly", value === "all");
+    });
+  }
   function closeDetail(): void { detail = null; columnResult = null; deps.scheduleRender(); }
   function chooseColumn(column: string): void { mode = "column"; columnText = column; deps.scheduleRender(); window.setTimeout(() => { document.querySelector<HTMLInputElement>('[name="column"]')?.focus(); }, 0); }
   function zoomBy(delta: number): void { zoom = Math.max(0.55, Math.min(1.8, zoom + delta)); deps.scheduleRender(); }
@@ -291,7 +298,7 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
 
   function dateText(value?: number | null): string { return value ? deps.fmt(value) : "暂无"; }
 
-  return { render, renderDataSync, load, submitQuery, saveConfig, testConnection, triggerSync, search, selectNode, setMode, closeDetail, chooseColumn, zoomBy, fit, downloadGraph };
+  return { render, renderDataSync, load, submitQuery, saveConfig, testConnection, triggerSync, search, selectNode, setMode, setCollectionMode, closeDetail, chooseColumn, zoomBy, fit, downloadGraph };
 }
 
 function isConnectionDiagnostic(value: unknown): value is { diagnostic: ConnectionDiagnostic } {
