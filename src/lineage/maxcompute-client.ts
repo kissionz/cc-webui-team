@@ -8,7 +8,11 @@ import { splitArguments } from "../runtime/runtime-helpers.js";
 export type MaxComputeRow = Record<string, string>;
 
 export interface MaxComputeQueryClient {
-  query(sql: string, fields: readonly string[]): Promise<MaxComputeRow[]>;
+  query(sql: string, fields: readonly string[], options?: MaxComputeQueryOptions): Promise<MaxComputeRow[]>;
+}
+
+export interface MaxComputeQueryOptions {
+  validateOnly?: boolean;
 }
 
 export interface OdpsCommandClientOptions {
@@ -85,7 +89,7 @@ export function decodeOdpsOutput(buffer: Buffer): string {
 export class OdpsCommandClient implements MaxComputeQueryClient {
   constructor(private readonly options: OdpsCommandClientOptions) {}
 
-  async query(sql: string, fields: readonly string[]): Promise<MaxComputeRow[]> {
+  async query(sql: string, fields: readonly string[], options: MaxComputeQueryOptions = {}): Promise<MaxComputeRow[]> {
     if (!this.options.project) throw new Error("MaxCompute 项目名称尚未配置。");
     if (!fields.length) return [];
     const output = `set odps.sql.select.output.format={"needHeader":true,"fieldDelim":"\\t"};\n${sql.trim().replace(/;?\s*$/, ";")}`;
@@ -140,6 +144,7 @@ export class OdpsCommandClient implements MaxComputeQueryClient {
         const detail = stderrText.trim() || stdoutText.trim();
         throw new OdpsCommandError("failed", `odpscmd 查询失败（退出码 ${exitCode}）${detail ? `：${detail.slice(-2_000)}` : ""}`, exitCode);
       }
+      if (options.validateOnly) return [];
       return parseOdpsRows(stdoutText, fields);
     } finally {
       await rm(queryRoot, { recursive: true, force: true });
@@ -147,27 +152,86 @@ export class OdpsCommandClient implements MaxComputeQueryClient {
   }
 }
 
-function parseOdpsRows(output: string, fields: readonly string[]): MaxComputeRow[] {
-  const expectedHeader = fields.join("\t");
+export function parseOdpsRows(output: string, fields: readonly string[]): MaxComputeRow[] {
+  const lines = output
+    .replaceAll(/\u001B\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/^\uFEFF/, "")
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\r$/, ""));
   const rows: MaxComputeRow[] = [];
+  let delimiter: "tab" | "pipe" | null = null;
   let headerFound = false;
-  for (const raw of output.split(/\r?\n/)) {
-    const line = raw.replace(/\r$/, "");
+  let successMarkerFound = false;
+  for (const line of lines) {
+    if (/^OK\b/i.test(line.trim())) successMarkerFound = true;
+    const parsed = splitOdpsLine(line);
     if (!headerFound) {
-      if (line.trim() === expectedHeader) headerFound = true;
+      if (parsed && headerMatches(parsed.values, fields)) {
+        headerFound = true;
+        delimiter = parsed.delimiter;
+      }
       continue;
     }
-    if (!line || /^OK\b|^ID\b|^Log view:/i.test(line)) continue;
-    const values = line.split("\t");
-    if (values.length !== fields.length) continue;
-    const row: MaxComputeRow = {};
-    fields.forEach((field, index) => { row[field] = values[index] ?? ""; });
-    rows.push(row);
+    if (!parsed || parsed.delimiter !== delimiter || isOdpsNoise(line) || isSeparator(parsed.values)) continue;
+    addOdpsRow(rows, fields, parsed.values);
   }
-  if (!headerFound) {
-    throw new OdpsCommandError("invalid_output", "无法识别 odpscmd 输出。请确认客户端可用，并在 odps_config.ini 中关闭 use_instance_tunnel。");
+  if (headerFound) return rows;
+
+  // Some odpscmd versions honor fieldDelim but omit needHeader for file-based execution.
+  // Multi-column tab rows are still unambiguous because client log lines do not contain
+  // exactly the requested number of tab-separated fields.
+  if (fields.length > 1) {
+    for (const line of lines) {
+      const parsed = splitOdpsLine(line);
+      if (parsed?.delimiter !== "tab" || parsed.values.length !== fields.length || isOdpsNoise(line)) continue;
+      addOdpsRow(rows, fields, parsed.values);
+    }
+    if (rows.length || successMarkerFound) return rows;
   }
-  return rows;
+  if (successMarkerFound) return [];
+  const summary = outputSummary(output);
+  throw new OdpsCommandError("invalid_output", `odpscmd 查询已执行，但无法识别返回格式。${summary ? `输出摘要：${summary}` : "未返回可解析的标准输出。"}`);
+}
+
+function splitOdpsLine(line: string): { delimiter: "tab" | "pipe"; values: string[] } | null {
+  if (line.includes("\t")) return { delimiter: "tab", values: line.split("\t").map((value) => value.trim()) };
+  const trimmed = line.trim();
+  if (trimmed.startsWith("|") && trimmed.endsWith("|")) {
+    return { delimiter: "pipe", values: trimmed.slice(1, -1).split("|").map((value) => value.trim()) };
+  }
+  return null;
+}
+
+function headerMatches(values: string[], fields: readonly string[]): boolean {
+  return values.length === fields.length && values.every((value, index) => normalizeHeader(value) === normalizeHeader(fields[index] ?? ""));
+}
+
+function normalizeHeader(value: string): string {
+  return value.trim().replace(/^[`'"]|[`'"]$/g, "").toLowerCase();
+}
+
+function isSeparator(values: string[]): boolean {
+  return values.every((value) => /^[-+:=\s]*$/.test(value));
+}
+
+function isOdpsNoise(line: string): boolean {
+  return !line.trim() || /^OK\b|^ID\b|^Log view:|^Time taken:/i.test(line.trim());
+}
+
+function addOdpsRow(rows: MaxComputeRow[], fields: readonly string[], values: string[]): void {
+  if (values.length !== fields.length || isSeparator(values)) return;
+  const row: MaxComputeRow = {};
+  fields.forEach((field, index) => { row[field] = values[index] ?? ""; });
+  rows.push(row);
+}
+
+function outputSummary(output: string): string {
+  return output
+    .replaceAll(/\u001B\[[0-?]*[ -/]*[@-~]/g, "")
+    .replaceAll(/[\r\n\t]+/g, " ")
+    .replaceAll(/\s{2,}/g, " ")
+    .trim()
+    .slice(-1_000);
 }
 
 export async function withTemporaryOdpsConfig<T>(options: TemporaryOdpsConfigOptions, task: (configPath: string) => Promise<T>): Promise<T> {

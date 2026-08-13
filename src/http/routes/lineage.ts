@@ -95,7 +95,7 @@ export class LineageRoutes {
     try {
       await withTemporaryOdpsConfig({ ...credential, endpoint: config.endpoint, project: config.project }, async (configPath) => {
         const client = new OdpsCommandClient({ command: config.command, args: config.args, project: config.project, configPath, timeoutMs: 90_000 });
-        await client.query(`SELECT table_catalog FROM SYSTEM_CATALOG.INFORMATION_SCHEMA.tables WHERE table_catalog='${config.project.replaceAll("'", "''")}' LIMIT 1`, ["table_catalog"]);
+        await client.query(`SELECT table_catalog FROM SYSTEM_CATALOG.INFORMATION_SCHEMA.tables WHERE table_catalog='${config.project.replaceAll("'", "''")}' LIMIT 1`, ["table_catalog"], { validateOnly: true });
       });
     } catch (error) {
       this.options.audit(auth.user.id, "lineage.connection_tested", "maxcompute_config", "singleton", { project: config.project, endpoint: config.endpoint, success: false });

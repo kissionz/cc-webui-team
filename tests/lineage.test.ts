@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ClaudeConfig, MaxComputeConfig } from "../src/domain/index.js";
 import { ColumnLineageAnalyzer } from "../src/lineage/column-analyzer.js";
-import { decodeOdpsOutput, resolveOdpsInvocation, type MaxComputeQueryClient, type MaxComputeRow } from "../src/lineage/maxcompute-client.js";
+import { decodeOdpsOutput, parseOdpsRows, resolveOdpsInvocation, type MaxComputeQueryClient, type MaxComputeRow } from "../src/lineage/maxcompute-client.js";
 import { LineageScheduler, nextShanghaiRun, previousShanghaiDate } from "../src/lineage/scheduler.js";
 import { LineageSyncService, parseTableList } from "../src/lineage/sync-service.js";
 import { PersistenceRepository } from "../src/persistence/index.js";
@@ -92,6 +92,23 @@ describe("MaxCompute table lineage sync", () => {
   it("decodes UTF-8 and common Chinese Windows odpscmd output", () => {
     expect(decodeOdpsOutput(Buffer.from("连接成功", "utf8"))).toBe("连接成功");
     expect(decodeOdpsOutput(Buffer.from([0xb4, 0xed, 0xce, 0xf3]))).toBe("错误");
+  });
+
+  it("parses odpscmd tab, case-insensitive pipe, headerless, and empty outputs", () => {
+    expect(parseOdpsRows("TABLE_CATALOG\tTABLE_NAME\r\nanalytics\tdws_sales\r\nOK\r\n", ["table_catalog", "table_name"])).toEqual([
+      { table_catalog: "analytics", table_name: "dws_sales" },
+    ]);
+    expect(parseOdpsRows("+---------------+-----------+\r\n| table_catalog | table_name |\r\n+---------------+-----------+\r\n| analytics     | dws_sales  |\r\n+---------------+-----------+\r\n", ["table_catalog", "table_name"])).toEqual([
+      { table_catalog: "analytics", table_name: "dws_sales" },
+    ]);
+    expect(parseOdpsRows("analytics\tdws_sales\r\nOK\r\n", ["table_catalog", "table_name"])).toEqual([
+      { table_catalog: "analytics", table_name: "dws_sales" },
+    ]);
+    expect(parseOdpsRows("OK\r\n", ["table_catalog", "table_name"])).toEqual([]);
+  });
+
+  it("includes a compact output summary when odpscmd returns an unknown format", () => {
+    expect(() => parseOdpsRows("unexpected console output", ["table_catalog"])).toThrow("输出摘要：unexpected console output");
   });
 
   it("persists rich metadata and derives idempotent input-to-output edges", async () => {
