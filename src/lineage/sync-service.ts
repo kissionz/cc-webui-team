@@ -12,6 +12,19 @@ export interface LineageSyncResult {
   projectsProcessed: number;
   tablesProcessed: number;
   columnsProcessed: number;
+  tasksStaged: number;
+  jobsProcessed: number;
+  edgesProcessed: number;
+}
+
+export type LineageSyncProgressStage = "scope" | "metadata" | "tasks" | "lineage";
+
+export interface LineageSyncProgress {
+  currentStage: LineageSyncProgressStage;
+  projectsProcessed: number;
+  tablesProcessed: number;
+  columnsProcessed: number;
+  tasksStaged: number;
   jobsProcessed: number;
   edgesProcessed: number;
 }
@@ -53,6 +66,7 @@ export interface LineageSyncServiceOptions {
   project: string;
   projects?: readonly string[] | null;
   now?: () => number;
+  onProgress?: (progress: LineageSyncProgress) => void;
 }
 
 export class LineageSyncService {
@@ -69,8 +83,26 @@ export class LineageSyncService {
     const projects = this.options.projects === undefined ? [this.options.project] : this.options.projects;
     const at = this.now();
     const processedProjects = new Set<string>();
-
     let tablesProcessed = 0;
+    let columnsProcessed = 0;
+    let tasksStaged = 0;
+    let jobsProcessed = 0;
+    let edgesProcessed = 0;
+    const projectCount = (): number => {
+      const observed = [...processedProjects].filter(Boolean).length;
+      return observed || projects?.length || 0;
+    };
+    const report = (currentStage: LineageSyncProgressStage): void => this.options.onProgress?.({
+      currentStage,
+      projectsProcessed: projectCount(),
+      tablesProcessed,
+      columnsProcessed,
+      tasksStaged,
+      jobsProcessed,
+      edgesProcessed,
+    });
+    report("metadata");
+
     const tableBatch: MaxComputeRow[] = [];
     const flushTables = (): void => {
       if (!tableBatch.length) return;
@@ -82,6 +114,7 @@ export class LineageSyncService {
         }
       });
       tableBatch.length = 0;
+      report("metadata");
     };
     for await (const row of queryRows(this.options.client, tablesSql(projects), TABLE_FIELDS)) {
       processedProjects.add(field(row, "table_catalog"));
@@ -117,7 +150,6 @@ export class LineageSyncService {
     }
     flushPartitions();
 
-    let columnsProcessed = 0;
     let activeTableId = "";
     let activeColumns = new Map<string, LineageColumn>();
     let queuedColumnCount = 0;
@@ -132,6 +164,7 @@ export class LineageSyncService {
       });
       columnGroups.length = 0;
       queuedColumnCount = 0;
+      report("metadata");
     };
     const queueActiveColumns = (): void => {
       if (!activeTableId) return;
@@ -176,6 +209,7 @@ export class LineageSyncService {
       if (accessBatch.length >= WRITE_BATCH_SIZE) flushAccess();
     }
     flushAccess();
+    report("tasks");
 
     const taskBatch: LineageTaskHistory[] = [];
     const flushTasks = (): void => {
@@ -184,18 +218,19 @@ export class LineageSyncService {
         for (const task of taskBatch) this.options.repository.upsertLineageTaskHistory(task);
       });
       taskBatch.length = 0;
+      report("tasks");
     };
     for await (const row of queryRows(this.options.client, tasksSql(projects, dataDate), TASK_FIELDS)) {
       const task = taskHistoryFromRow(row, this.options.project, dataDate, at);
       if (!task) continue;
       processedProjects.add(task.taskCatalog);
       taskBatch.push(task);
+      tasksStaged += 1;
       if (taskBatch.length >= WRITE_BATCH_SIZE) flushTasks();
     }
     flushTasks();
+    report("lineage");
 
-    let jobsProcessed = 0;
-    let edgesProcessed = 0;
     while (true) {
       const pending = this.options.repository.listPendingLineageTasks(1_000);
       if (!pending.length) break;
@@ -234,10 +269,12 @@ export class LineageSyncService {
         });
         jobsProcessed += 1;
       }
+      report("lineage");
     }
     this.options.repository.pruneLineageTaskHistory(shiftDataDate(dataDate, -30));
     processedProjects.delete("");
-    return { projectsProcessed: processedProjects.size, tablesProcessed, columnsProcessed, jobsProcessed, edgesProcessed };
+    report("lineage");
+    return { projectsProcessed: processedProjects.size, tablesProcessed, columnsProcessed, tasksStaged, jobsProcessed, edgesProcessed };
   }
 }
 

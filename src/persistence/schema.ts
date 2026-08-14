@@ -525,6 +525,21 @@ const migrations: Migration[] = [
       FROM lineage_edges;
     `,
   },
+  {
+    version: 10,
+    name: "lineage_sync_stage_progress",
+    sql: `
+      ALTER TABLE lineage_sync_runs ADD COLUMN current_stage TEXT NOT NULL DEFAULT 'scope'
+        CHECK (current_stage IN ('scope', 'metadata', 'tasks', 'lineage'));
+      ALTER TABLE lineage_sync_runs ADD COLUMN tasks_staged INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE lineage_sync_runs ADD COLUMN progress_updated_at INTEGER NOT NULL DEFAULT 0;
+
+      UPDATE lineage_sync_runs
+      SET current_stage=CASE WHEN status='running' THEN 'scope' ELSE 'lineage' END,
+          tasks_staged=jobs_processed,
+          progress_updated_at=COALESCE(completed_at, started_at);
+    `,
+  },
 ];
 
 export function migrateSchema(database: Database.Database): void {

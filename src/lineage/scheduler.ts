@@ -4,7 +4,7 @@ import type { PersistenceRepository } from "../persistence/index.js";
 import type { SecretBox } from "../security/secret-box.js";
 import type { MaxComputeCredentials } from "./maxcompute-client.js";
 import { PyOdpsClient } from "./pyodps-client.js";
-import { LineageSyncService, type LineageSyncResult } from "./sync-service.js";
+import { LineageSyncService, type LineageSyncProgress, type LineageSyncResult } from "./sync-service.js";
 
 export interface LineageSchedulerOptions {
   repository: PersistenceRepository;
@@ -12,7 +12,7 @@ export interface LineageSchedulerOptions {
   now?: () => number;
   onCompleted?: (run: LineageSyncRun) => void;
   onError?: (run: LineageSyncRun) => void;
-  sync?: (config: MaxComputeConfig, dataDate: string) => Promise<LineageSyncResult>;
+  sync?: (config: MaxComputeConfig, dataDate: string, onProgress: (progress: LineageSyncProgress) => void) => Promise<LineageSyncResult>;
 }
 
 export class LineageScheduler {
@@ -63,8 +63,10 @@ export class LineageScheduler {
     const startedAt = this.now();
     const run: LineageSyncRun = {
       id: createId("lineage_sync"), trigger, requestedBy, dataDate, status: "running",
-      projectsProcessed: 0, tablesProcessed: 0, columnsProcessed: 0, jobsProcessed: 0, edgesProcessed: 0,
-      error: null, startedAt, completedAt: null,
+      currentStage: "scope",
+      projectsProcessed: config.collectionMode === "selected" ? config.collectionProjects.length : 0,
+      tablesProcessed: 0, columnsProcessed: 0, tasksStaged: 0, jobsProcessed: 0, edgesProcessed: 0,
+      error: null, startedAt, progressUpdatedAt: startedAt, completedAt: null,
     };
     this.options.repository.saveLineageSyncRun(run);
     this.options.repository.saveMaxComputeConfig({
@@ -86,9 +88,15 @@ export class LineageScheduler {
   }
 
   private async execute(run: LineageSyncRun, config: MaxComputeConfig): Promise<LineageSyncRun> {
+    let current = run;
+    const onProgress = (progress: LineageSyncProgress): void => {
+      current = { ...current, ...progress, progressUpdatedAt: this.now() };
+      this.options.repository.saveLineageSyncRun(current);
+    };
     try {
-      const result = await (this.options.sync ? this.options.sync(config, run.dataDate) : this.defaultSync(config, run.dataDate));
-      const completed: LineageSyncRun = { ...run, ...result, status: "success", completedAt: this.now() };
+      const result = await (this.options.sync ? this.options.sync(config, run.dataDate, onProgress) : this.defaultSync(config, run.dataDate, onProgress));
+      const completedAt = this.now();
+      const completed: LineageSyncRun = { ...current, ...result, currentStage: "lineage", status: "success", progressUpdatedAt: completedAt, completedAt };
       this.options.repository.transaction(() => {
         this.options.repository.saveLineageSyncRun(completed);
         const latest = this.options.repository.getMaxComputeConfig() ?? config;
@@ -98,7 +106,8 @@ export class LineageScheduler {
       return completed;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const failed: LineageSyncRun = { ...run, status: "failed", error: message.slice(0, 4_000), completedAt: this.now() };
+      const completedAt = this.now();
+      const failed: LineageSyncRun = { ...current, status: "failed", error: message.slice(0, 4_000), progressUpdatedAt: completedAt, completedAt };
       this.options.repository.transaction(() => {
         this.options.repository.saveLineageSyncRun(failed);
         const latest = this.options.repository.getMaxComputeConfig() ?? config;
@@ -109,7 +118,7 @@ export class LineageScheduler {
     }
   }
 
-  private defaultSync(config: MaxComputeConfig, dataDate: string): Promise<LineageSyncResult> {
+  private defaultSync(config: MaxComputeConfig, dataDate: string, onProgress: (progress: LineageSyncProgress) => void): Promise<LineageSyncResult> {
     if (!config.credentialCiphertext || !this.options.secretBox) return Promise.reject(new Error("请先配置 MaxCompute AccessKey 并验证连接。"));
     if (!config.endpoint) return Promise.reject(new Error("请先配置 MaxCompute Endpoint。"));
     const credential = this.options.secretBox.decrypt<MaxComputeCredentials>(config.credentialCiphertext);
@@ -126,6 +135,7 @@ export class LineageScheduler {
       project: config.project,
       projects: config.collectionMode === "all" ? null : config.collectionProjects,
       now: this.now,
+      onProgress,
     }).sync(dataDate);
   }
 }

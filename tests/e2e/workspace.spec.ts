@@ -107,6 +107,13 @@ test("数据同步集中配置后可查询血缘并手动触发", async ({ page,
   await login(page);
   const stylesheet = await page.request.get("/styles.css");
   expect(stylesheet.headers()["cache-control"]).toBe("no-cache, must-revalidate");
+  const completedRun = {
+    id: "lineage_sync_e2e", trigger: "manual", requestedBy: "user_admin", dataDate: "20260812", status: "success",
+    currentStage: "lineage", projectsProcessed: 2, tablesProcessed: 38, columnsProcessed: 420,
+    tasksStaged: 12, jobsProcessed: 12, edgesProcessed: 27, error: null,
+    startedAt: 1_786_579_800_000, progressUpdatedAt: 1_786_579_860_000, completedAt: 1_786_579_860_000,
+  };
+  let mockRun: Record<string, unknown> = { ...completedRun };
   await page.route("**/api/lineage/status", async (route) => {
     const response = await route.fetch();
     const body = await response.json();
@@ -114,11 +121,8 @@ test("数据同步集中配置后可查询血缘并手动触发", async ({ page,
       { name: "btn_datalake_customer_service_long_project_name", status: "NORMAL", region: "cn-shanghai" },
       { name: "btn_billing", status: "NORMAL", region: "cn-shanghai" },
     ];
-    body.runs = [{
-      id: "lineage_sync_e2e", trigger: "manual", requestedBy: "user_admin", dataDate: "20260812", status: "success",
-      projectsProcessed: 2, tablesProcessed: 38, columnsProcessed: 420, jobsProcessed: 12, edgesProcessed: 27,
-      error: null, startedAt: 1_786_579_800_000, completedAt: 1_786_579_860_000,
-    }];
+    body.running = mockRun.status === "running";
+    body.runs = [mockRun];
     await route.fulfill({ response, json: body });
   });
   if (isMobile) await page.getByRole("button", { name: "打开导航" }).click();
@@ -156,11 +160,24 @@ test("数据同步集中配置后可查询血缘并手动触发", async ({ page,
   await page.getByRole("button", { name: "保存数据源与调度" }).click();
   await expect(page.getByText("同步设置已保存")).toBeVisible();
   await expect(page.locator(".sync-summary-card", { hasText: "自动调度" })).toContainText("07:30");
-  await expect(page.locator(".sync-result")).toContainText("同步处理链路");
+  await expect(page.locator(".sync-result")).toContainText("最近同步结果");
   await expect(page.locator(".sync-pipeline")).toContainText("项目范围2 个项目");
-  await expect(page.locator(".sync-pipeline")).toContainText("表元数据38 张表");
+  await expect(page.locator(".sync-pipeline")).toContainText("元数据同步38 张表");
   await expect(page.locator(".sync-pipeline")).toContainText("任务历史落库12 个任务");
   await expect(page.locator(".sync-pipeline")).toContainText("血缘增量解析27 条关系");
+  mockRun = {
+    ...completedRun, status: "running", currentStage: "tasks", tasksStaged: 6_400,
+    jobsProcessed: 0, edgesProcessed: 0, progressUpdatedAt: 1_786_579_840_000, completedAt: null,
+  };
+  await page.reload();
+  await expect(page.locator(".sync-result")).toContainText("本次同步进度");
+  await expect(page.locator(".sync-result")).toContainText("第 3/4 步");
+  await expect(page.locator(".sync-pipeline li.complete")).toHaveCount(2);
+  await expect(page.locator(".sync-pipeline li.active")).toContainText("任务历史落库6400 个任务");
+  await expect(page.locator(".sync-pipeline li.pending")).toContainText("血缘增量解析等待执行");
+  await expect(page.locator(".sync-progress-bar span.active")).toHaveCount(1);
+  mockRun = { ...completedRun };
+  await page.reload();
   await page.route("**/api/lineage/source-diagnostic", (route) => route.fulfill({
     contentType: "application/json",
     body: JSON.stringify({ diagnostic: {

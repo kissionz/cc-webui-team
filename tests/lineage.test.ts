@@ -10,7 +10,7 @@ import { DataWorksColumnLineageClient, inferDataWorksRegion } from "../src/linea
 import type { MaxComputeQueryClient, MaxComputeRow } from "../src/lineage/maxcompute-client.js";
 import { PyOdpsClient, pythonInvocations } from "../src/lineage/pyodps-client.js";
 import { LineageScheduler, nextShanghaiRun, previousShanghaiDate } from "../src/lineage/scheduler.js";
-import { diagnoseLineageSource, LineageSyncService, parseTableList } from "../src/lineage/sync-service.js";
+import { diagnoseLineageSource, LineageSyncService, parseTableList, type LineageSyncProgress } from "../src/lineage/sync-service.js";
 import { PersistenceRepository } from "../src/persistence/index.js";
 
 const roots: string[] = [];
@@ -122,7 +122,7 @@ describe("MaxCompute table lineage sync", () => {
     const client = new FixtureClient();
     const service = new LineageSyncService({ repository: repo, client, project: "analytics", now: () => now });
 
-    expect(await service.sync("20260812")).toEqual({ projectsProcessed: 1, tablesProcessed: 1, columnsProcessed: 2, jobsProcessed: 1, edgesProcessed: 2 });
+    expect(await service.sync("20260812")).toEqual({ projectsProcessed: 1, tablesProcessed: 1, columnsProcessed: 2, tasksStaged: 1, jobsProcessed: 1, edgesProcessed: 2 });
     expect(repo.getLineageTable("analytics.dws_sales")).toMatchObject({
       ownerName: "alice", partitionCount: 38, dataLength: 4096, accessCount: 12, accessBytes: 2048,
       lastTaskName: "sales_daily", scheduleNodeName: "销售日汇总", scheduleOnDuty: "u-42", lastBizDate: "20260811",
@@ -130,7 +130,7 @@ describe("MaxCompute table lineage sync", () => {
     expect(repo.listLineageColumns("analytics.dws_sales").map((column) => column.name)).toEqual(["customer_id", "ds"]);
     expect(repo.listLineageEdges("analytics.dws_sales", "up", 3, 20)).toHaveLength(2);
 
-    expect(await service.sync("20260812")).toEqual({ projectsProcessed: 1, tablesProcessed: 1, columnsProcessed: 2, jobsProcessed: 0, edgesProcessed: 0 });
+    expect(await service.sync("20260812")).toEqual({ projectsProcessed: 1, tablesProcessed: 1, columnsProcessed: 2, tasksStaged: 1, jobsProcessed: 0, edgesProcessed: 0 });
     expect(repo.listLineageEdges("analytics.dws_sales", "up", 3, 20).map((edge) => edge.occurrenceCount)).toEqual([1, 1]);
     expect(repo.requeueLineageTasks()).toBe(1);
     expect(await service.sync("20260812")).toMatchObject({ jobsProcessed: 1, edgesProcessed: 2 });
@@ -292,11 +292,21 @@ describe("LineageScheduler", () => {
     const repo = await repository();
     repo.saveUser({ id: "u1", username: "admin", passwordHash: "salt:hash", displayName: "Admin", email: "", role: "admin", status: "active", createdAt: now, updatedAt: now });
     repo.saveMaxComputeConfig(config({ enabled: false }));
-    const sync = vi.fn(async () => ({ projectsProcessed: 2, tablesProcessed: 3, columnsProcessed: 8, jobsProcessed: 2, edgesProcessed: 2 }));
+    const observedStages: string[] = [];
+    const sync = vi.fn(async (_config: MaxComputeConfig, _dataDate: string, onProgress: (progress: LineageSyncProgress) => void) => {
+      onProgress({ currentStage: "metadata", projectsProcessed: 2, tablesProcessed: 0, columnsProcessed: 0, tasksStaged: 0, jobsProcessed: 0, edgesProcessed: 0 });
+      observedStages.push(repo.listLineageSyncRuns(1)[0]!.currentStage);
+      onProgress({ currentStage: "tasks", projectsProcessed: 2, tablesProcessed: 3, columnsProcessed: 8, tasksStaged: 2, jobsProcessed: 0, edgesProcessed: 0 });
+      observedStages.push(repo.listLineageSyncRuns(1)[0]!.currentStage);
+      onProgress({ currentStage: "lineage", projectsProcessed: 2, tablesProcessed: 3, columnsProcessed: 8, tasksStaged: 2, jobsProcessed: 2, edgesProcessed: 2 });
+      observedStages.push(repo.listLineageSyncRuns(1)[0]!.currentStage);
+      return { projectsProcessed: 2, tablesProcessed: 3, columnsProcessed: 8, tasksStaged: 2, jobsProcessed: 2, edgesProcessed: 2 };
+    });
     const scheduler = new LineageScheduler({ repository: repo, now: () => now, sync });
     const run = await scheduler.run("manual", "u1");
-    expect(run).toMatchObject({ trigger: "manual", requestedBy: "u1", status: "success", dataDate: "20260812", projectsProcessed: 2, tablesProcessed: 3 });
-    expect(repo.listLineageSyncRuns(1)[0]).toMatchObject({ projectsProcessed: 2, tablesProcessed: 3, edgesProcessed: 2 });
+    expect(run).toMatchObject({ trigger: "manual", requestedBy: "u1", status: "success", dataDate: "20260812", currentStage: "lineage", projectsProcessed: 2, tablesProcessed: 3, tasksStaged: 2 });
+    expect(observedStages).toEqual(["metadata", "tasks", "lineage"]);
+    expect(repo.listLineageSyncRuns(1)[0]).toMatchObject({ currentStage: "lineage", projectsProcessed: 2, tablesProcessed: 3, tasksStaged: 2, edgesProcessed: 2 });
     expect(repo.getMaxComputeConfig()).toMatchObject({ lastStatus: "success", lastDataDate: "20260812" });
     expect(sync).toHaveBeenCalledOnce();
     await scheduler.close();

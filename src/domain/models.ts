@@ -352,18 +352,23 @@ export interface LineageTaskHistory {
   parsedAt: Timestamp | null;
 }
 
+export type LineageSyncStage = "scope" | "metadata" | "tasks" | "lineage";
+
 export interface LineageSyncRun {
   id: string;
   trigger: "schedule" | "manual";
   requestedBy: string | null;
   dataDate: string;
   status: "running" | "success" | "failed";
+  currentStage: LineageSyncStage;
   projectsProcessed: number;
   tablesProcessed: number;
   columnsProcessed: number;
+  tasksStaged: number;
   jobsProcessed: number;
   edgesProcessed: number;
   error: string | null;
   startedAt: Timestamp;
+  progressUpdatedAt: Timestamp;
   completedAt: Timestamp | null;
 }

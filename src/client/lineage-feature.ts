@@ -107,8 +107,8 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
   function renderDataSync(): string {
     const config = status?.config;
     if (!config) return `<section class="content"><div class="card card-padding-lg"><p class="helper">正在读取 MaxCompute 数据同步配置…</p></div></section>`;
-    const lastRun = status?.runs[0];
-    const lastSuccessfulRun = status?.runs.find((run) => run.status === "success");
+    const featuredRun = status?.runs[0];
+    const historyRuns = featuredRun ? status?.runs.filter((run) => run.id !== featuredRun.id) ?? [] : [];
     const credentialState = config.credentialConfigured
       ? `<span class="sync-pill success"><i></i>已保存 ${deps.escape(config.accessKeyIdMasked || "AccessKey")}</span>`
       : `<span class="sync-pill neutral"><i></i>尚未配置凭据</span>`;
@@ -119,14 +119,14 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
       : '<p class="empty-inline">保存连接后点击“发现项目”，系统会读取当前 AK 可见的项目。</p>';
     const diagnostic = connectionDiagnostic ? `<details class="sync-diagnostic" open><summary>最近一次连接验证</summary><div><div class="diagnostic-summary"><span>${connectionDiagnostic.parsed.length} 个项目已解析</span><small>PyODPS / InstanceTunnel 运行信息，不包含 AccessKey</small></div><pre>${deps.escape(connectionDiagnostic.stderr || connectionDiagnostic.stdout || "PyODPS 查询成功。")}</pre><details><summary>查看解析后的 JSON</summary><pre>${deps.escape(JSON.stringify(connectionDiagnostic.parsed, null, 2))}</pre></details></div></details>` : "";
     const sourceDiagnosticPanel = sourceDiagnostic ? renderSourceDiagnostic(sourceDiagnostic) : "";
-    const syncResult = lastSuccessfulRun
-      ? `<section class="sync-result" aria-label="同步结果"><div class="sync-result-heading"><div><h4>同步处理链路</h4><small>数据日 ${deps.escape(lastSuccessfulRun.dataDate)} · ${lastSuccessfulRun.completedAt ? deps.fmt(lastSuccessfulRun.completedAt) : deps.fmt(lastSuccessfulRun.startedAt)}</small></div><span class="sync-pill success"><i></i>已完成</span></div>${renderSyncPipeline(lastSuccessfulRun)}</section>`
-      : `<section class="sync-result empty" aria-label="同步结果"><div><h4>同步结果</h4><small>首次同步完成后显示项目、表和血缘关系数量。</small></div></section>`;
+    const syncResult = featuredRun
+      ? `<section class="sync-result ${featuredRun.status}" aria-label="同步进度"><div class="sync-result-heading"><div><h4>${featuredRun.status === "running" ? "本次同步进度" : featuredRun.status === "failed" ? "最近同步失败" : "最近同步结果"}</h4><small>数据日 ${deps.escape(featuredRun.dataDate)} · ${featuredRun.status === "running" ? `更新于 ${deps.fmt(featuredRun.progressUpdatedAt)}` : deps.fmt(featuredRun.completedAt || featuredRun.startedAt)}</small></div>${syncRunBadge(featuredRun)}</div>${renderSyncPipeline(featuredRun)}</section>`
+      : `<section class="sync-result empty" aria-label="同步进度"><div><h4>同步进度</h4><small>首次同步启动后会显示各处理阶段。</small></div></section>`;
     return `<section class="content data-sync-page">
       <div class="sync-overview">
         <article class="card sync-summary-card"><span>连接状态</span><strong>${credentialState}</strong><small>${discovered.length ? `已发现 ${discovered.length} 个可访问项目` : (config.endpoint ? deps.escape(config.endpoint) : "请配置服务 Endpoint")}</small></article>
         <article class="card sync-summary-card"><span>自动调度</span><strong>${config.enabled ? `每天 ${deps.escape(config.scheduleTime)}` : "已关闭"}</strong><small>${config.nextRunAt ? `下次 ${deps.fmt(config.nextRunAt)}` : "保存后计算下次执行时间"}</small></article>
-        <article class="card sync-summary-card"><span>最近同步</span><strong>${lastRun ? (lastRun.status === "success" ? "成功" : lastRun.status === "failed" ? "失败" : "运行中") : "尚未执行"}</strong><small>${lastRun ? `${lastRun.projectsProcessed} 个项目 · ${lastRun.tablesProcessed} 张表 · ${lastRun.edgesProcessed} 条关系` : "可保存配置后手动触发"}</small></article>
+        <article class="card sync-summary-card"><span>最近同步</span><strong>${featuredRun ? (featuredRun.status === "success" ? "成功" : featuredRun.status === "failed" ? "失败" : "运行中") : "尚未执行"}</strong><small>${featuredRun ? `${featuredRun.projectsProcessed} 个项目 · ${featuredRun.tablesProcessed} 张表 · ${featuredRun.edgesProcessed} 条关系` : "可保存配置后手动触发"}</small></article>
       </div>
       <div class="sync-settings-grid">
         <form class="card card-padding-lg data-source-form" data-form="lineage-config">
@@ -138,19 +138,43 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
           <details class="advanced-settings"><summary>高级执行设置</summary><div class="grid two"><div class="field"><label for="mc-command">Python 3 命令</label><input class="input" id="mc-command" name="command" value="${deps.escape(config.command || "auto")}" placeholder="auto" required /><small class="helper">推荐保持 auto；Windows 会依次尝试 py -3、python，失败时可填写 python.exe 绝对路径。</small></div><div class="field"><label for="mc-args">Python 启动参数</label><input class="input" id="mc-args" name="args" value="${deps.escape(config.args || "")}" placeholder="通常留空" /><small class="helper">Windows 安装：py -3 -m pip install pyodps==0.13.0；其他系统使用 python3。</small></div></div></details>
           ${diagnostic}${sourceDiagnosticPanel}<div class="form-actions"><button class="button primary" type="submit">保存数据源与调度</button><button class="button" type="button" data-action="lineage-test-connection">发现项目并验证连接</button><button class="button" type="button" data-action="lineage-source-diagnostic">诊断血缘来源</button><button class="button" type="button" data-action="lineage-sync" ${status?.running ? "disabled" : ""}>${status?.running ? "正在同步" : "立即同步"}</button></div>
         </form>
-        <aside class="card card-padding-lg sync-history"><div class="section-title"><h3>最近执行</h3><span class="meta">数据日期 T-1</span></div>${syncResult}<div class="sync-run-list">${status?.runs.map((run) => `<div class="sync-run-row"><span class="run-dot ${run.status}"></span><div><strong>${run.trigger === "manual" ? "手动同步" : "自动调度"}</strong><small>${deps.fmt(run.startedAt)} · ${run.projectsProcessed} 项目 · ${run.tablesProcessed} 表 · ${run.edgesProcessed} 关系</small></div><span>${run.status === "success" ? "成功" : run.status === "failed" ? "失败" : "运行中"}</span></div>`).join("") || '<p class="empty-inline">暂无执行记录</p>'}</div>${config.lastError ? `<div class="inline-alert error"><strong>最近同步失败</strong><span>${deps.escape(config.lastError)}</span></div>` : ""}<div class="security-note"><strong>凭据安全</strong><p>生产环境建议设置 <code>CREDENTIAL_ENCRYPTION_KEY</code> 并使用独立 RAM 用户、最小权限和定期轮换。页面与接口不会回传 Secret。</p></div></aside>
+        <aside class="card card-padding-lg sync-history"><div class="section-title"><h3>最近执行</h3><span class="meta">数据日期 T-1</span></div>${syncResult}<div class="sync-run-list">${historyRuns.map((run) => `<div class="sync-run-row"><span class="run-dot ${run.status}"></span><div><strong>${run.trigger === "manual" ? "手动同步" : "自动调度"}</strong><small>${deps.fmt(run.startedAt)} · ${run.projectsProcessed} 项目 · ${run.tablesProcessed} 表 · ${run.edgesProcessed} 关系</small></div><span>${run.status === "success" ? "成功" : run.status === "failed" ? "失败" : "运行中"}</span></div>`).join("") || '<p class="empty-inline">暂无更早执行记录</p>'}</div>${config.lastError ? `<div class="inline-alert error"><strong>最近同步失败</strong><span>${deps.escape(config.lastError)}</span></div>` : ""}<div class="security-note"><strong>凭据安全</strong><p>生产环境建议设置 <code>CREDENTIAL_ENCRYPTION_KEY</code> 并使用独立 RAM 用户、最小权限和定期轮换。页面与接口不会回传 Secret。</p></div></aside>
       </div>
     </section>`;
   }
 
   function renderSyncPipeline(run: LineageSyncRun): string {
+    const stageKeys = ["scope", "metadata", "tasks", "lineage"] as const;
+    const activeIndex = Math.max(0, stageKeys.indexOf(run.currentStage));
+    const stateAt = (index: number): "complete" | "active" | "pending" | "failed" => {
+      if (run.status === "success") return "complete";
+      if (index < activeIndex) return "complete";
+      if (index > activeIndex) return "pending";
+      return run.status === "failed" ? "failed" : "active";
+    };
     const stages = [
-      { label: "项目范围", value: `${run.projectsProcessed} 个项目`, description: "已按采集配置筛选" },
-      { label: "表元数据", value: `${run.tablesProcessed} 张表`, description: "表、字段与访问信息已同步" },
-      { label: "任务历史落库", value: `${run.jobsProcessed} 个任务`, description: run.jobsProcessed ? "本次新增或变更任务已解析" : "本次无新增或变更，历史任务保留" },
-      { label: "血缘增量解析", value: `${run.edgesProcessed} 条关系`, description: run.edgesProcessed ? "实例关系已增量更新" : "无新增关系，既有血缘未覆盖" },
+      { label: "项目范围", value: `${run.projectsProcessed} 个项目`, activeValue: run.projectsProcessed ? `${run.projectsProcessed} 个项目` : "正在确认", done: "已确认本次采集范围", active: "正在确认采集项目" },
+      { label: "元数据同步", value: `${run.tablesProcessed} 张表`, activeValue: run.tablesProcessed ? `${run.tablesProcessed} 张表` : "正在同步", done: `已同步 ${run.columnsProcessed} 个字段及表信息`, active: "正在同步表、字段、分区与访问统计" },
+      { label: "任务历史落库", value: `${run.tasksStaged} 个任务`, activeValue: run.tasksStaged ? `${run.tasksStaged} 个任务` : "正在落库", done: "已写入本次 T-1 任务历史", active: "正在读取任务历史并写入系统库" },
+      { label: "血缘增量解析", value: `${run.edgesProcessed} 条关系`, activeValue: run.jobsProcessed ? `${run.jobsProcessed} 个任务已解析` : "正在解析", done: `已增量更新 ${run.edgesProcessed} 条实例关系`, active: "正在从任务历史增量解析血缘" },
     ];
-    return `<ol class="sync-pipeline">${stages.map((stage, index) => `<li class="done"><span class="sync-stage-index">${index + 1}</span><div><small>${stage.label}</small><strong>${stage.value}</strong><p>${stage.description}</p></div></li>`).join("")}</ol>`;
+    const progressNow = run.status === "success" ? 4 : activeIndex + 1;
+    const bar = `<div class="sync-progress-bar" role="progressbar" aria-label="同步处理进度" aria-valuemin="1" aria-valuemax="4" aria-valuenow="${progressNow}">${stages.map((_, index) => `<span class="${stateAt(index)}"></span>`).join("")}</div>`;
+    const items = stages.map((stage, index) => {
+      const state = stateAt(index);
+      const marker = state === "complete" ? "✓" : state === "failed" ? "!" : String(index + 1);
+      const value = state === "pending" ? "等待执行" : state === "failed" ? "执行失败" : state === "active" ? stage.activeValue : stage.value;
+      const description = state === "pending" ? "等待上一阶段完成" : state === "failed" ? "同步在此阶段中断，请查看错误信息" : state === "active" ? stage.active : stage.done;
+      return `<li class="${state}" ${state === "active" ? 'aria-current="step"' : ""}><span class="sync-stage-index">${marker}</span><div><small>${stage.label}</small><strong>${value}</strong><p>${description}</p></div></li>`;
+    }).join("");
+    return `${bar}<ol class="sync-pipeline">${items}</ol>`;
+  }
+
+  function syncRunBadge(run: LineageSyncRun): string {
+    if (run.status === "success") return '<span class="sync-pill success"><i></i>已完成</span>';
+    if (run.status === "failed") return '<span class="sync-pill failed"><i></i>同步失败</span>';
+    const stages = ["scope", "metadata", "tasks", "lineage"] as const;
+    return `<span class="sync-pill running"><i></i>第 ${Math.max(0, stages.indexOf(run.currentStage)) + 1}/4 步</span>`;
   }
 
   function renderSourceDiagnostic(value: SourceDiagnostic): string {
