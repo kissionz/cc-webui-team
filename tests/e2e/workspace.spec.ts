@@ -105,6 +105,8 @@ test("移动端导航与会话抽屉可通过按钮开关", async ({ page, isMob
 
 test("数据同步集中配置后可查询血缘并手动触发", async ({ page, isMobile }) => {
   await login(page);
+  const stylesheet = await page.request.get("/styles.css");
+  expect(stylesheet.headers()["cache-control"]).toBe("no-cache, must-revalidate");
   await page.route("**/api/lineage/status", async (route) => {
     const response = await route.fetch();
     const body = await response.json();
@@ -123,7 +125,23 @@ test("数据同步集中配置后可查询血缘并手动触发", async ({ page,
   const secondRow = await projectRows.nth(1).boundingBox();
   expect(Math.abs((firstRow?.x ?? 0) - (secondRow?.x ?? 0))).toBeLessThan(2);
   expect((secondRow?.y ?? 0)).toBeGreaterThan((firstRow?.y ?? 0) + (firstRow?.height ?? 0) - 2);
-  await expect(projectRows.nth(0).getByText("btn_datalake_customer_service_long_project_name")).toBeVisible();
+  const longProjectName = projectRows.nth(0).getByText("btn_datalake_customer_service_long_project_name");
+  await expect(longProjectName).toBeVisible();
+  const longNameLayout = await longProjectName.evaluate((element) => {
+    const style = window.getComputedStyle(element);
+    return {
+      overflow: style.overflow,
+      textOverflow: style.textOverflow,
+      whiteSpace: style.whiteSpace,
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+      scrollHeight: element.scrollHeight,
+      clientHeight: element.clientHeight,
+    };
+  });
+  expect(longNameLayout).toMatchObject({ overflow: "visible", textOverflow: "clip", whiteSpace: "normal" });
+  expect(longNameLayout.scrollWidth).toBeLessThanOrEqual(longNameLayout.clientWidth + 1);
+  expect(longNameLayout.scrollHeight).toBeLessThanOrEqual(longNameLayout.clientHeight + 1);
   await page.getByLabel("执行项目").fill("analytics");
   await page.getByLabel("Endpoint").fill("https://service.cn-shanghai.maxcompute.aliyun.com/api");
   await page.getByLabel("AccessKey ID").fill("LTAI-e2e-test");

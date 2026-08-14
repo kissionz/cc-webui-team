@@ -495,7 +495,7 @@ export class ApiServer {
     if (!selected) throw new HttpError(404, "NOT_FOUND", "页面不存在。");
     try {
       const content = await readFile(resolve(this.config.publicDir, selected[0]));
-      response.writeHead(200, { "Content-Type": selected[1], "Cache-Control": pathname === "/" || pathname.endsWith(".html") ? "no-cache" : "public, max-age=300" });
+      response.writeHead(200, { "Content-Type": selected[1], "Cache-Control": "no-cache, must-revalidate" });
       response.end(method === "HEAD" ? undefined : content);
     } catch (error) {
       if (error instanceof Error && "code" in error && error.code === "ENOENT") throw new HttpError(404, "ASSET_NOT_FOUND", "前端资源尚未构建。");
