@@ -149,13 +149,14 @@ export class LineageRoutes {
   private reprocess({ response, auth }: RouteRequest): void {
     if (!isSystemAdmin(auth.user)) throw forbidden();
     if (this.options.scheduler.isRunning()) throw new HttpError(409, "LINEAGE_SYNC_RUNNING", "血缘同步正在执行中。");
+    const config = this.options.repository.getMaxComputeConfig();
+    if (!config?.project || !config.endpoint || !config.credentialCiphertext) throw new HttpError(400, "MAXCOMPUTE_CONFIG_INCOMPLETE", "请先保存并验证 MaxCompute 数据源。");
     const dataDate = previousShanghaiDate(this.options.now());
-    const storage = this.options.repository.lineageStorageStats(dataDate);
-    if (storage.totalEdges > 0) throw new HttpError(409, "LINEAGE_REPROCESS_UNSAFE", "系统库已存在血缘关系，请先使用来源诊断确认问题，避免重复累计关系次数。");
-    const resetJobs = this.options.repository.resetLineageProcessedJobs(dataDate);
+    let reset = { tables: 0, edges: 0, processedJobs: 0 };
+    this.options.repository.transaction(() => { reset = this.options.repository.resetLineageData(); });
     void this.options.scheduler.run("manual", auth.user.id).catch(() => undefined);
-    this.options.audit(auth.user.id, "lineage.sync.reprocessed", "lineage_sync", dataDate, { resetJobs });
-    sendJson(response, 202, { accepted: true, dataDate, resetJobs });
+    this.options.audit(auth.user.id, "lineage.sync.reprocessed", "lineage_sync", dataDate, reset);
+    sendJson(response, 202, { accepted: true, dataDate, reset });
   }
 
   private async sourceDiagnostic({ response, auth }: RouteRequest): Promise<void> {
@@ -170,7 +171,11 @@ export class LineageRoutes {
         return diagnoseLineageSource(client, config.collectionMode === "all" ? null : config.collectionProjects, dataDate);
       });
       const storage = this.options.repository.lineageStorageStats(dataDate);
-      const recoveryRecommended = diagnostic.lineageReadyJobs > 0 && storage.totalEdges === 0 && storage.processedJobs > 0;
+      const displayCapSignature = storage.processedJobs > 0 && storage.processedJobs % 10_000 === 0;
+      const warnings = [...diagnostic.warnings];
+      if (displayCapSignature) warnings.push(`系统库恰好有 ${storage.processedJobs} 个已处理标记，符合 MaxCompute 结果被 10000 行上限截断的特征，建议清空后重建。`);
+      const recoveryRecommended = diagnostic.lineageReadyJobs > 0 && storage.processedJobs > 0
+        && (storage.totalEdges === 0 || warnings.length > 0 || displayCapSignature);
       this.options.audit(auth.user.id, "lineage.source.diagnosed", "lineage_sync", dataDate, {
         totalJobs: diagnostic.totalJobs,
         lineageReadyJobs: diagnostic.lineageReadyJobs,
@@ -178,7 +183,7 @@ export class LineageRoutes {
         totalEdges: storage.totalEdges,
         recoveryRecommended,
       });
-      sendJson(response, 200, { diagnostic: { ...diagnostic, storage, recoveryRecommended } });
+      sendJson(response, 200, { diagnostic: { ...diagnostic, warnings, storage, recoveryRecommended } });
     } catch (error) {
       if (error instanceof OdpsCommandError) throw new HttpError(502, "LINEAGE_SOURCE_DIAGNOSTIC_FAILED", error.message);
       throw error;

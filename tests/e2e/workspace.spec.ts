@@ -170,7 +170,7 @@ test("数据同步集中配置后可查询血缘并手动触发", async ({ page,
   }));
   await page.getByRole("button", { name: "诊断血缘来源" }).click();
   await expect(page.locator(".source-diagnostic")).toContainText("12来源任务");
-  await expect(page.getByRole("button", { name: "清除 T-1 旧标记并重新同步" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "清空血缘数据并重新同步" })).toBeVisible();
 
   if (isMobile) await page.getByRole("button", { name: "打开导航" }).click();
   await page.getByRole("button", { name: "数据血缘" }).click();

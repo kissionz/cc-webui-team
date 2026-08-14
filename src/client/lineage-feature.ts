@@ -137,7 +137,7 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
   function renderSourceDiagnostic(value: SourceDiagnostic): string {
     const groups = value.groups.map((group) => `<tr><td>${deps.escape(group.project)}</td><td>${deps.escape(group.taskType)}</td><td>${deps.escape(group.status)}</td><td>${group.jobs}</td><td>${group.withInputs}</td><td>${group.withOutputs}</td><td>${group.lineageReady}</td></tr>`).join("");
     const warnings = value.warnings.length ? `<ul class="source-diagnostic-warnings">${value.warnings.map((warning) => `<li>${deps.escape(warning)}</li>`).join("")}</ul>` : '<p class="source-diagnostic-ok">来源任务具备生成血缘的输入与输出信息。</p>';
-    const recovery = value.recoveryRecommended ? '<div class="source-diagnostic-recovery"><p>来源中存在可生成血缘的任务，但系统库仍为 0 条关系。此前错误解析留下的“已处理”标记很可能阻止了补建。</p><button class="button" type="button" data-action="lineage-reprocess">清除 T-1 旧标记并重新同步</button></div>' : "";
+    const recovery = value.recoveryRecommended ? '<div class="source-diagnostic-recovery"><p>系统库可能包含被截断或错列的旧结果。重建会清空现有表元数据、血缘关系和处理标记，再按当前项目范围重新同步。</p><button class="button" type="button" data-action="lineage-reprocess">清空血缘数据并重新同步</button></div>' : "";
     return `<details class="source-diagnostic" open><summary>血缘来源诊断 · ${deps.escape(value.dataDate)}</summary><div class="source-diagnostic-body"><div class="source-diagnostic-metrics"><span><strong>${value.totalJobs}</strong>来源任务</span><span><strong>${value.lineageReadyJobs}</strong>可建血缘</span><span><strong>${value.storage.processedJobs}</strong>已处理标记</span><span><strong>${value.storage.totalEdges}</strong>系统库关系</span></div>${warnings}${recovery}<div class="source-diagnostic-table-wrap"><table><thead><tr><th>项目</th><th>类型</th><th>状态</th><th>任务</th><th>有输入</th><th>有输出</th><th>可建血缘</th></tr></thead><tbody>${groups || '<tr><td colspan="7">未返回分组数据</td></tr>'}</tbody></table></div><details><summary>查看可提供给开发人员的诊断 JSON</summary><pre>${deps.escape(JSON.stringify(value, null, 2))}</pre></details></div></details>`;
   }
 
@@ -281,8 +281,9 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
   }
 
   async function reprocess(): Promise<void> {
-    const response = await api<{ resetJobs: number }>("/api/lineage/reprocess", { method: "POST", body: "{}" });
-    deps.toast(`已清除 ${response.resetJobs} 个旧标记并启动重新同步`, "success");
+    if (!window.confirm("将清空系统库中的表元数据、血缘关系和处理标记，然后按当前配置重新同步。是否继续？")) return;
+    const response = await api<{ reset: { tables: number; edges: number; processedJobs: number } }>("/api/lineage/reprocess", { method: "POST", body: "{}" });
+    deps.toast(`已清理 ${response.reset.tables} 张表、${response.reset.edges} 条关系并启动重新同步`, "success");
     sourceDiagnostic = null;
     await load();
     pollStatus();

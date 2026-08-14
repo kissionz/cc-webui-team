@@ -154,6 +154,19 @@ describe("MaxCompute table lineage sync", () => {
     ]);
   });
 
+  it("preserves trailing empty tab fields inside a fixed-width result block", () => {
+    const output = [
+      "+----------------+----------------+----------+----------------+",
+      "task_catalog\ttask_name\ttask_type\text_bizdate",
+      "+----------------+----------------+----------+----------------+",
+      "btn_datastrategy\tjdbc_session_query_1\tSQLRT\t",
+      "+----------------+----------------+----------+----------------+",
+    ].join("\r\n");
+    expect(parseOdpsRows(output, ["task_catalog", "task_name", "task_type", "ext_bizdate"])).toEqual([{
+      task_catalog: "btn_datastrategy", task_name: "jdbc_session_query_1", task_type: "SQLRT", ext_bizdate: "",
+    }]);
+  });
+
   it("includes a compact output summary when odpscmd returns an unknown format", () => {
     expect(() => parseOdpsRows("unexpected console output", ["table_catalog"])).toThrow("输出摘要：unexpected console output");
     expect(parseOdpsRowsFromChannels("", "TABLE_CATALOG\tTABLE_NAME\r\nanalytics\tdws_sales\r\n", ["table_catalog", "table_name"])).toEqual([
@@ -178,6 +191,9 @@ describe("MaxCompute table lineage sync", () => {
     expect(repo.listLineageEdges("analytics.dws_sales", "up", 3, 20).map((edge) => edge.occurrenceCount)).toEqual([1, 1]);
     expect(repo.lineageStorageStats("20260812")).toEqual({ processedJobs: 1, totalEdges: 2 });
     expect(client.sql.every((sql) => sql.includes("SYSTEM_CATALOG.INFORMATION_SCHEMA"))).toBe(true);
+    expect(repo.resetLineageData()).toEqual({ tables: 3, edges: 2, processedJobs: 1 });
+    expect(repo.lineageStorageStats("20260812")).toEqual({ processedJobs: 0, totalEdges: 0 });
+    expect(repo.searchLineageTables("", 20)).toHaveLength(0);
     repo.close();
   });
 
@@ -216,6 +232,32 @@ describe("MaxCompute table lineage sync", () => {
     await new LineageSyncService({ repository: repo, client: selected, project: "analytics", projects: ["analytics", "finance"], now: () => now }).sync("20260812");
     expect(selected.sql.find((sql) => sql.includes("INFORMATION_SCHEMA.tables"))).toContain("table_catalog IN ('analytics', 'finance')");
     expect(selected.sql.find((sql) => sql.includes("INFORMATION_SCHEMA.tasks_history"))).toContain("task_catalog IN ('analytics', 'finance')");
+    repo.close();
+  });
+
+  it("pages metadata below the MaxCompute display cap without widening the selected project scope", async () => {
+    const repo = await repository();
+    const sql: string[] = [];
+    const tableRow = (project: string, name: string): MaxComputeRow => ({
+      table_catalog: project, table_name: name, table_type: "MANAGED_TABLE", is_partitioned: "false",
+    });
+    const client: MaxComputeQueryClient = {
+      async query(statement) {
+        sql.push(statement);
+        if (!statement.includes("INFORMATION_SCHEMA.tables")) return [];
+        if (statement.includes("OFFSET 0")) return [tableRow("p1", "a"), tableRow("p2", "b")];
+        if (statement.includes("OFFSET 2")) return [tableRow("p3", "c")];
+        return [];
+      },
+    };
+    await expect(new LineageSyncService({
+      repository: repo, client, project: "p1", projects: ["p1", "p2", "p3"], pageSize: 2, now: () => now,
+    }).sync("20260812")).resolves.toMatchObject({ projectsProcessed: 3, tablesProcessed: 3 });
+    const tableQueries = sql.filter((statement) => statement.includes("INFORMATION_SCHEMA.tables"));
+    expect(tableQueries).toHaveLength(2);
+    expect(tableQueries.every((statement) => statement.includes("table_catalog IN ('p1', 'p2', 'p3')"))).toBe(true);
+    expect(tableQueries.map((statement) => statement.match(/OFFSET \d+/)?.[0])).toEqual(["OFFSET 0", "OFFSET 2"]);
+    expect(sql.find((statement) => statement.includes("INFORMATION_SCHEMA.tasks_history"))).toContain("COALESCE(output_tables");
     repo.close();
   });
 

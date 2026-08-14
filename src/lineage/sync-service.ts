@@ -50,6 +50,7 @@ export interface LineageSyncServiceOptions {
   client: MaxComputeQueryClient;
   project: string;
   projects?: readonly string[] | null;
+  pageSize?: number;
   now?: () => number;
 }
 
@@ -65,12 +66,14 @@ export class LineageSyncService {
   async sync(dataDate: string): Promise<LineageSyncResult> {
     if (!/^\d{8}$/.test(dataDate)) throw new Error("同步日期必须使用 yyyyMMdd 格式。");
     const projects = this.options.projects === undefined ? [this.options.project] : this.options.projects;
+    const pageSize = this.options.pageSize ?? SYNC_PAGE_SIZE;
+    if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > SYNC_PAGE_SIZE) throw new Error(`同步分页大小必须为 1-${SYNC_PAGE_SIZE}。`);
     const [tables, columns, partitions, access, jobs] = await Promise.all([
-      this.options.client.query(tablesSql(projects), TABLE_FIELDS),
-      this.options.client.query(columnsSql(projects), COLUMN_FIELDS),
-      this.options.client.query(partitionsSql(projects), PARTITION_FIELDS),
-      this.options.client.query(accessSql(projects, dataDate), ACCESS_FIELDS),
-      this.options.client.query(tasksSql(projects, dataDate), TASK_FIELDS),
+      pagedQuery(this.options.client, tablesSql(projects), TABLE_FIELDS, "table_catalog, table_name", pageSize),
+      pagedQuery(this.options.client, columnsSql(projects), COLUMN_FIELDS, "table_catalog, table_name, ordinal_position", pageSize),
+      pagedQuery(this.options.client, partitionsSql(projects), PARTITION_FIELDS, "table_catalog, table_name", pageSize),
+      pagedQuery(this.options.client, accessSql(projects, dataDate), ACCESS_FIELDS, "table_catalog, table_name", pageSize),
+      pagedQuery(this.options.client, tasksSql(projects, dataDate), TASK_FIELDS, "task_catalog, inst_id, task_name, end_time", pageSize),
     ]);
     const at = this.now();
     const processedProjects = new Set<string>([
@@ -213,7 +216,31 @@ function tasksSql(projects: readonly string[] | null, dataDate: string): string 
   return `SELECT task_catalog, ${cleanText("task_name")}, task_type, inst_id, status, owner_name, ${timeText("end_time")},
     ${cleanText("input_tables")}, ${cleanText("output_tables")}, ext_node_id, ${cleanText("ext_node_name")},
     ext_node_onduty, ext_bizdate FROM SYSTEM_CATALOG.INFORMATION_SCHEMA.tasks_history
-    ${where(catalogFilter("task_catalog", projects), `ds=${quote(dataDate)}`, "task_type IN ('SQL','SQLRT')")}`;
+    ${where(
+      catalogFilter("task_catalog", projects),
+      `ds=${quote(dataDate)}`,
+      "task_type IN ('SQL','SQLRT')",
+      "TRIM(COALESCE(output_tables, '')) NOT IN ('', '[]')",
+    )}`;
+}
+
+const SYNC_PAGE_SIZE = 5_000;
+const MAX_SYNC_ROWS = 5_000_000;
+
+async function pagedQuery(
+  client: MaxComputeQueryClient,
+  sql: string,
+  fields: readonly string[],
+  orderBy: string,
+  pageSize: number,
+): Promise<MaxComputeRow[]> {
+  const rows: MaxComputeRow[] = [];
+  for (let offset = 0; offset <= MAX_SYNC_ROWS; offset += pageSize) {
+    const page = await client.query(`${sql}\nORDER BY ${orderBy} LIMIT ${pageSize} OFFSET ${offset}`, fields);
+    rows.push(...page);
+    if (page.length < pageSize) return rows;
+  }
+  throw new Error(`单类血缘同步记录超过 ${MAX_SYNC_ROWS} 行，已停止以避免内存耗尽。`);
 }
 
 export async function diagnoseLineageSource(

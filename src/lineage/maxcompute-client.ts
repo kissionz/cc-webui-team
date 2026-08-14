@@ -280,7 +280,10 @@ function sameBoundaries(left: number[], right: number[]): boolean {
 
 function fixedWidthValues(line: string, boundaries: number[]): string[] | null {
   if (line.includes("\t")) {
-    const tabValues = line.trim().split("\t").map((value) => value.trim());
+    // Do not trim the complete line before splitting. Empty trailing columns are
+    // meaningful and trimming would remove their delimiters, forcing the row
+    // through the fixed-width fallback and shifting every subsequent field.
+    const tabValues = line.split("\t").map((value) => value.trim());
     if (tabValues.length === boundaries.length - 1) return tabValues;
   }
   if (line.length < (boundaries.at(-1) ?? 0)) return null;
