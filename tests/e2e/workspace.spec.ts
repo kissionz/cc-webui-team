@@ -114,6 +114,11 @@ test("数据同步集中配置后可查询血缘并手动触发", async ({ page,
       { name: "btn_datalake_customer_service_long_project_name", status: "NORMAL", region: "cn-shanghai" },
       { name: "btn_billing", status: "NORMAL", region: "cn-shanghai" },
     ];
+    body.runs = [{
+      id: "lineage_sync_e2e", trigger: "manual", requestedBy: "user_admin", dataDate: "20260812", status: "success",
+      projectsProcessed: 2, tablesProcessed: 38, columnsProcessed: 420, jobsProcessed: 12, edgesProcessed: 27,
+      error: null, startedAt: 1_786_579_800_000, completedAt: 1_786_579_860_000,
+    }];
     await route.fulfill({ response, json: body });
   });
   if (isMobile) await page.getByRole("button", { name: "打开导航" }).click();
@@ -151,6 +156,10 @@ test("数据同步集中配置后可查询血缘并手动触发", async ({ page,
   await page.getByRole("button", { name: "保存数据源与调度" }).click();
   await expect(page.getByText("同步设置已保存")).toBeVisible();
   await expect(page.locator(".sync-summary-card", { hasText: "自动调度" })).toContainText("07:30");
+  await expect(page.locator(".sync-result")).toContainText("同步结果");
+  await expect(page.locator(".sync-result-metrics")).toContainText("项目2");
+  await expect(page.locator(".sync-result-metrics")).toContainText("表38");
+  await expect(page.locator(".sync-result-metrics")).toContainText("血缘关系27");
   await page.route("**/api/lineage/source-diagnostic", (route) => route.fulfill({
     contentType: "application/json",
     body: JSON.stringify({ diagnostic: {

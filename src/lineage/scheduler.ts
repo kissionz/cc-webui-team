@@ -62,7 +62,7 @@ export class LineageScheduler {
     const startedAt = this.now();
     const run: LineageSyncRun = {
       id: createId("lineage_sync"), trigger, requestedBy, dataDate, status: "running",
-      tablesProcessed: 0, columnsProcessed: 0, jobsProcessed: 0, edgesProcessed: 0,
+      projectsProcessed: 0, tablesProcessed: 0, columnsProcessed: 0, jobsProcessed: 0, edgesProcessed: 0,
       error: null, startedAt, completedAt: null,
     };
     this.options.repository.saveLineageSyncRun(run);

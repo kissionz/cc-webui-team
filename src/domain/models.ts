@@ -334,6 +334,7 @@ export interface LineageSyncRun {
   requestedBy: string | null;
   dataDate: string;
   status: "running" | "success" | "failed";
+  projectsProcessed: number;
   tablesProcessed: number;
   columnsProcessed: number;
   jobsProcessed: number;

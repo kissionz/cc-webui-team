@@ -7,6 +7,7 @@ import type { PersistenceRepository } from "../persistence/index.js";
 import type { MaxComputeQueryClient, MaxComputeRow } from "./maxcompute-client.js";
 
 export interface LineageSyncResult {
+  projectsProcessed: number;
   tablesProcessed: number;
   columnsProcessed: number;
   jobsProcessed: number;
@@ -72,6 +73,13 @@ export class LineageSyncService {
       this.options.client.query(tasksSql(projects, dataDate), TASK_FIELDS),
     ]);
     const at = this.now();
+    const processedProjects = new Set<string>([
+      ...tables.map((row) => field(row, "table_catalog")),
+      ...columns.map((row) => field(row, "table_catalog")),
+      ...partitions.map((row) => field(row, "table_catalog")),
+      ...access.map((row) => field(row, "table_catalog")),
+      ...jobs.map((row) => row.task_catalog || this.options.project),
+    ]);
     const partitionByTable = new Map(partitions.map((row) => [tableId(field(row, "table_catalog"), field(row, "table_name")), row]));
     const existing = new Map<string, LineageTable>();
     this.options.repository.transaction(() => {
@@ -155,7 +163,8 @@ export class LineageSyncService {
       });
       jobsProcessed += 1;
     }
-    return { tablesProcessed: tables.length, columnsProcessed: columns.length, jobsProcessed, edgesProcessed };
+    processedProjects.delete("");
+    return { projectsProcessed: processedProjects.size, tablesProcessed: tables.length, columnsProcessed: columns.length, jobsProcessed, edgesProcessed };
   }
 }
 

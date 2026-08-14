@@ -450,6 +450,13 @@ const migrations: Migration[] = [
         CHECK (json_valid(discovered_projects_json));
     `,
   },
+  {
+    version: 7,
+    name: "lineage_sync_project_count",
+    sql: `
+      ALTER TABLE lineage_sync_runs ADD COLUMN projects_processed INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
 ];
 
 export function migrateSchema(database: Database.Database): void {

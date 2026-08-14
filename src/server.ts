@@ -92,7 +92,7 @@ const columnLineageAnalyzer = new ColumnLineageAnalyzer();
 const lineageScheduler = new LineageScheduler({
   repository,
   secretBox,
-  onCompleted: (run) => logger.info("lineage.sync.completed", { runId: run.id, dataDate: run.dataDate, tables: run.tablesProcessed, columns: run.columnsProcessed, jobs: run.jobsProcessed, edges: run.edgesProcessed }),
+  onCompleted: (run) => logger.info("lineage.sync.completed", { runId: run.id, dataDate: run.dataDate, projects: run.projectsProcessed, tables: run.tablesProcessed, columns: run.columnsProcessed, jobs: run.jobsProcessed, edges: run.edgesProcessed }),
   onError: (run) => logger.error("lineage.sync.failed", { runId: run.id, dataDate: run.dataDate, error: run.error }),
 });
 apiServer = new ApiServer({ repository, config, runtime, events, logger, backup: backups, lineageScheduler, columnLineageAnalyzer, secretBox });
