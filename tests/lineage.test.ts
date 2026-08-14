@@ -137,6 +137,23 @@ describe("MaxCompute table lineage sync", () => {
     ]);
   });
 
+  it("preserves long project names when tab-delimited rows are enclosed by result separators", () => {
+    const output = [
+      "+--------------------+--------+------------+",
+      "catalog_name\tstatus\tregion",
+      "+--------------------+--------+------------+",
+      "btn_bi_normal\tNORMAL\tcn-shanghai",
+      "btn_datalake_cdm\tNORMAL\tcn-shanghai",
+      "btn_datalake_finance_dev\tNORMAL\tcn-shanghai",
+      "+--------------------+--------+------------+",
+    ].join("\r\n");
+    expect(parseOdpsRows(output, ["catalog_name", "status", "region"])).toEqual([
+      { catalog_name: "btn_bi_normal", status: "NORMAL", region: "cn-shanghai" },
+      { catalog_name: "btn_datalake_cdm", status: "NORMAL", region: "cn-shanghai" },
+      { catalog_name: "btn_datalake_finance_dev", status: "NORMAL", region: "cn-shanghai" },
+    ]);
+  });
+
   it("includes a compact output summary when odpscmd returns an unknown format", () => {
     expect(() => parseOdpsRows("unexpected console output", ["table_catalog"])).toThrow("输出摘要：unexpected console output");
     expect(parseOdpsRowsFromChannels("", "TABLE_CATALOG\tTABLE_NAME\r\nanalytics\tdws_sales\r\n", ["table_catalog", "table_name"])).toEqual([
