@@ -69,11 +69,11 @@ export class LineageSyncService {
     const pageSize = this.options.pageSize ?? SYNC_PAGE_SIZE;
     if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > SYNC_PAGE_SIZE) throw new Error(`同步分页大小必须为 1-${SYNC_PAGE_SIZE}。`);
     const [tables, columns, partitions, access, jobs] = await Promise.all([
-      pagedQuery(this.options.client, tablesSql(projects), TABLE_FIELDS, "table_catalog, table_name", pageSize),
-      pagedQuery(this.options.client, columnsSql(projects), COLUMN_FIELDS, "table_catalog, table_name, ordinal_position", pageSize),
-      pagedQuery(this.options.client, partitionsSql(projects), PARTITION_FIELDS, "table_catalog, table_name", pageSize),
-      pagedQuery(this.options.client, accessSql(projects, dataDate), ACCESS_FIELDS, "table_catalog, table_name", pageSize),
-      pagedQuery(this.options.client, tasksSql(projects, dataDate), TASK_FIELDS, "task_catalog, inst_id, task_name, end_time", pageSize),
+      pagedQuery(this.options.client, tablesSql(projects), TABLE_FIELDS, ["table_catalog", "table_name"], pageSize),
+      pagedQuery(this.options.client, columnsSql(projects), COLUMN_FIELDS, ["table_catalog", "table_name", "column_name"], pageSize),
+      pagedQuery(this.options.client, partitionsSql(projects), PARTITION_FIELDS, ["table_catalog", "table_name"], pageSize),
+      pagedQuery(this.options.client, accessSql(projects, dataDate), ACCESS_FIELDS, ["table_catalog", "table_name", "ds"], pageSize),
+      pagedQuery(this.options.client, tasksSql(projects, dataDate), TASK_FIELDS, ["task_catalog", "inst_id"], pageSize),
     ]);
     const at = this.now();
     const processedProjects = new Set<string>([
@@ -94,15 +94,16 @@ export class LineageSyncService {
         this.options.repository.saveLineageTable(table);
         existing.set(id, table);
       }
-      const columnsByTable = new Map<string, LineageColumn[]>();
+      const columnsByTable = new Map<string, Map<string, LineageColumn>>();
       for (const row of columns) {
         const id = tableId(field(row, "table_catalog"), field(row, "table_name"));
         if (!this.options.repository.getLineageTable(id)) this.options.repository.ensureLineageTable(id, at);
-        const values = columnsByTable.get(id) ?? [];
-        values.push(columnFromRow(id, row, at));
+        const values = columnsByTable.get(id) ?? new Map<string, LineageColumn>();
+        const column = columnFromRow(id, row, at);
+        values.set(column.name, column);
         columnsByTable.set(id, values);
       }
-      for (const [id, values] of columnsByTable) this.options.repository.replaceLineageColumns(id, values);
+      for (const [id, values] of columnsByTable) this.options.repository.replaceLineageColumns(id, [...values.values()]);
       for (const row of access) {
         this.options.repository.upsertLineageAccess(
           tableId(field(row, "table_catalog"), field(row, "table_name")),
@@ -231,16 +232,41 @@ async function pagedQuery(
   client: MaxComputeQueryClient,
   sql: string,
   fields: readonly string[],
-  orderBy: string,
+  cursorFields: readonly string[],
   pageSize: number,
 ): Promise<MaxComputeRow[]> {
   const rows: MaxComputeRow[] = [];
-  for (let offset = 0; offset <= MAX_SYNC_ROWS; offset += pageSize) {
-    const page = await client.query(`${sql}\nORDER BY ${orderBy} LIMIT ${pageSize} OFFSET ${offset}`, fields);
-    rows.push(...page);
+  const seen = new Set<string>();
+  let cursor: MaxComputeRow | null = null;
+  for (let fetched = 0; fetched <= MAX_SYNC_ROWS; fetched += pageSize) {
+    const cursorFilter = cursor ? `WHERE ${keysetCondition(cursorFields, cursor)}` : "";
+    const orderBy = cursorFields.map((fieldName) => `sync_page.${fieldName}`).join(", ");
+    const page = await client.query(`SELECT * FROM (${sql}) sync_page\n${cursorFilter}\nORDER BY ${orderBy} LIMIT ${pageSize}`, fields);
+    for (const row of page) {
+      const key = rowKey(cursorFields, row);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push(row);
+    }
     if (page.length < pageSize) return rows;
+    const nextCursor = page.at(-1)!;
+    if (cursor && rowKey(cursorFields, cursor) === rowKey(cursorFields, nextCursor)) {
+      throw new Error("MaxCompute 分页游标未前进，已停止同步以避免重复读取。");
+    }
+    cursor = nextCursor;
   }
   throw new Error(`单类血缘同步记录超过 ${MAX_SYNC_ROWS} 行，已停止以避免内存耗尽。`);
+}
+
+function keysetCondition(fields: readonly string[], cursor: MaxComputeRow): string {
+  return fields.map((fieldName, index) => {
+    const prefix = fields.slice(0, index).map((previous) => `COALESCE(sync_page.${previous}, '')=${quote(cursor[previous] ?? "")}`);
+    return `(${[...prefix, `COALESCE(sync_page.${fieldName}, '')>${quote(cursor[fieldName] ?? "")}`].join(" AND ")})`;
+  }).join(" OR ");
+}
+
+function rowKey(fields: readonly string[], row: MaxComputeRow): string {
+  return JSON.stringify(fields.map((fieldName) => row[fieldName] ?? ""));
 }
 
 export async function diagnoseLineageSource(

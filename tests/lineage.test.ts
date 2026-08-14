@@ -244,19 +244,27 @@ describe("MaxCompute table lineage sync", () => {
     const client: MaxComputeQueryClient = {
       async query(statement) {
         sql.push(statement);
-        if (!statement.includes("INFORMATION_SCHEMA.tables")) return [];
-        if (statement.includes("OFFSET 0")) return [tableRow("p1", "a"), tableRow("p2", "b")];
-        if (statement.includes("OFFSET 2")) return [tableRow("p3", "c")];
+        if (statement.includes("INFORMATION_SCHEMA.tables")) {
+          if (!statement.includes("COALESCE(sync_page.table_catalog")) return [tableRow("p1", "a"), tableRow("p2", "b")];
+          return [tableRow("p3", "c")];
+        }
+        if (statement.includes("INFORMATION_SCHEMA.columns")) {
+          if (statement.includes("COALESCE(sync_page.table_catalog")) return [];
+          const duplicate = { table_catalog: "p1", table_name: "a", column_name: "id", ordinal_position: "1", data_type: "STRING" };
+          return [duplicate, { ...duplicate }];
+        }
         return [];
       },
     };
     await expect(new LineageSyncService({
       repository: repo, client, project: "p1", projects: ["p1", "p2", "p3"], pageSize: 2, now: () => now,
-    }).sync("20260812")).resolves.toMatchObject({ projectsProcessed: 3, tablesProcessed: 3 });
+    }).sync("20260812")).resolves.toMatchObject({ projectsProcessed: 3, tablesProcessed: 3, columnsProcessed: 1 });
     const tableQueries = sql.filter((statement) => statement.includes("INFORMATION_SCHEMA.tables"));
     expect(tableQueries).toHaveLength(2);
     expect(tableQueries.every((statement) => statement.includes("table_catalog IN ('p1', 'p2', 'p3')"))).toBe(true);
-    expect(tableQueries.map((statement) => statement.match(/OFFSET \d+/)?.[0])).toEqual(["OFFSET 0", "OFFSET 2"]);
+    expect(tableQueries[0]).not.toContain("OFFSET");
+    expect(tableQueries[1]).toContain("COALESCE(sync_page.table_catalog, '')>'p2'");
+    expect(repo.listLineageColumns("p1.a")).toHaveLength(1);
     expect(sql.find((statement) => statement.includes("INFORMATION_SCHEMA.tasks_history"))).toContain("COALESCE(output_tables");
     repo.close();
   });
