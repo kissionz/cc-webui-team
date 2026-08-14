@@ -14,7 +14,7 @@ interface SourceDiagnostic {
   groups: Array<{ project: string; taskType: string; status: string; jobs: number; withInputs: number; withOutputs: number; lineageReady: number }>;
   samples: Array<{ project: string; taskName: string; taskType: string; instanceId: string; status: string; inputTables: string; outputTables: string; parsedInputs: string[]; parsedOutputs: string[] }>;
   warnings: string[];
-  storage: { processedJobs: number; totalEdges: number };
+  storage: { processedJobs: number; stagedJobs: number; parsedJobs: number; invalidJobs: number; observations: number; totalEdges: number };
   recoveryRecommended: boolean;
 }
 
@@ -120,7 +120,7 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
     const diagnostic = connectionDiagnostic ? `<details class="sync-diagnostic" open><summary>最近一次连接验证</summary><div><div class="diagnostic-summary"><span>${connectionDiagnostic.parsed.length} 个项目已解析</span><small>PyODPS / InstanceTunnel 运行信息，不包含 AccessKey</small></div><pre>${deps.escape(connectionDiagnostic.stderr || connectionDiagnostic.stdout || "PyODPS 查询成功。")}</pre><details><summary>查看解析后的 JSON</summary><pre>${deps.escape(JSON.stringify(connectionDiagnostic.parsed, null, 2))}</pre></details></div></details>` : "";
     const sourceDiagnosticPanel = sourceDiagnostic ? renderSourceDiagnostic(sourceDiagnostic) : "";
     const syncResult = lastSuccessfulRun
-      ? `<section class="sync-result" aria-label="同步结果"><div class="sync-result-heading"><div><h4>同步结果</h4><small>数据日 ${deps.escape(lastSuccessfulRun.dataDate)} · ${lastSuccessfulRun.completedAt ? deps.fmt(lastSuccessfulRun.completedAt) : deps.fmt(lastSuccessfulRun.startedAt)}</small></div><span class="sync-pill success"><i></i>已完成</span></div><dl class="sync-result-metrics"><div><dt>项目</dt><dd>${lastSuccessfulRun.projectsProcessed}</dd></div><div><dt>表</dt><dd>${lastSuccessfulRun.tablesProcessed}</dd></div><div><dt>血缘关系</dt><dd>${lastSuccessfulRun.edgesProcessed}</dd></div></dl></section>`
+      ? `<section class="sync-result" aria-label="同步结果"><div class="sync-result-heading"><div><h4>同步处理链路</h4><small>数据日 ${deps.escape(lastSuccessfulRun.dataDate)} · ${lastSuccessfulRun.completedAt ? deps.fmt(lastSuccessfulRun.completedAt) : deps.fmt(lastSuccessfulRun.startedAt)}</small></div><span class="sync-pill success"><i></i>已完成</span></div>${renderSyncPipeline(lastSuccessfulRun)}</section>`
       : `<section class="sync-result empty" aria-label="同步结果"><div><h4>同步结果</h4><small>首次同步完成后显示项目、表和血缘关系数量。</small></div></section>`;
     return `<section class="content data-sync-page">
       <div class="sync-overview">
@@ -143,11 +143,21 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
     </section>`;
   }
 
+  function renderSyncPipeline(run: LineageSyncRun): string {
+    const stages = [
+      { label: "项目范围", value: `${run.projectsProcessed} 个项目`, description: "已按采集配置筛选" },
+      { label: "表元数据", value: `${run.tablesProcessed} 张表`, description: "表、字段与访问信息已同步" },
+      { label: "任务历史落库", value: `${run.jobsProcessed} 个任务`, description: run.jobsProcessed ? "本次新增或变更任务已解析" : "本次无新增或变更，历史任务保留" },
+      { label: "血缘增量解析", value: `${run.edgesProcessed} 条关系`, description: run.edgesProcessed ? "实例关系已增量更新" : "无新增关系，既有血缘未覆盖" },
+    ];
+    return `<ol class="sync-pipeline">${stages.map((stage, index) => `<li class="done"><span class="sync-stage-index">${index + 1}</span><div><small>${stage.label}</small><strong>${stage.value}</strong><p>${stage.description}</p></div></li>`).join("")}</ol>`;
+  }
+
   function renderSourceDiagnostic(value: SourceDiagnostic): string {
     const groups = value.groups.map((group) => `<tr><td>${deps.escape(group.project)}</td><td>${deps.escape(group.taskType)}</td><td>${deps.escape(group.status)}</td><td>${group.jobs}</td><td>${group.withInputs}</td><td>${group.withOutputs}</td><td>${group.lineageReady}</td></tr>`).join("");
     const warnings = value.warnings.length ? `<ul class="source-diagnostic-warnings">${value.warnings.map((warning) => `<li>${deps.escape(warning)}</li>`).join("")}</ul>` : '<p class="source-diagnostic-ok">来源任务具备生成血缘的输入与输出信息。</p>';
-    const recovery = value.recoveryRecommended ? '<div class="source-diagnostic-recovery"><p>系统库可能包含被截断或错列的旧结果。重建会清空现有表元数据、血缘关系和处理标记，再按当前项目范围重新同步。</p><button class="button" type="button" data-action="lineage-reprocess">清空血缘数据并重新同步</button></div>' : "";
-    return `<details class="source-diagnostic" open><summary>血缘来源诊断 · ${deps.escape(value.dataDate)}</summary><div class="source-diagnostic-body"><div class="source-diagnostic-metrics"><span><strong>${value.totalJobs}</strong>来源任务</span><span><strong>${value.lineageReadyJobs}</strong>可建血缘</span><span><strong>${value.storage.processedJobs}</strong>已处理标记</span><span><strong>${value.storage.totalEdges}</strong>系统库关系</span></div>${warnings}${recovery}<div class="source-diagnostic-table-wrap"><table><thead><tr><th>项目</th><th>类型</th><th>状态</th><th>任务</th><th>有输入</th><th>有输出</th><th>可建血缘</th></tr></thead><tbody>${groups || '<tr><td colspan="7">未返回分组数据</td></tr>'}</tbody></table></div><details><summary>查看可提供给开发人员的诊断 JSON</summary><pre>${deps.escape(JSON.stringify(value, null, 2))}</pre></details></div></details>`;
+    const recovery = value.recoveryRecommended ? '<div class="source-diagnostic-recovery"><p>系统库可能包含旧版解析结果。系统会重新解析已落库任务并同步最新 T-1 分区，既有不定期任务血缘不会因当天缺失而被清空。</p><button class="button" type="button" data-action="lineage-reprocess">重新解析已落库任务</button></div>' : "";
+    return `<details class="source-diagnostic" open><summary>血缘来源诊断 · ${deps.escape(value.dataDate)}</summary><div class="source-diagnostic-body"><div class="source-diagnostic-metrics"><span><strong>${value.totalJobs}</strong>来源任务</span><span><strong>${value.storage.stagedJobs}</strong>已落任务表</span><span><strong>${value.storage.parsedJobs}</strong>解析成功</span><span><strong>${value.storage.invalidJobs}</strong>解析异常</span><span><strong>${value.storage.observations}</strong>实例关系</span><span><strong>${value.storage.totalEdges}</strong>聚合血缘</span></div>${warnings}${recovery}<div class="source-diagnostic-table-wrap"><table><thead><tr><th>项目</th><th>类型</th><th>状态</th><th>任务</th><th>有输入</th><th>有输出</th><th>可建血缘</th></tr></thead><tbody>${groups || '<tr><td colspan="7">未返回分组数据</td></tr>'}</tbody></table></div><details><summary>查看可提供给开发人员的诊断 JSON</summary><pre>${deps.escape(JSON.stringify(value, null, 2))}</pre></details></div></details>`;
   }
 
   function renderCanvas(): string {
@@ -287,9 +297,9 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
   }
 
   async function reprocess(): Promise<void> {
-    if (!window.confirm("将清空系统库中的表元数据、血缘关系和处理标记，然后按当前配置重新同步。是否继续？")) return;
-    const response = await api<{ reset: { tables: number; edges: number; processedJobs: number } }>("/api/lineage/reprocess", { method: "POST", body: "{}" });
-    deps.toast(`已清理 ${response.reset.tables} 张表、${response.reset.edges} 条关系并启动重新同步`, "success");
+    if (!window.confirm("将重新解析系统库中已落地的任务历史，并同步最新 T-1 分区。既有历史血缘不会按天全量清空。是否继续？")) return;
+    const response = await api<{ requeued: number }>("/api/lineage/reprocess", { method: "POST", body: "{}" });
+    deps.toast(`已重新排队 ${response.requeued} 个任务并启动增量同步`, "success");
     sourceDiagnostic = null;
     await load();
     pollStatus();

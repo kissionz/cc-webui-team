@@ -466,6 +466,65 @@ const migrations: Migration[] = [
       WHERE lower(command) LIKE '%odpscmd%';
     `,
   },
+  {
+    version: 9,
+    name: "lineage_task_history_staging",
+    sql: `
+      CREATE TABLE lineage_task_history_raw (
+        task_catalog TEXT NOT NULL,
+        inst_id TEXT NOT NULL,
+        task_name TEXT NOT NULL DEFAULT '',
+        task_type TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT '',
+        owner_name TEXT NOT NULL DEFAULT '',
+        end_time INTEGER,
+        input_tables TEXT NOT NULL DEFAULT '',
+        output_tables TEXT NOT NULL DEFAULT '',
+        ext_node_id TEXT NOT NULL DEFAULT '',
+        ext_node_name TEXT NOT NULL DEFAULT '',
+        ext_node_onduty TEXT NOT NULL DEFAULT '',
+        ext_bizdate TEXT NOT NULL DEFAULT '',
+        data_date TEXT NOT NULL,
+        source_hash TEXT NOT NULL,
+        parser_version INTEGER NOT NULL DEFAULT 0,
+        parse_status TEXT NOT NULL DEFAULT 'pending' CHECK (parse_status IN ('pending', 'parsed', 'invalid')),
+        parse_error TEXT,
+        first_imported_at INTEGER NOT NULL,
+        last_imported_at INTEGER NOT NULL,
+        parsed_at INTEGER,
+        PRIMARY KEY(task_catalog, inst_id)
+      ) STRICT;
+
+      CREATE TABLE lineage_task_edge_observations (
+        task_catalog TEXT NOT NULL,
+        inst_id TEXT NOT NULL,
+        source_table_id TEXT NOT NULL REFERENCES lineage_tables(id) ON DELETE CASCADE,
+        target_table_id TEXT NOT NULL REFERENCES lineage_tables(id) ON DELETE CASCADE,
+        first_seen_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL,
+        occurrence_count INTEGER NOT NULL DEFAULT 1,
+        task_name TEXT,
+        owner_name TEXT,
+        node_id TEXT,
+        node_name TEXT,
+        on_duty TEXT,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(task_catalog, inst_id, source_table_id, target_table_id),
+        CHECK(source_table_id <> target_table_id)
+      ) STRICT;
+
+      CREATE INDEX lineage_task_history_parse_idx ON lineage_task_history_raw(parse_status, data_date, end_time);
+      CREATE INDEX lineage_task_history_date_idx ON lineage_task_history_raw(data_date, task_catalog);
+      CREATE INDEX lineage_task_observation_edge_idx ON lineage_task_edge_observations(source_table_id, target_table_id, last_seen_at DESC);
+
+      INSERT INTO lineage_task_edge_observations(task_catalog, inst_id, source_table_id, target_table_id,
+        first_seen_at, last_seen_at, occurrence_count, task_name, owner_name, node_id, node_name, on_duty, updated_at)
+      SELECT '__legacy__', source_table_id || '>' || target_table_id, source_table_id, target_table_id,
+        first_seen_at, last_seen_at, occurrence_count, last_task_name, last_owner_name, last_node_id,
+        last_node_name, last_on_duty, updated_at
+      FROM lineage_edges;
+    `,
+  },
 ];
 
 export function migrateSchema(database: Database.Database): void {

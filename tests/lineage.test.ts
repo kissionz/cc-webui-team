@@ -132,10 +132,13 @@ describe("MaxCompute table lineage sync", () => {
 
     expect(await service.sync("20260812")).toEqual({ projectsProcessed: 1, tablesProcessed: 1, columnsProcessed: 2, jobsProcessed: 0, edgesProcessed: 0 });
     expect(repo.listLineageEdges("analytics.dws_sales", "up", 3, 20).map((edge) => edge.occurrenceCount)).toEqual([1, 1]);
-    expect(repo.lineageStorageStats("20260812")).toEqual({ processedJobs: 1, totalEdges: 2 });
+    expect(repo.requeueLineageTasks()).toBe(1);
+    expect(await service.sync("20260812")).toMatchObject({ jobsProcessed: 1, edgesProcessed: 2 });
+    expect(repo.listLineageEdges("analytics.dws_sales", "up", 3, 20).map((edge) => edge.occurrenceCount)).toEqual([1, 1]);
+    expect(repo.lineageStorageStats("20260812")).toEqual({ processedJobs: 1, stagedJobs: 1, parsedJobs: 1, invalidJobs: 0, observations: 2, totalEdges: 2 });
     expect(client.sql.every((sql) => sql.includes("SYSTEM_CATALOG.INFORMATION_SCHEMA"))).toBe(true);
     expect(repo.resetLineageData()).toEqual({ tables: 3, edges: 2, processedJobs: 1 });
-    expect(repo.lineageStorageStats("20260812")).toEqual({ processedJobs: 0, totalEdges: 0 });
+    expect(repo.lineageStorageStats("20260812")).toEqual({ processedJobs: 0, stagedJobs: 0, parsedJobs: 0, invalidJobs: 0, observations: 0, totalEdges: 0 });
     expect(repo.searchLineageTables("", 20)).toHaveLength(0);
     repo.close();
   });
@@ -153,6 +156,48 @@ describe("MaxCompute table lineage sync", () => {
     };
     expect(await new LineageSyncService({ repository: repo, client, project: "analytics", now: () => now }).sync("20260812")).toMatchObject({ jobsProcessed: 1, edgesProcessed: 0 });
     expect(repo.isLineageJobProcessed("broken-1")).toBe(false);
+    repo.close();
+  });
+
+  it("stages only the requested partition, preserves irregular lineage, and reparses only changed instances", async () => {
+    const repo = await repository();
+    const metadata = new FixtureClient();
+    const queriedTaskDates: string[] = [];
+    const tasks = new Map<string, MaxComputeRow[]>([["20260812", [{
+      task_catalog: "analytics", task_name: "monthly_close", task_type: "SQL", inst_id: "monthly-1", status: "Terminated",
+      owner_name: "scheduler", end_time: "2026-08-12 05:00:00", input_tables: "[analytics.ods_monthly]",
+      output_tables: "[analytics.dws_monthly]", ext_node_id: "node-monthly",
+    }]]]);
+    const client: MaxComputeQueryClient = {
+      async query(statement, fields, options) {
+        if (!statement.includes("INFORMATION_SCHEMA.tasks_history")) return metadata.query(statement, fields, options);
+        const dataDate = statement.match(/ds='(\d{8})'/)?.[1] ?? "";
+        queriedTaskDates.push(dataDate);
+        return tasks.get(dataDate) ?? [];
+      },
+    };
+    const service = new LineageSyncService({ repository: repo, client, project: "analytics", now: () => now });
+    await expect(service.sync("20260812")).resolves.toMatchObject({ jobsProcessed: 1, edgesProcessed: 1 });
+    expect(queriedTaskDates).toEqual(["20260812"]);
+    expect(repo.countLineageRelations("analytics.dws_monthly").upstream).toBe(1);
+
+    tasks.set("20260813", [{
+      task_catalog: "analytics", task_name: "ad_hoc_report", task_type: "SQL", inst_id: "adhoc-1", status: "Terminated",
+      owner_name: "analyst", end_time: "2026-08-13 10:00:00", input_tables: "[analytics.ods_report]",
+      output_tables: "[analytics.ads_report]", ext_node_id: "node-adhoc",
+    }]);
+    await expect(service.sync("20260813")).resolves.toMatchObject({ jobsProcessed: 1, edgesProcessed: 1 });
+    expect(queriedTaskDates).toEqual(["20260812", "20260813"]);
+    expect(repo.countLineageRelations("analytics.dws_monthly").upstream).toBe(1);
+    expect(repo.countLineageRelations("analytics.ads_report").upstream).toBe(1);
+
+    tasks.set("20260813", [{
+      ...(tasks.get("20260813")?.[0] ?? {}), input_tables: "[analytics.ods_report_corrected]",
+    }]);
+    await expect(service.sync("20260813")).resolves.toMatchObject({ jobsProcessed: 1, edgesProcessed: 1 });
+    expect(repo.listLineageEdges("analytics.ads_report", "up", 2, 20).map((edge) => edge.sourceTableId)).toEqual(["analytics.ods_report_corrected"]);
+    expect(repo.database.prepare("SELECT COUNT(*) count FROM lineage_task_history_raw").get()).toMatchObject({ count: 2 });
+    expect(repo.database.prepare("SELECT COUNT(*) count FROM lineage_task_edge_observations WHERE task_catalog<>'__legacy__'").get()).toMatchObject({ count: 2 });
     repo.close();
   });
 

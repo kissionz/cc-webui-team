@@ -156,21 +156,22 @@ test("数据同步集中配置后可查询血缘并手动触发", async ({ page,
   await page.getByRole("button", { name: "保存数据源与调度" }).click();
   await expect(page.getByText("同步设置已保存")).toBeVisible();
   await expect(page.locator(".sync-summary-card", { hasText: "自动调度" })).toContainText("07:30");
-  await expect(page.locator(".sync-result")).toContainText("同步结果");
-  await expect(page.locator(".sync-result-metrics")).toContainText("项目2");
-  await expect(page.locator(".sync-result-metrics")).toContainText("表38");
-  await expect(page.locator(".sync-result-metrics")).toContainText("血缘关系27");
+  await expect(page.locator(".sync-result")).toContainText("同步处理链路");
+  await expect(page.locator(".sync-pipeline")).toContainText("项目范围2 个项目");
+  await expect(page.locator(".sync-pipeline")).toContainText("表元数据38 张表");
+  await expect(page.locator(".sync-pipeline")).toContainText("任务历史落库12 个任务");
+  await expect(page.locator(".sync-pipeline")).toContainText("血缘增量解析27 条关系");
   await page.route("**/api/lineage/source-diagnostic", (route) => route.fulfill({
     contentType: "application/json",
     body: JSON.stringify({ diagnostic: {
       dataDate: "20260812", totalJobs: 12, lineageReadyJobs: 7,
       groups: [{ project: "analytics", taskType: "SQL", status: "Terminated", jobs: 12, withInputs: 10, withOutputs: 8, lineageReady: 7 }],
-      samples: [], warnings: [], storage: { processedJobs: 12, totalEdges: 0 }, recoveryRecommended: true,
+      samples: [], warnings: [], storage: { processedJobs: 12, stagedJobs: 12, parsedJobs: 12, invalidJobs: 0, observations: 0, totalEdges: 0 }, recoveryRecommended: true,
     } }),
   }));
   await page.getByRole("button", { name: "诊断血缘来源" }).click();
   await expect(page.locator(".source-diagnostic")).toContainText("12来源任务");
-  await expect(page.getByRole("button", { name: "清空血缘数据并重新同步" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "重新解析已落库任务" })).toBeVisible();
 
   if (isMobile) await page.getByRole("button", { name: "打开导航" }).click();
   await page.getByRole("button", { name: "数据血缘" }).click();

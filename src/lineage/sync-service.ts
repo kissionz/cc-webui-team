@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
+
 import type {
   LineageColumn,
-  LineageEdge,
+  LineageTaskHistory,
   LineageTable,
 } from "../domain/index.js";
 import type { PersistenceRepository } from "../persistence/index.js";
@@ -175,59 +177,65 @@ export class LineageSyncService {
     }
     flushAccess();
 
+    const taskBatch: LineageTaskHistory[] = [];
+    const flushTasks = (): void => {
+      if (!taskBatch.length) return;
+      this.options.repository.transaction(() => {
+        for (const task of taskBatch) this.options.repository.upsertLineageTaskHistory(task);
+      });
+      taskBatch.length = 0;
+    };
+    for await (const row of queryRows(this.options.client, tasksSql(projects, dataDate), TASK_FIELDS)) {
+      const task = taskHistoryFromRow(row, this.options.project, dataDate, at);
+      if (!task) continue;
+      processedProjects.add(task.taskCatalog);
+      taskBatch.push(task);
+      if (taskBatch.length >= WRITE_BATCH_SIZE) flushTasks();
+    }
+    flushTasks();
+
     let jobsProcessed = 0;
     let edgesProcessed = 0;
-    for await (const row of queryRows(this.options.client, tasksSql(projects, dataDate), TASK_FIELDS)) {
-      processedProjects.add(row.task_catalog || this.options.project);
-      const instanceId = row.inst_id;
-      if (!instanceId || this.options.repository.isLineageJobProcessed(instanceId)) continue;
-      const taskProject = row.task_catalog || this.options.project;
-      const inputs = parseTableList(row.input_tables, taskProject);
-      const outputs = parseTableList(row.output_tables, taskProject);
-      const invalidInputs = tableListHasContent(row.input_tables) && inputs.length === 0;
-      const invalidOutputs = tableListHasContent(row.output_tables) && outputs.length === 0;
-      const endedAt = maxComputeTime(row.end_time) ?? at;
-      this.options.repository.transaction(() => {
-        for (const output of outputs) {
-          this.options.repository.updateLineageTableSchedule(output, {
-            at: endedAt,
-            status: row.status || "unknown",
-            taskName: nullable(row.task_name),
-            instanceId: nullable(instanceId),
-            owner: nullable(row.owner_name),
-            nodeId: nullable(row.ext_node_id),
-            nodeName: nullable(row.ext_node_name),
-            onDuty: nullable(row.ext_node_onduty),
-            bizDate: nullable(row.ext_bizdate),
-          });
-        }
-        if (row.status === "Terminated" && ["SQL", "SQLRT"].includes(row.task_type ?? "")) {
-          for (const sourceTableId of inputs) {
-            for (const targetTableId of outputs) {
-              if (sourceTableId === targetTableId) continue;
-              const edge: LineageEdge = {
-                sourceTableId,
-                targetTableId,
-                firstSeenAt: endedAt,
-                lastSeenAt: endedAt,
-                occurrenceCount: 1,
-                lastInstanceId: nullable(instanceId),
-                lastTaskName: nullable(row.task_name),
-                lastOwnerName: nullable(row.owner_name),
-                lastNodeId: nullable(row.ext_node_id),
-                lastNodeName: nullable(row.ext_node_name),
-                lastOnDuty: nullable(row.ext_node_onduty),
-                updatedAt: at,
-              };
-              this.options.repository.upsertLineageEdge(edge);
-              edgesProcessed += 1;
-            }
+    while (true) {
+      const pending = this.options.repository.listPendingLineageTasks(1_000);
+      if (!pending.length) break;
+      for (const task of pending) {
+        const inputs = parseTableList(task.inputTables, task.taskCatalog);
+        const outputs = parseTableList(task.outputTables, task.taskCatalog);
+        const invalidInputs = tableListHasContent(task.inputTables) && inputs.length === 0;
+        const invalidOutputs = tableListHasContent(task.outputTables) && outputs.length === 0;
+        const endedAt = task.endTime ?? at;
+        this.options.repository.transaction(() => {
+          for (const output of outputs) {
+            this.options.repository.updateLineageTableSchedule(output, {
+              at: endedAt,
+              status: task.status || "unknown",
+              taskName: nullable(task.taskName),
+              instanceId: nullable(task.instanceId),
+              owner: nullable(task.ownerName),
+              nodeId: nullable(task.nodeId),
+              nodeName: nullable(task.nodeName),
+              onDuty: nullable(task.onDuty),
+              bizDate: nullable(task.bizDate),
+            });
           }
-        }
-        if (!invalidInputs && !invalidOutputs) this.options.repository.markLineageJobProcessed(instanceId, dataDate, at);
-      });
-      jobsProcessed += 1;
+          if (invalidInputs || invalidOutputs) {
+            const fields = [invalidInputs ? "input_tables" : "", invalidOutputs ? "output_tables" : ""].filter(Boolean).join("、");
+            this.options.repository.markLineageTaskInvalid(task.taskCatalog, task.instanceId, `${fields} 非空但无法解析`, at);
+            return;
+          }
+          const pairs: Array<{ sourceTableId: string; targetTableId: string }> = [];
+          if (task.status === "Terminated" && ["SQL", "SQLRT"].includes(task.taskType)) {
+            for (const sourceTableId of inputs) for (const targetTableId of outputs) pairs.push({ sourceTableId, targetTableId });
+          }
+          edgesProcessed += this.options.repository.replaceLineageTaskObservations(task, pairs, at);
+          this.options.repository.markLineageTaskParsed(task.taskCatalog, task.instanceId, at);
+          this.options.repository.markLineageJobProcessed(task.instanceId, task.dataDate, at);
+        });
+        jobsProcessed += 1;
+      }
     }
+    this.options.repository.pruneLineageTaskHistory(shiftDataDate(dataDate, -30));
     processedProjects.delete("");
     return { projectsProcessed: processedProjects.size, tablesProcessed, columnsProcessed, jobsProcessed, edgesProcessed };
   }
@@ -235,6 +243,7 @@ export class LineageSyncService {
 
 const WRITE_BATCH_SIZE = 500;
 const COLUMN_WRITE_BATCH_SIZE = 5_000;
+const TASK_LINEAGE_PARSER_VERSION = 1;
 
 async function* queryRows(client: MaxComputeQueryClient, sql: string, fields: readonly string[]): AsyncGenerator<MaxComputeRow> {
   if (client.stream) {
@@ -254,6 +263,33 @@ const COLUMN_FIELDS = ["table_catalog", "table_name", "column_name", "ordinal_po
 const PARTITION_FIELDS = ["table_catalog", "table_name", "partition_count", "data_length", "last_modified_time", "last_access_time"] as const;
 const ACCESS_FIELDS = ["table_catalog", "table_name", "access_count", "access_bytes", "ds"] as const;
 const TASK_FIELDS = ["task_catalog", "task_name", "task_type", "inst_id", "status", "owner_name", "end_time", "input_tables", "output_tables", "ext_node_id", "ext_node_name", "ext_node_onduty", "ext_bizdate"] as const;
+
+function taskHistoryFromRow(row: MaxComputeRow, defaultProject: string, dataDate: string, at: number): LineageTaskHistory | null {
+  const taskCatalog = field(row, "task_catalog") || defaultProject;
+  const instanceId = field(row, "inst_id");
+  if (!taskCatalog || !instanceId) return null;
+  const values = {
+    taskName: field(row, "task_name"), taskType: field(row, "task_type"), status: field(row, "status"),
+    ownerName: field(row, "owner_name"), endTime: maxComputeTime(row.end_time),
+    inputTables: field(row, "input_tables"), outputTables: field(row, "output_tables"),
+    nodeId: field(row, "ext_node_id"), nodeName: field(row, "ext_node_name"),
+    onDuty: field(row, "ext_node_onduty"), bizDate: field(row, "ext_bizdate"), dataDate,
+  };
+  const sourceHash = createHash("sha256").update(JSON.stringify([
+    taskCatalog, instanceId, values.taskName, values.taskType, values.status, values.ownerName, values.endTime,
+    values.inputTables, values.outputTables, values.nodeId, values.nodeName, values.onDuty, values.bizDate,
+  ])).digest("hex");
+  return {
+    taskCatalog, instanceId, ...values, sourceHash, parserVersion: TASK_LINEAGE_PARSER_VERSION, parseStatus: "pending", parseError: null,
+    firstImportedAt: at, lastImportedAt: at, parsedAt: null,
+  };
+}
+
+function shiftDataDate(dataDate: string, days: number): string {
+  const year = Number(dataDate.slice(0, 4)); const month = Number(dataDate.slice(4, 6)); const day = Number(dataDate.slice(6, 8));
+  const shifted = new Date(Date.UTC(year, month - 1, day + days));
+  return `${shifted.getUTCFullYear()}${String(shifted.getUTCMonth() + 1).padStart(2, "0")}${String(shifted.getUTCDate()).padStart(2, "0")}`;
+}
 
 function cleanText(name: string): string { return `REGEXP_REPLACE(COALESCE(${name}, ''), '[\\\\t\\\\r\\\\n]+', ' ') AS ${name}`; }
 function quote(value: string): string { return `'${value.replaceAll("'", "''")}'`; }

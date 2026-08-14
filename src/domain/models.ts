@@ -328,6 +328,30 @@ export interface LineageEdge {
   updatedAt: Timestamp;
 }
 
+export interface LineageTaskHistory {
+  taskCatalog: string;
+  instanceId: string;
+  taskName: string;
+  taskType: string;
+  status: string;
+  ownerName: string;
+  endTime: Timestamp | null;
+  inputTables: string;
+  outputTables: string;
+  nodeId: string;
+  nodeName: string;
+  onDuty: string;
+  bizDate: string;
+  dataDate: string;
+  sourceHash: string;
+  parserVersion: number;
+  parseStatus: "pending" | "parsed" | "invalid";
+  parseError: string | null;
+  firstImportedAt: Timestamp;
+  lastImportedAt: Timestamp;
+  parsedAt: Timestamp | null;
+}
+
 export interface LineageSyncRun {
   id: string;
   trigger: "schedule" | "manual";

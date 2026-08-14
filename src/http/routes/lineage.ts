@@ -154,11 +154,10 @@ export class LineageRoutes {
     const config = this.options.repository.getMaxComputeConfig();
     if (!config?.project || !config.endpoint || !config.credentialCiphertext) throw new HttpError(400, "MAXCOMPUTE_CONFIG_INCOMPLETE", "请先保存并验证 MaxCompute 数据源。");
     const dataDate = previousShanghaiDate(this.options.now());
-    let reset = { tables: 0, edges: 0, processedJobs: 0 };
-    this.options.repository.transaction(() => { reset = this.options.repository.resetLineageData(); });
+    const requeued = this.options.repository.transaction(() => this.options.repository.requeueLineageTasks());
     void this.options.scheduler.run("manual", auth.user.id).catch(() => undefined);
-    this.options.audit(auth.user.id, "lineage.sync.reprocessed", "lineage_sync", dataDate, reset);
-    sendJson(response, 202, { accepted: true, dataDate, reset });
+    this.options.audit(auth.user.id, "lineage.sync.reprocessed", "lineage_sync", dataDate, { requeued });
+    sendJson(response, 202, { accepted: true, dataDate, requeued });
   }
 
   private async sourceDiagnostic({ response, auth }: RouteRequest): Promise<void> {
@@ -176,12 +175,15 @@ export class LineageRoutes {
       const storage = this.options.repository.lineageStorageStats(dataDate);
       const displayCapSignature = storage.processedJobs > 0 && storage.processedJobs % 10_000 === 0;
       const warnings = [...diagnostic.warnings];
-      if (displayCapSignature) warnings.push(`系统库恰好有 ${storage.processedJobs} 个已处理标记，符合旧版命令行同步被 10000 行上限截断的特征，建议清空后重建。`);
-      const recoveryRecommended = diagnostic.lineageReadyJobs > 0 && storage.processedJobs > 0
-        && (storage.totalEdges === 0 || warnings.length > 0 || displayCapSignature);
+      if (displayCapSignature) warnings.push(`系统库恰好有 ${storage.processedJobs} 个已处理标记，符合旧版命令行同步被 10000 行上限截断的特征，建议重新解析已落库任务。`);
+      const recoveryRecommended = diagnostic.lineageReadyJobs > 0 && (storage.stagedJobs > 0 || storage.processedJobs > 0)
+        && (storage.totalEdges === 0 || storage.invalidJobs > 0 || warnings.length > 0 || displayCapSignature);
       this.options.audit(auth.user.id, "lineage.source.diagnosed", "lineage_sync", dataDate, {
         totalJobs: diagnostic.totalJobs,
         lineageReadyJobs: diagnostic.lineageReadyJobs,
+        stagedJobs: storage.stagedJobs,
+        invalidJobs: storage.invalidJobs,
+        observations: storage.observations,
         processedJobs: storage.processedJobs,
         totalEdges: storage.totalEdges,
         recoveryRecommended,

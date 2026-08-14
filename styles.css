@@ -209,6 +209,53 @@
 .sync-result-metrics dt { color: var(--subtle); font-size: 11px; }
 .sync-result-metrics dd { margin: 0; overflow: hidden; color: var(--text); font-size: 22px; font-weight: 760; line-height: 1.1; text-overflow: ellipsis; }
 .sync-result.empty { color: var(--muted); }
+
+.sync-pipeline {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 9px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sync-pipeline li {
+  min-width: 0;
+  position: relative;
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  gap: 8px;
+  padding: 0 0 5px;
+}
+
+.sync-pipeline li:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  top: 27px;
+  bottom: -8px;
+  left: 11px;
+  width: 1px;
+  height: auto;
+  background: #91caff;
+}
+
+.sync-stage-index {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #e6f4ff;
+  color: #0958d9;
+  font-size: 11px;
+  font-weight: 760;
+  box-shadow: inset 0 0 0 1px #91caff;
+}
+
+.sync-pipeline li > div { min-width: 0; }
+.sync-pipeline small { margin: 0 0 2px; color: var(--subtle); font-size: 10px; }
+.sync-pipeline strong { display: block; color: var(--text); font-size: 14px; overflow-wrap: anywhere; }
+.sync-pipeline p { margin: 3px 0 0; color: var(--muted); font-size: 10px; line-height: 1.4; }
 .sync-run-list { display: grid; }
 .sync-run-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 11px 0; border-bottom: 1px solid var(--line); }
 .sync-run-row:last-child { border-bottom: 0; }

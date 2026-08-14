@@ -15,6 +15,7 @@ import type {
   LineageColumn,
   LineageEdge,
   LineageSyncRun,
+  LineageTaskHistory,
   LineageTable,
   MaxComputeConfig,
   Message,
@@ -771,6 +772,111 @@ export class PersistenceRepository {
     `).run(edge);
   }
 
+  upsertLineageTaskHistory(task: LineageTaskHistory): boolean {
+    const current = this.getOne("SELECT source_hash, parser_version FROM lineage_task_history_raw WHERE task_catalog=? AND inst_id=?", task.taskCatalog, task.instanceId);
+    if (current && str(current.source_hash!) === task.sourceHash && num(current.parser_version!) === task.parserVersion) {
+      this.database.prepare("UPDATE lineage_task_history_raw SET last_imported_at=?, data_date=MAX(data_date, ?) WHERE task_catalog=? AND inst_id=?")
+        .run(task.lastImportedAt, task.dataDate, task.taskCatalog, task.instanceId);
+      return false;
+    }
+    this.database.prepare(`INSERT INTO lineage_task_history_raw(task_catalog, inst_id, task_name, task_type, status,
+      owner_name, end_time, input_tables, output_tables, ext_node_id, ext_node_name, ext_node_onduty, ext_bizdate,
+      data_date, source_hash, parser_version, parse_status, parse_error, first_imported_at, last_imported_at, parsed_at)
+      VALUES (@taskCatalog, @instanceId, @taskName, @taskType, @status, @ownerName, @endTime, @inputTables,
+        @outputTables, @nodeId, @nodeName, @onDuty, @bizDate, @dataDate, @sourceHash, @parserVersion, 'pending', NULL,
+        @firstImportedAt, @lastImportedAt, NULL)
+      ON CONFLICT(task_catalog, inst_id) DO UPDATE SET task_name=excluded.task_name, task_type=excluded.task_type,
+        status=excluded.status, owner_name=excluded.owner_name, end_time=excluded.end_time,
+        input_tables=excluded.input_tables, output_tables=excluded.output_tables, ext_node_id=excluded.ext_node_id,
+        ext_node_name=excluded.ext_node_name, ext_node_onduty=excluded.ext_node_onduty,
+        ext_bizdate=excluded.ext_bizdate, data_date=excluded.data_date, source_hash=excluded.source_hash,
+        parser_version=excluded.parser_version,
+        parse_status='pending', parse_error=NULL, last_imported_at=excluded.last_imported_at, parsed_at=NULL`).run(task);
+    return true;
+  }
+
+  listPendingLineageTasks(limit = 1_000): LineageTaskHistory[] {
+    return this.getMany(`SELECT * FROM lineage_task_history_raw WHERE parse_status='pending'
+      ORDER BY data_date, COALESCE(end_time, 0), task_catalog, inst_id LIMIT ?`, Math.max(1, Math.min(10_000, limit)))
+      .map(lineageTaskHistoryFromRow);
+  }
+
+  markLineageTaskParsed(taskCatalog: string, instanceId: string, at = this.now()): void {
+    this.database.prepare("UPDATE lineage_task_history_raw SET parse_status='parsed', parse_error=NULL, parsed_at=? WHERE task_catalog=? AND inst_id=?")
+      .run(at, taskCatalog, instanceId);
+  }
+
+  markLineageTaskInvalid(taskCatalog: string, instanceId: string, error: string, at = this.now()): void {
+    this.database.prepare("UPDATE lineage_task_history_raw SET parse_status='invalid', parse_error=?, parsed_at=? WHERE task_catalog=? AND inst_id=?")
+      .run(error.slice(0, 2_000), at, taskCatalog, instanceId);
+  }
+
+  requeueLineageTasks(): number {
+    const result = this.database.prepare("UPDATE lineage_task_history_raw SET parse_status='pending', parse_error=NULL, parsed_at=NULL").run();
+    this.database.prepare("DELETE FROM lineage_processed_jobs WHERE inst_id IN (SELECT inst_id FROM lineage_task_history_raw)").run();
+    return Number(result.changes);
+  }
+
+  replaceLineageTaskObservations(task: LineageTaskHistory, pairs: readonly { sourceTableId: string; targetTableId: string }[], at = this.now()): number {
+    return this.transaction(() => {
+      const old = this.getMany("SELECT source_table_id, target_table_id FROM lineage_task_edge_observations WHERE task_catalog=? AND inst_id=?", task.taskCatalog, task.instanceId);
+      const affected = new Set(old.map((row) => `${str(row.source_table_id!)}\u0000${str(row.target_table_id!)}`));
+      this.database.prepare("DELETE FROM lineage_task_edge_observations WHERE task_catalog=? AND inst_id=?").run(task.taskCatalog, task.instanceId);
+      const insert = this.database.prepare(`INSERT INTO lineage_task_edge_observations(task_catalog, inst_id,
+        source_table_id, target_table_id, first_seen_at, last_seen_at, occurrence_count, task_name, owner_name,
+        node_id, node_name, on_duty, updated_at) VALUES (@taskCatalog, @instanceId, @sourceTableId, @targetTableId,
+        @firstSeenAt, @lastSeenAt, 1, @taskName, @ownerName, @nodeId, @nodeName, @onDuty, @updatedAt)`);
+      const unique = new Map<string, { sourceTableId: string; targetTableId: string }>();
+      for (const pair of pairs) {
+        if (pair.sourceTableId === pair.targetTableId) continue;
+        unique.set(`${pair.sourceTableId}\u0000${pair.targetTableId}`, pair);
+      }
+      const seenAt = task.endTime ?? at;
+      for (const [key, pair] of unique) {
+        this.ensureLineageTable(pair.sourceTableId, seenAt);
+        this.ensureLineageTable(pair.targetTableId, seenAt);
+        insert.run({ ...task, ...pair, firstSeenAt: seenAt, lastSeenAt: seenAt, updatedAt: at });
+        affected.add(key);
+      }
+      for (const key of affected) {
+        const [sourceTableId, targetTableId] = key.split("\u0000") as [string, string];
+        this.rebuildLineageEdge(sourceTableId, targetTableId, at);
+      }
+      return unique.size;
+    });
+  }
+
+  pruneLineageTaskHistory(beforeDataDate: string): number {
+    const result = this.database.prepare("DELETE FROM lineage_task_history_raw WHERE data_date<? AND parse_status<>'pending'").run(beforeDataDate);
+    this.database.prepare("DELETE FROM lineage_processed_jobs WHERE data_date<?").run(beforeDataDate);
+    return Number(result.changes);
+  }
+
+  private rebuildLineageEdge(sourceTableId: string, targetTableId: string, at: number): void {
+    const aggregate = this.getOne(`SELECT MIN(first_seen_at) first_seen_at, MAX(last_seen_at) last_seen_at,
+      SUM(occurrence_count) occurrence_count FROM lineage_task_edge_observations
+      WHERE source_table_id=? AND target_table_id=?`, sourceTableId, targetTableId);
+    if (!aggregate || aggregate.occurrence_count === null) {
+      this.database.prepare("DELETE FROM lineage_edges WHERE source_table_id=? AND target_table_id=?").run(sourceTableId, targetTableId);
+      return;
+    }
+    const latest = this.getOne(`SELECT * FROM lineage_task_edge_observations WHERE source_table_id=? AND target_table_id=?
+      ORDER BY last_seen_at DESC, task_catalog, inst_id LIMIT 1`, sourceTableId, targetTableId)!;
+    this.database.prepare(`INSERT INTO lineage_edges(source_table_id, target_table_id, first_seen_at, last_seen_at,
+      occurrence_count, last_instance_id, last_task_name, last_owner_name, last_node_id, last_node_name,
+      last_on_duty, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(source_table_id, target_table_id) DO UPDATE SET first_seen_at=excluded.first_seen_at,
+        last_seen_at=excluded.last_seen_at, occurrence_count=excluded.occurrence_count,
+        last_instance_id=excluded.last_instance_id, last_task_name=excluded.last_task_name,
+        last_owner_name=excluded.last_owner_name, last_node_id=excluded.last_node_id,
+        last_node_name=excluded.last_node_name, last_on_duty=excluded.last_on_duty,
+        updated_at=excluded.updated_at`).run(
+      sourceTableId, targetTableId, num(aggregate.first_seen_at!), num(aggregate.last_seen_at!), num(aggregate.occurrence_count!),
+      str(latest.inst_id!), nullableStr(latest.task_name!), nullableStr(latest.owner_name!), nullableStr(latest.node_id!),
+      nullableStr(latest.node_name!), nullableStr(latest.on_duty!), at,
+    );
+  }
+
   updateLineageTableSchedule(tableId: string, input: {
     at: number; status: string; taskName: string | null; instanceId: string | null; owner: string | null;
     nodeId: string | null; nodeName: string | null; onDuty: string | null; bizDate: string | null;
@@ -810,10 +916,18 @@ export class PersistenceRepository {
       .run(instanceId, dataDate, at);
   }
 
-  lineageStorageStats(dataDate: string): { processedJobs: number; totalEdges: number } {
+  lineageStorageStats(dataDate: string): { processedJobs: number; stagedJobs: number; parsedJobs: number; invalidJobs: number; observations: number; totalEdges: number } {
     const processed = this.getOne("SELECT COUNT(*) count FROM lineage_processed_jobs WHERE data_date=?", dataDate);
+    const staged = this.getOne(`SELECT COUNT(*) count,
+      SUM(CASE WHEN parse_status='parsed' THEN 1 ELSE 0 END) parsed,
+      SUM(CASE WHEN parse_status='invalid' THEN 1 ELSE 0 END) invalid
+      FROM lineage_task_history_raw WHERE data_date=?`, dataDate);
+    const observations = this.getOne("SELECT COUNT(*) count FROM lineage_task_edge_observations WHERE task_catalog<>'__legacy__'");
     const edges = this.getOne("SELECT COUNT(*) count FROM lineage_edges");
-    return { processedJobs: num(processed?.count ?? 0), totalEdges: num(edges?.count ?? 0) };
+    return {
+      processedJobs: num(processed?.count ?? 0), stagedJobs: num(staged?.count ?? 0), parsedJobs: num(staged?.parsed ?? 0),
+      invalidJobs: num(staged?.invalid ?? 0), observations: num(observations?.count ?? 0), totalEdges: num(edges?.count ?? 0),
+    };
   }
 
   resetLineageProcessedJobs(dataDate: string): number {
@@ -825,6 +939,7 @@ export class PersistenceRepository {
     const edges = num(this.getOne("SELECT COUNT(*) count FROM lineage_edges")?.count ?? 0);
     const processedJobs = num(this.getOne("SELECT COUNT(*) count FROM lineage_processed_jobs")?.count ?? 0);
     this.database.prepare("DELETE FROM lineage_tables").run();
+    this.database.prepare("DELETE FROM lineage_task_history_raw").run();
     this.database.prepare("DELETE FROM lineage_processed_jobs").run();
     return { tables, edges, processedJobs };
   }
@@ -1068,6 +1183,7 @@ function lineageTableFromRow(r: Row): LineageTable { return { id:str(r.id!), pro
 function lineageColumnFromRow(r: Row): LineageColumn { return { tableId:str(r.table_id!), name:str(r.column_name!), ordinalPosition:num(r.ordinal_position!), dataType:str(r.data_type!), comment:str(r.column_comment!), nullable:bool(r.is_nullable!), partitionKey:bool(r.is_partition_key!), primaryKey:bool(r.is_primary_key!), updatedAt:num(r.updated_at!) }; }
 function lineageEdgeFromRow(r: Row): LineageEdge { return { sourceTableId:str(r.source_table_id!), targetTableId:str(r.target_table_id!), firstSeenAt:num(r.first_seen_at!), lastSeenAt:num(r.last_seen_at!), occurrenceCount:num(r.occurrence_count!), lastInstanceId:nullableStr(r.last_instance_id!), lastTaskName:nullableStr(r.last_task_name!), lastOwnerName:nullableStr(r.last_owner_name!), lastNodeId:nullableStr(r.last_node_id!), lastNodeName:nullableStr(r.last_node_name!), lastOnDuty:nullableStr(r.last_on_duty!), updatedAt:num(r.updated_at!) }; }
 function lineageSyncRunFromRow(r: Row): LineageSyncRun { return { id:str(r.id!), trigger:str(r.trigger_type!) as LineageSyncRun["trigger"], requestedBy:nullableStr(r.requested_by!), dataDate:str(r.data_date!), status:str(r.status!) as LineageSyncRun["status"], projectsProcessed:num(r.projects_processed!), tablesProcessed:num(r.tables_processed!), columnsProcessed:num(r.columns_processed!), jobsProcessed:num(r.jobs_processed!), edgesProcessed:num(r.edges_processed!), error:nullableStr(r.error!), startedAt:num(r.started_at!), completedAt:nullableNum(r.completed_at!) }; }
+function lineageTaskHistoryFromRow(r: Row): LineageTaskHistory { return { taskCatalog:str(r.task_catalog!), instanceId:str(r.inst_id!), taskName:str(r.task_name!), taskType:str(r.task_type!), status:str(r.status!), ownerName:str(r.owner_name!), endTime:nullableNum(r.end_time!), inputTables:str(r.input_tables!), outputTables:str(r.output_tables!), nodeId:str(r.ext_node_id!), nodeName:str(r.ext_node_name!), onDuty:str(r.ext_node_onduty!), bizDate:str(r.ext_bizdate!), dataDate:str(r.data_date!), sourceHash:str(r.source_hash!), parserVersion:num(r.parser_version!), parseStatus:str(r.parse_status!) as LineageTaskHistory["parseStatus"], parseError:nullableStr(r.parse_error!), firstImportedAt:num(r.first_imported_at!), lastImportedAt:num(r.last_imported_at!), parsedAt:nullableNum(r.parsed_at!) }; }
 function searchHitFromRow(r: Row): SearchHit { return { kind:str(r.kind!) as SearchHit["kind"], sessionId:str(r.session_id!), messageId:nullableStr(r.message_id!), title:str(r.title!), excerpt:str(r.excerpt!), rank:num(r.rank!), timestamp:num(r.hit_time!) }; }
 
 function lineageTableParams(table: LineageTable): Record<string, unknown> { return { ...table, isPartitioned:boolInt(table.isPartitioned), hasPrimaryKey:boolInt(table.hasPrimaryKey), isTransactional:boolInt(table.isTransactional), isDeltaTable:boolInt(table.isDeltaTable) }; }
