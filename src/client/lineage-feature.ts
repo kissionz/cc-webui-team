@@ -72,7 +72,7 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
     const configProject = status?.config?.project || "";
     const selectedTeam = deps.state().selectedTeamId || deps.state().teams[0]?.id || "";
     const tableOptions = suggestions.map((table) => `<option value="${deps.escape(table.id)}">${deps.escape(table.comment || table.ownerName || table.type)}</option>`).join("");
-    const columnOptions = detail?.columns.map((column) => `<option value="${deps.escape(column.name)}">${deps.escape(column.dataType)}${column.comment ? ` · ${deps.escape(column.comment)}` : ""}</option>`).join("") || "";
+    const columnOptions = detail?.columns.map((column) => `<option value="${deps.escape(column.name)}" label="${deps.escape([column.comment, column.dataType].filter(Boolean).join(" · "))}"></option>`).join("") || "";
     const modeButtons = `<div class="segmented" role="group" aria-label="查询类型"><button type="button" class="segment ${mode === "table" ? "active" : ""}" data-lineage-mode="table">表血缘</button><button type="button" class="segment ${mode === "column" ? "active" : ""}" data-lineage-mode="column">字段血缘</button></div>`;
     return `<form class="lineage-querybar" data-form="lineage-query">
       <div class="lineage-query-main">
@@ -214,7 +214,8 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
     const table = rawTable.includes(".") || !project ? rawTable : `${project}.${rawTable}`;
     queryText = table;
     if (mode === "column") {
-      columnText = String(data.get("column") || "").trim();
+      const rawColumn = String(data.get("column") || "").trim();
+      columnText = detail?.columns.find((item) => item.name.toLocaleLowerCase() === rawColumn.toLocaleLowerCase())?.name ?? rawColumn;
       analysisLoading = true; columnResult = null; graph = null; deps.scheduleRender();
       try {
         const payload = { teamId: String(data.get("teamId") || ""), table, column: columnText };
@@ -303,6 +304,12 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
   async function loadDetail(id: string, rerender: boolean): Promise<void> {
     try { detail = await api<LineageDetail>(`/api/lineage/tables/${encodeURIComponent(id)}`); }
     catch { detail = null; }
+    if (mode === "column" && detail && columnText) {
+      const exactName = detail.columns.find((item) => item.name.toLocaleLowerCase() === columnText.toLocaleLowerCase());
+      const commentMatches = detail.columns.filter((item) => item.comment && item.comment === columnText);
+      if (exactName) columnText = exactName.name;
+      else if (commentMatches.length === 1) columnText = commentMatches[0]!.name;
+    }
     if (rerender) deps.scheduleRender();
   }
 

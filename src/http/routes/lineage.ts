@@ -6,6 +6,7 @@ import { previousShanghaiDate, type LineageScheduler } from "../../lineage/sched
 import { diagnoseLineageSource } from "../../lineage/sync-service.js";
 import type { MaxComputeCredentials } from "../../lineage/maxcompute-client.js";
 import { PyOdpsClient, PyOdpsError, type PyOdpsDiagnostic } from "../../lineage/pyodps-client.js";
+import { DataWorksColumnLineageClient, inferDataWorksRegion, splitMaxComputeTable, type DataWorksColumnRelation } from "../../lineage/dataworks-lineage-client.js";
 import type { SecretBox } from "../../security/secret-box.js";
 import { HttpError, readJsonBody, sendJson } from "../core.js";
 import { assertOnlyKeys, inputBoolean, inputEnum, inputInteger, inputString, inputStringList, objectBody, optionalQuery, queryInteger } from "../validation.js";
@@ -252,12 +253,53 @@ export class LineageRoutes {
     const config = this.options.claudeConfig();
     if (!config?.enabled || !config.available || !config.authenticated) throw new HttpError(503, "CLAUDE_UNAVAILABLE", "Claude Code 当前不可用或未登录。");
     try {
-      const result = await this.options.analyzer.analyze({ cwd: team.workspacePath, table, column, config });
-      this.options.audit(auth.user.id, "lineage.column.analyzed", "lineage_column", `${table}.${column}`, { teamId, status: result.status, relations: result.relations.length });
+      const platform = await this.dataWorksColumnRelations(table, column);
+      const result = await this.options.analyzer.analyze({
+        cwd: team.workspacePath,
+        table,
+        column,
+        config,
+        platformRelations: platform.relations,
+        platformWarnings: platform.warnings,
+      });
+      this.options.audit(auth.user.id, "lineage.column.analyzed", "lineage_column", `${table}.${column}`, {
+        teamId,
+        status: result.status,
+        relations: result.relations.length,
+        dataWorksRelations: platform.relations.length,
+      });
       sendJson(response, 200, { result });
     } catch (error) {
       if (error instanceof Error && error.message.includes("任务已满")) throw new HttpError(429, "COLUMN_LINEAGE_BUSY", error.message);
       throw error;
+    }
+  }
+
+  private async dataWorksColumnRelations(table: string, column: string): Promise<{ relations: DataWorksColumnRelation[]; warnings: string[] }> {
+    const source = this.options.repository.getMaxComputeConfig();
+    if (!source?.credentialCiphertext) return { relations: [], warnings: ["未配置 MaxCompute AccessKey，字段血缘已使用 Claude Code 本地分析。"] };
+    const reference = splitMaxComputeTable(table, source.project);
+    if (!reference) return { relations: [], warnings: ["无法从表名确定 MaxCompute 项目，字段血缘已使用 Claude Code 本地分析。"] };
+    const region = inferDataWorksRegion(source, reference.project);
+    if (!region) return { relations: [], warnings: ["无法识别 DataWorks 地域，字段血缘已使用 Claude Code 本地分析。"] };
+    let credentials: MaxComputeCredentials;
+    try {
+      credentials = this.options.secretBox.decrypt<MaxComputeCredentials>(source.credentialCiphertext);
+    } catch {
+      return { relations: [], warnings: ["MaxCompute AccessKey 无法解密，字段血缘已使用 Claude Code 本地分析。"] };
+    }
+    try {
+      const client = new DataWorksColumnLineageClient({ credentials, region });
+      const relations = await client.queryColumn({ project: reference.project, table: reference.table, column });
+      return {
+        relations,
+        warnings: relations.length ? [] : ["DataWorks 未返回该字段的上下游关系，已继续使用 Claude Code 搜索工作空间。"],
+      };
+    } catch (error) {
+      return {
+        relations: [],
+        warnings: [`DataWorks 字段血缘查询失败，已回退到 Claude Code：${safeDataWorksError(error, credentials)}`],
+      };
     }
   }
 }
@@ -285,6 +327,10 @@ function configDto(config: MaxComputeConfig, admin: boolean, secretBox: SecretBo
 }
 
 function maskAccessKey(value: string): string { return value.length <= 8 ? `${value.slice(0, 2)}••••` : `${value.slice(0, 4)}••••${value.slice(-4)}`; }
+function safeDataWorksError(error: unknown, credentials: MaxComputeCredentials): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  return raw.replaceAll(credentials.accessKeyId, "[REDACTED]").replaceAll(credentials.accessKeySecret, "[REDACTED]").slice(0, 500);
+}
 function connectionDiagnostic(diagnostic: Partial<PyOdpsDiagnostic> | null, parsed: MaxComputeProject[], credential: MaxComputeCredentials): Record<string, unknown> {
   const summary = diagnostic
     ? [

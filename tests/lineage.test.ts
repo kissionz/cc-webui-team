@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ClaudeConfig, MaxComputeConfig } from "../src/domain/index.js";
 import { ColumnLineageAnalyzer } from "../src/lineage/column-analyzer.js";
+import { DataWorksColumnLineageClient, inferDataWorksRegion } from "../src/lineage/dataworks-lineage-client.js";
 import type { MaxComputeQueryClient, MaxComputeRow } from "../src/lineage/maxcompute-client.js";
 import { PyOdpsClient, pythonInvocations } from "../src/lineage/pyodps-client.js";
 import { LineageScheduler, nextShanghaiRun, previousShanghaiDate } from "../src/lineage/scheduler.js";
@@ -292,5 +293,87 @@ describe("ColumnLineageAnalyzer", () => {
     expect(result.relations).toHaveLength(1);
     expect(result.evidence[0]).toMatchObject({ path: "sales.sql", startLine: 1, endLine: 5 });
     expect(result.evidence[0]?.snippet).toContain("SUM(amount) AS total_amount");
+  });
+
+  it("keeps the requested field as the graph anchor instead of trusting a model alias", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cc-lineage-anchor-"));
+    roots.push(root);
+    await writeFile(join(root, "sales.sql"), "SELECT SUM(amount) AS total_amount FROM analytics.ods_orders;\n");
+    const queryFactory = (() => ({
+      async *[Symbol.asyncIterator]() {
+        yield {
+          type: "result", subtype: "success", is_error: false,
+          structured_output: {
+            status: "found", table: "wrong_table", column: "wrong_column", summary: "汇总",
+            relations: [{ sourceTable: "analytics.ods_orders", sourceColumn: "amount", targetTable: "analytics.dws_sales", targetColumn: "模型误写别名", transformation: "SUM 聚合", confidence: "high", evidenceIds: ["e1"] }],
+            evidence: [{ id: "e1", path: "sales.sql", startLine: 1, endLine: 1, language: "sql", explanation: "字段定义" }], warnings: [],
+          },
+        };
+      },
+    })) as never;
+    const claudeConfig: ClaudeConfig = {
+      command: "claude", args: "", workspaceRoot: root, modelContextTokens: 1_000_000, autoCompactRatio: 0.62,
+      autoCompactEnabled: true, mcpToolAllowlist: [], enabled: true, available: true, version: "test", latencyMs: 1,
+      authenticated: true, lastCheckAt: now, healthMessage: null, updatedAt: now,
+    };
+    const result = await new ColumnLineageAnalyzer({ queryFactory }).analyze({ cwd: root, table: "analytics.dws_sales", column: "total_amount", config: claudeConfig });
+    expect(result).toMatchObject({ table: "analytics.dws_sales", column: "total_amount" });
+    expect(result.relations[0]).toMatchObject({ sourceColumn: "amount", targetColumn: "total_amount" });
+  });
+
+  it("uses server-collected read-only excerpts on native Windows without enabling unsandboxed tools", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cc-lineage-windows-"));
+    roots.push(root);
+    await writeFile(join(root, "sales.sql"), "SELECT amount AS total_amount FROM analytics.ods_orders;\n");
+    let invocation: { prompt?: string; options?: { allowedTools?: string[]; sandbox?: unknown } } = {};
+    const queryFactory = ((input: typeof invocation) => {
+      invocation = input;
+      return {
+        async *[Symbol.asyncIterator]() {
+          yield { type: "result", subtype: "success", is_error: false, structured_output: { status: "not_found", table: "analytics.dws_sales", column: "total_amount", summary: "", relations: [], evidence: [], warnings: [] } };
+        },
+      };
+    }) as never;
+    const claudeConfig: ClaudeConfig = {
+      command: "claude", args: "", workspaceRoot: root, modelContextTokens: 1_000_000, autoCompactRatio: 0.62,
+      autoCompactEnabled: true, mcpToolAllowlist: [], enabled: true, available: true, version: "test", latencyMs: 1,
+      authenticated: true, lastCheckAt: now, healthMessage: null, updatedAt: now,
+    };
+    await new ColumnLineageAnalyzer({ queryFactory, platform: "win32" }).analyze({ cwd: root, table: "analytics.dws_sales", column: "total_amount", config: claudeConfig });
+    expect(invocation.options?.allowedTools).toEqual([]);
+    expect(invocation.options?.sandbox).toBeUndefined();
+    expect(invocation.prompt).toContain("FILE sales.sql L1-L2");
+  });
+});
+
+describe("DataWorks field lineage", () => {
+  it("resolves the canonical column entity before querying upstream and downstream", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const selectedId = "maxcompute-column:::analytics::dws_sales:Total_Amount";
+    const client = {
+      async listColumns(request: Record<string, unknown>) {
+        requests.push(request);
+        return { body: { pagingInfo: { columns: [{ id: selectedId, name: "Total_Amount" }] } } };
+      },
+      async listLineages(request: Record<string, unknown>) {
+        requests.push(request);
+        if (request.dstEntityId) return { body: { pagingInfo: { totalCount: 1, lineages: [{
+          srcEntity: { id: "maxcompute-column:::analytics::ods_orders:raw_amount", name: "raw_amount" },
+          dstEntity: { id: selectedId, name: "Total_Amount" },
+          relationships: [{ task: { id: "task-1", type: "dataworks-sql" }, createTime: 10 }],
+        }] } } };
+        return { body: { pagingInfo: { totalCount: 0, lineages: [] } } };
+      },
+    };
+    const lineage = new DataWorksColumnLineageClient({ credentials: { accessKeyId: "id", accessKeySecret: "secret" }, region: "cn-shanghai", client: client as never });
+    const relations = await lineage.queryColumn({ project: "analytics", table: "dws_sales", column: "total_amount" });
+    expect(requests[0]).toMatchObject({ tableId: "maxcompute-table:::analytics::dws_sales", name: "total_amount" });
+    expect(requests[1]).toMatchObject({ dstEntityId: selectedId });
+    expect(relations).toEqual([expect.objectContaining({ sourceTable: "analytics.ods_orders", sourceColumn: "raw_amount", targetTable: "analytics.dws_sales", targetColumn: "Total_Amount" })]);
+  });
+
+  it("infers the DataWorks region from discovered projects or the MaxCompute endpoint", () => {
+    expect(inferDataWorksRegion(config({ discoveredProjects: [{ name: "analytics", status: "NORMAL", region: "cn-beijing" }] }), "analytics")).toBe("cn-beijing");
+    expect(inferDataWorksRegion(config(), "analytics")).toBe("cn-shanghai");
   });
 });
