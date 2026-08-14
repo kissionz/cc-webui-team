@@ -94,7 +94,7 @@ describe("PyODPS bridge", () => {
     const root = await mkdtemp(join(tmpdir(), "cc-pyodps-fixture-"));
     roots.push(root);
     const fixture = join(root, "helper-fixture.mjs");
-    await writeFile(fixture, `let body="";process.stdin.setEncoding("utf8");process.stdin.on("data",c=>body+=c);process.stdin.on("end",()=>{const req=JSON.parse(body);if(process.argv.join(" ").includes(req.accessKeySecret))process.exit(9);if(req.sql==="FAIL"){console.error(JSON.stringify({type:"error",code:"MAXCOMPUTE_QUERY_FAILED",message:"failed",detail:req.accessKeySecret}));process.exitCode=1;return;}console.log(JSON.stringify({type:"meta",pythonVersion:"3.11.9",sdkVersion:"0.13.0",instanceId:"i-test"}));console.log(JSON.stringify({type:"row",value:{catalog_name:"analytics",status:"NORMAL"}}));console.log(JSON.stringify({type:"done",rows:1}));});`);
+    await writeFile(fixture, `let body="";process.stdin.setEncoding("utf8");process.stdin.on("data",c=>body+=c);process.stdin.on("end",()=>{const req=JSON.parse(body);if(process.argv.join(" ").includes(req.accessKeySecret))process.exit(9);if(req.sql==="FAIL"){console.error(JSON.stringify({type:"error",code:"MAXCOMPUTE_QUERY_FAILED",message:"failed",detail:req.accessKeySecret}));process.exitCode=1;return;}console.log(JSON.stringify({type:"meta",pythonVersion:"3.11.9",sdkVersion:"0.13.0",instanceId:"i-test"}));if(req.sql==="STREAM"){for(let i=0;i<20000;i++)console.log(JSON.stringify({type:"row",value:{catalog_name:"p"+i,status:"NORMAL"}}));console.log(JSON.stringify({type:"done",rows:20000}));return;}console.log(JSON.stringify({type:"row",value:{catalog_name:"analytics",status:"NORMAL"}}));console.log(JSON.stringify({type:"done",rows:1}));});`);
     let diagnostic: unknown;
     const client = new PyOdpsClient({
       command: process.execPath, args: `"${fixture}"`, project: "analytics",
@@ -108,6 +108,9 @@ describe("PyODPS bridge", () => {
     expect(failure).toBeInstanceOf(Error);
     expect(String(failure)).toContain("[REDACTED]");
     expect(String(failure)).not.toContain("super-secret");
+    let streamed = 0;
+    for await (const _row of client.stream("STREAM", ["catalog_name", "status"])) streamed += 1;
+    expect(streamed).toBe(20_000);
   });
 });
 
@@ -181,16 +184,17 @@ describe("MaxCompute table lineage sync", () => {
       table_catalog: project, table_name: name, table_type: "MANAGED_TABLE", is_partitioned: "false",
     });
     const client: MaxComputeQueryClient = {
-      async query(statement) {
+      async query() { throw new Error("sync must use the streaming client path"); },
+      async *stream(statement) {
         sql.push(statement);
         if (statement.includes("INFORMATION_SCHEMA.tables")) {
-          return [tableRow("p1", "a"), tableRow("p2", "b"), tableRow("p3", "c")];
+          yield tableRow("p1", "a"); yield tableRow("p2", "b"); yield tableRow("p3", "c");
+          return;
         }
         if (statement.includes("INFORMATION_SCHEMA.columns")) {
           const duplicate = { table_catalog: "p1", table_name: "a", column_name: "id", ordinal_position: "1", data_type: "STRING" };
-          return [duplicate, { ...duplicate }];
+          yield duplicate; yield { ...duplicate };
         }
-        return [];
       },
     };
     await expect(new LineageSyncService({

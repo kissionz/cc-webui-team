@@ -65,56 +65,120 @@ export class LineageSyncService {
   async sync(dataDate: string): Promise<LineageSyncResult> {
     if (!/^\d{8}$/.test(dataDate)) throw new Error("同步日期必须使用 yyyyMMdd 格式。");
     const projects = this.options.projects === undefined ? [this.options.project] : this.options.projects;
-    const [tables, columns, partitions, access, jobs] = await Promise.all([
-      this.options.client.query(tablesSql(projects), TABLE_FIELDS),
-      this.options.client.query(columnsSql(projects), COLUMN_FIELDS),
-      this.options.client.query(partitionsSql(projects), PARTITION_FIELDS),
-      this.options.client.query(accessSql(projects, dataDate), ACCESS_FIELDS),
-      this.options.client.query(tasksSql(projects, dataDate), TASK_FIELDS),
-    ]);
     const at = this.now();
-    const processedProjects = new Set<string>([
-      ...tables.map((row) => field(row, "table_catalog")),
-      ...columns.map((row) => field(row, "table_catalog")),
-      ...partitions.map((row) => field(row, "table_catalog")),
-      ...access.map((row) => field(row, "table_catalog")),
-      ...jobs.map((row) => row.task_catalog || this.options.project),
-    ]);
-    const partitionByTable = new Map(partitions.map((row) => [tableId(field(row, "table_catalog"), field(row, "table_name")), row]));
-    const existing = new Map<string, LineageTable>();
-    this.options.repository.transaction(() => {
-      for (const row of tables) {
-        const id = tableId(field(row, "table_catalog"), field(row, "table_name"));
-        const current = this.options.repository.getLineageTable(id);
-        const partition = partitionByTable.get(id);
-        const table = tableFromRows(row, partition, current, at);
-        this.options.repository.saveLineageTable(table);
-        existing.set(id, table);
-      }
-      const columnsByTable = new Map<string, Map<string, LineageColumn>>();
-      for (const row of columns) {
-        const id = tableId(field(row, "table_catalog"), field(row, "table_name"));
-        if (!this.options.repository.getLineageTable(id)) this.options.repository.ensureLineageTable(id, at);
-        const values = columnsByTable.get(id) ?? new Map<string, LineageColumn>();
-        const column = columnFromRow(id, row, at);
-        values.set(column.name, column);
-        columnsByTable.set(id, values);
-      }
-      for (const [id, values] of columnsByTable) this.options.repository.replaceLineageColumns(id, [...values.values()]);
-      for (const row of access) {
-        this.options.repository.upsertLineageAccess(
-          tableId(field(row, "table_catalog"), field(row, "table_name")),
-          row.ds || dataDate,
-          integer(row.access_count),
-          integer(row.access_bytes),
-          at,
-        );
-      }
-    });
+    const processedProjects = new Set<string>();
+
+    let tablesProcessed = 0;
+    const tableBatch: MaxComputeRow[] = [];
+    const flushTables = (): void => {
+      if (!tableBatch.length) return;
+      this.options.repository.transaction(() => {
+        for (const row of tableBatch) {
+          const id = tableId(field(row, "table_catalog"), field(row, "table_name"));
+          const current = this.options.repository.getLineageTable(id);
+          this.options.repository.saveLineageTable(tableFromRows(row, undefined, current, at));
+        }
+      });
+      tableBatch.length = 0;
+    };
+    for await (const row of queryRows(this.options.client, tablesSql(projects), TABLE_FIELDS)) {
+      processedProjects.add(field(row, "table_catalog"));
+      tableBatch.push(row);
+      tablesProcessed += 1;
+      if (tableBatch.length >= WRITE_BATCH_SIZE) flushTables();
+    }
+    flushTables();
+
+    const partitionBatch: MaxComputeRow[] = [];
+    const flushPartitions = (): void => {
+      if (!partitionBatch.length) return;
+      this.options.repository.transaction(() => {
+        for (const row of partitionBatch) {
+          this.options.repository.updateLineageTablePartitionStats(
+            tableId(field(row, "table_catalog"), field(row, "table_name")),
+            {
+              partitionCount: integer(row.partition_count),
+              dataLength: numberOrNull(row.data_length),
+              lastModifiedTime: maxComputeTime(row.last_modified_time),
+              lastAccessTime: maxComputeTime(row.last_access_time),
+              at,
+            },
+          );
+        }
+      });
+      partitionBatch.length = 0;
+    };
+    for await (const row of queryRows(this.options.client, partitionsSql(projects), PARTITION_FIELDS)) {
+      processedProjects.add(field(row, "table_catalog"));
+      partitionBatch.push(row);
+      if (partitionBatch.length >= WRITE_BATCH_SIZE) flushPartitions();
+    }
+    flushPartitions();
+
+    let columnsProcessed = 0;
+    let activeTableId = "";
+    let activeColumns = new Map<string, LineageColumn>();
+    let queuedColumnCount = 0;
+    const columnGroups: Array<{ tableId: string; columns: LineageColumn[] }> = [];
+    const flushColumnGroups = (): void => {
+      if (!columnGroups.length) return;
+      this.options.repository.transaction(() => {
+        for (const group of columnGroups) {
+          this.options.repository.ensureLineageTable(group.tableId, at);
+          this.options.repository.replaceLineageColumns(group.tableId, group.columns);
+        }
+      });
+      columnGroups.length = 0;
+      queuedColumnCount = 0;
+    };
+    const queueActiveColumns = (): void => {
+      if (!activeTableId) return;
+      const values = [...activeColumns.values()];
+      columnGroups.push({ tableId: activeTableId, columns: values });
+      queuedColumnCount += values.length;
+      activeTableId = "";
+      activeColumns = new Map<string, LineageColumn>();
+      if (queuedColumnCount >= COLUMN_WRITE_BATCH_SIZE) flushColumnGroups();
+    };
+    for await (const row of queryRows(this.options.client, columnsSql(projects), COLUMN_FIELDS)) {
+      const id = tableId(field(row, "table_catalog"), field(row, "table_name"));
+      processedProjects.add(field(row, "table_catalog"));
+      if (activeTableId && activeTableId !== id) queueActiveColumns();
+      activeTableId = id;
+      const column = columnFromRow(id, row, at);
+      activeColumns.set(column.name, column);
+      columnsProcessed += 1;
+    }
+    queueActiveColumns();
+    flushColumnGroups();
+
+    const accessBatch: MaxComputeRow[] = [];
+    const flushAccess = (): void => {
+      if (!accessBatch.length) return;
+      this.options.repository.transaction(() => {
+        for (const row of accessBatch) {
+          this.options.repository.upsertLineageAccess(
+            tableId(field(row, "table_catalog"), field(row, "table_name")),
+            row.ds || dataDate,
+            integer(row.access_count),
+            integer(row.access_bytes),
+            at,
+          );
+        }
+      });
+      accessBatch.length = 0;
+    };
+    for await (const row of queryRows(this.options.client, accessSql(projects, dataDate), ACCESS_FIELDS)) {
+      processedProjects.add(field(row, "table_catalog"));
+      accessBatch.push(row);
+      if (accessBatch.length >= WRITE_BATCH_SIZE) flushAccess();
+    }
+    flushAccess();
 
     let jobsProcessed = 0;
     let edgesProcessed = 0;
-    for (const row of jobs) {
+    for await (const row of queryRows(this.options.client, tasksSql(projects, dataDate), TASK_FIELDS)) {
+      processedProjects.add(row.task_catalog || this.options.project);
       const instanceId = row.inst_id;
       if (!instanceId || this.options.repository.isLineageJobProcessed(instanceId)) continue;
       const taskProject = row.task_catalog || this.options.project;
@@ -165,9 +229,25 @@ export class LineageSyncService {
       jobsProcessed += 1;
     }
     processedProjects.delete("");
-    return { projectsProcessed: processedProjects.size, tablesProcessed: tables.length, columnsProcessed: columns.length, jobsProcessed, edgesProcessed };
+    return { projectsProcessed: processedProjects.size, tablesProcessed, columnsProcessed, jobsProcessed, edgesProcessed };
   }
 }
+
+const WRITE_BATCH_SIZE = 500;
+const COLUMN_WRITE_BATCH_SIZE = 5_000;
+
+async function* queryRows(client: MaxComputeQueryClient, sql: string, fields: readonly string[]): AsyncGenerator<MaxComputeRow> {
+  if (client.stream) {
+    yield* client.stream(sql, fields);
+    return;
+  }
+  for (const row of await client.query(sql, fields)) yield row;
+}
+
+/*
+ * The remaining helpers intentionally stay pure: each streamed row is normalized
+ * before it reaches SQLite, while only a bounded write batch remains in memory.
+ */
 
 const TABLE_FIELDS = ["table_catalog", "table_name", "table_type", "table_comment", "owner_id", "owner_name", "is_partitioned", "create_time", "last_modified_time", "last_access_time", "data_length", "lifecycle", "storage_tier", "cluster_type", "number_buckets", "has_primary_key", "is_transactional", "is_delta_table", "table_storage", "table_format"] as const;
 const COLUMN_FIELDS = ["table_catalog", "table_name", "column_name", "ordinal_position", "data_type", "column_comment", "is_nullable", "is_partition_key", "is_primary_key"] as const;
@@ -193,7 +273,8 @@ function columnsSql(projects: readonly string[] | null): string {
   return `SELECT table_catalog, table_name, column_name, CAST(ordinal_position AS STRING) AS ordinal_position,
     data_type, ${cleanText("column_comment")}, CAST(is_nullable AS STRING) AS is_nullable,
     CAST(is_partition_key AS STRING) AS is_partition_key, CAST(is_primary_key AS STRING) AS is_primary_key
-    FROM SYSTEM_CATALOG.INFORMATION_SCHEMA.columns${where(catalogFilter("table_catalog", projects))}`;
+    FROM SYSTEM_CATALOG.INFORMATION_SCHEMA.columns${where(catalogFilter("table_catalog", projects))}
+    ORDER BY table_catalog, table_name, ordinal_position, column_name`;
 }
 
 function partitionsSql(projects: readonly string[] | null): string {

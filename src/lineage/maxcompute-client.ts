@@ -6,6 +6,7 @@ export interface MaxComputeQueryOptions {
 
 export interface MaxComputeQueryClient {
   query(sql: string, fields: readonly string[], options?: MaxComputeQueryOptions): Promise<MaxComputeRow[]>;
+  stream?(sql: string, fields: readonly string[], options?: MaxComputeQueryOptions): AsyncIterable<MaxComputeRow>;
 }
 
 export interface MaxComputeCredentials {

@@ -789,6 +789,18 @@ export class PersistenceRepository {
       updated_at=@at WHERE id=@tableId`).run({ tableId, ...input });
   }
 
+  updateLineageTablePartitionStats(tableId: string, input: {
+    partitionCount: number; dataLength: number | null; lastModifiedTime: number | null;
+    lastAccessTime: number | null; at: number;
+  }): void {
+    this.ensureLineageTable(tableId, input.at);
+    this.database.prepare(`UPDATE lineage_tables SET partition_count=@partitionCount,
+      data_length=COALESCE(@dataLength, data_length),
+      last_modified_time=COALESCE(@lastModifiedTime, last_modified_time),
+      last_access_time=COALESCE(@lastAccessTime, last_access_time), updated_at=@at
+      WHERE id=@tableId`).run({ tableId, ...input });
+  }
+
   isLineageJobProcessed(instanceId: string): boolean {
     return Boolean(this.getOne("SELECT inst_id FROM lineage_processed_jobs WHERE inst_id=?", instanceId));
   }

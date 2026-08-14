@@ -131,6 +131,7 @@ npm run db:restore -- \
 - 管理员在“系统设置 → 数据同步”填写执行项目、MaxCompute 服务 Endpoint、AccessKey ID/Secret 和调度时间。点击“发现项目并验证连接”会自动保存表单，通过官方 PyODPS SDK 查询 `CATALOGS`，并展示当前 AK 在同一元数据中心可见的项目和 SDK 运行信息。
 - AccessKey Secret 不会回传前端，也不会出现在命令行参数、脚本文件或日志中。系统使用 AES-256-GCM 加密后入库，仅在查询启动时通过子进程标准输入传递给 PyODPS Helper。生产环境仍应使用独立 RAM 用户、最小权限并定期轮换 AccessKey。
 - 表血缘每天从 `SYSTEM_CATALOG.INFORMATION_SCHEMA` 的 `TABLES`、`COLUMNS`、`PARTITIONS`、`TABLE_ACCESS_INFO` 和 `TASKS_HISTORY` 抽取。默认采集该 AK 在同一元数据中心可见的全部项目，也可在页面勾选指定项目；系统以 `project.table` 隔离对象，把任务输入表到输出表固化为关系，并保存 Owner、最近调度、最近访问、分区与存储等元数据。
+- PyODPS 结果通过带背压的逐行流读取，五类元数据按顺序执行并以固定大小批次写入 SQLite；不会把全量字段和任务结果同时保存在 Node.js 堆内存中。
 - `TASKS_HISTORY` 只保留近期数据，首次上线后应尽快完成一次手动同步；重复抽取同一 `inst_id` 不会重复累计关系。
 - 当前按默认 Schema 使用 `project.table` 标识。运行 PyODPS 的账号需要读取租户级 Information Schema，以及目标表对应的 InstanceTunnel 数据读取权限。
 - 字段血缘不入库。每次查询只在所选团队 workspace 内启动一次只读 Claude Code 分析，仅允许 `Read`、`Glob`、`Grep`，并由服务端重新读取真实文件和行号后返回代码片段；缺少可验证代码证据的关系不会展示。
