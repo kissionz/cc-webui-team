@@ -1,13 +1,5 @@
 import { createRequire } from "node:module";
 
-import {
-  ListColumnsRequest,
-  ListLineagesRequest,
-  type Column,
-  type LineageEntity,
-  type ListLineagesResponseBodyPagingInfoLineages,
-} from "@alicloud/dataworks-public20240518";
-
 import type { MaxComputeConfig } from "../domain/index.js";
 import type { MaxComputeCredentials } from "./maxcompute-client.js";
 
@@ -21,9 +13,22 @@ export interface DataWorksColumnRelation {
   createTime: number | null;
 }
 
+interface DataWorksColumn { id?: string; name?: string }
+interface DataWorksLineageEntity { id?: string; name?: string }
+interface DataWorksLineageRelationship {
+  srcEntity?: DataWorksLineageEntity;
+  dstEntity?: DataWorksLineageEntity;
+  task?: { id?: string; type?: string };
+  createTime?: number;
+}
+interface DataWorksLineage {
+  srcEntity?: DataWorksLineageEntity;
+  dstEntity?: DataWorksLineageEntity;
+  relationships?: DataWorksLineageRelationship[];
+}
 interface DataWorksSdk {
-  listColumns(request: ListColumnsRequest): Promise<{ body?: { pagingInfo?: { columns?: Column[] } } }>;
-  listLineages(request: ListLineagesRequest): Promise<{ body?: { pagingInfo?: { lineages?: ListLineagesResponseBodyPagingInfoLineages[]; totalCount?: number } } }>;
+  listColumns(request: object): Promise<{ body?: { pagingInfo?: { columns?: DataWorksColumn[] } } }>;
+  listLineages(request: object): Promise<{ body?: { pagingInfo?: { lineages?: DataWorksLineage[]; totalCount?: number } } }>;
 }
 
 interface DataWorksClientConfig {
@@ -37,8 +42,25 @@ interface DataWorksClientConfig {
   type?: string;
 }
 interface DataWorksClientConstructor { new(config: DataWorksClientConfig): DataWorksSdk }
+interface RequestConstructor { new(map: Record<string, unknown>): object }
+interface DataWorksRuntime {
+  Client: DataWorksClientConstructor;
+  ListColumnsRequest: RequestConstructor;
+  ListLineagesRequest: RequestConstructor;
+}
 const require = createRequire(import.meta.url);
-const DataWorksClient = (require("@alicloud/dataworks-public20240518") as { default: DataWorksClientConstructor }).default;
+let cachedRuntime: DataWorksRuntime | null = null;
+
+function loadDataWorksRuntime(): DataWorksRuntime {
+  if (cachedRuntime) return cachedRuntime;
+  const sdk = require("@alicloud/dataworks-public20240518") as {
+    default: DataWorksClientConstructor;
+    ListColumnsRequest: RequestConstructor;
+    ListLineagesRequest: RequestConstructor;
+  };
+  cachedRuntime = { Client: sdk.default, ListColumnsRequest: sdk.ListColumnsRequest, ListLineagesRequest: sdk.ListLineagesRequest };
+  return cachedRuntime;
+}
 
 export interface DataWorksColumnLineageClientOptions {
   credentials: MaxComputeCredentials;
@@ -50,23 +72,31 @@ export interface DataWorksColumnLineageClientOptions {
 export class DataWorksColumnLineageClient {
   private readonly client: DataWorksSdk;
   private readonly maximumPages: number;
+  private readonly requestModels: Pick<DataWorksRuntime, "ListColumnsRequest" | "ListLineagesRequest"> | null;
 
   constructor(options: DataWorksColumnLineageClientOptions) {
     this.maximumPages = options.maximumPages ?? 3;
-    this.client = options.client ?? new DataWorksClient({
-      accessKeyId: options.credentials.accessKeyId,
-      accessKeySecret: options.credentials.accessKeySecret,
-      regionId: options.region,
-      endpoint: `dataworks.${options.region}.aliyuncs.com`,
-      protocol: "https",
-      connectTimeout: 5_000,
-      readTimeout: 10_000,
-    });
+    if (options.client) {
+      this.client = options.client;
+      this.requestModels = null;
+    } else {
+      const runtime = loadDataWorksRuntime();
+      this.requestModels = runtime;
+      this.client = new runtime.Client({
+        accessKeyId: options.credentials.accessKeyId,
+        accessKeySecret: options.credentials.accessKeySecret,
+        regionId: options.region,
+        endpoint: `dataworks.${options.region}.aliyuncs.com`,
+        protocol: "https",
+        connectTimeout: 5_000,
+        readTimeout: 10_000,
+      });
+    }
   }
 
   async queryColumn(input: { project: string; table: string; column: string }): Promise<DataWorksColumnRelation[]> {
     const tableId = `maxcompute-table:::${input.project}::${input.table}`;
-    const columns = (await this.client.listColumns(new ListColumnsRequest({
+    const columns = (await this.client.listColumns(this.columnsRequest({
       tableId,
       name: input.column,
       pageNumber: 1,
@@ -104,10 +134,10 @@ export class DataWorksColumnLineageClient {
     return [...relations.values()];
   }
 
-  private async listDirection(filter: { srcEntityId?: string; dstEntityId?: string }): Promise<ListLineagesResponseBodyPagingInfoLineages[]> {
-    const output: ListLineagesResponseBodyPagingInfoLineages[] = [];
+  private async listDirection(filter: { srcEntityId?: string; dstEntityId?: string }): Promise<DataWorksLineage[]> {
+    const output: DataWorksLineage[] = [];
     for (let pageNumber = 1; pageNumber <= this.maximumPages; pageNumber += 1) {
-      const response = await this.client.listLineages(new ListLineagesRequest({
+      const response = await this.client.listLineages(this.lineagesRequest({
         ...filter,
         needAttachRelationship: true,
         pageNumber,
@@ -121,6 +151,14 @@ export class DataWorksColumnLineageClient {
       if (!rows.length || output.length >= (paging?.totalCount ?? 0)) break;
     }
     return output;
+  }
+
+  private columnsRequest(values: Record<string, unknown>): object {
+    return this.requestModels ? new this.requestModels.ListColumnsRequest(values) : values;
+  }
+
+  private lineagesRequest(values: Record<string, unknown>): object {
+    return this.requestModels ? new this.requestModels.ListLineagesRequest(values) : values;
   }
 }
 
@@ -138,7 +176,7 @@ export function splitMaxComputeTable(value: string, defaultProject: string): { p
   return null;
 }
 
-function parseMaxComputeColumn(entity: LineageEntity | undefined): { project: string; table: string; column: string } | null {
+function parseMaxComputeColumn(entity: DataWorksLineageEntity | undefined): { project: string; table: string; column: string } | null {
   if (!entity?.id) return null;
   const parts = entity.id.split(":");
   if (parts[0] !== "maxcompute-column" || parts.length < 7) return null;

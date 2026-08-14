@@ -21,6 +21,9 @@ if (nodeMajor < 24) {
 }
 
 const config = loadConfig();
+const startupStartedAt = Date.now();
+const logger = new JsonLogger();
+logger.info("server.starting", { platform: process.platform, nodeVersion: process.version });
 await Promise.all([
   mkdir(config.dataDir, { recursive: true }),
   mkdir(config.workspaceRoot, { recursive: true }),
@@ -56,7 +59,6 @@ if (!repository.getMaxComputeConfig()) {
   });
 }
 
-const logger = new JsonLogger();
 const events = new SseHub();
 let apiServer: ApiServer | undefined;
 const runtime = new ClaudeRuntimeManager({
@@ -116,10 +118,18 @@ await new Promise<void>((resolve, reject) => {
     resolve();
   });
 });
-if (config.backup.enabled) await backups.start();
+logger.info("server.started", {
+  host: config.host,
+  port: config.port,
+  backupEnabled: config.backup.enabled,
+  startupMs: Date.now() - startupStartedAt,
+});
 lineageScheduler.start();
-
-logger.info("server.started", { host: config.host, port: config.port, backupEnabled: config.backup.enabled });
+if (config.backup.enabled) {
+  void backups.start().catch((error) => logger.error("database.backup.scheduler_start_failed", {
+    error: error instanceof Error ? { name: error.name, message: error.message } : String(error),
+  }));
+}
 if (initialization.importedLegacyJson) {
   logger.info("database.legacy_json_migrated", { backupPath: initialization.legacyBackupPath });
 }
