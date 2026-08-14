@@ -4,7 +4,8 @@ import type { ClaudeConfig } from "../../domain/index.js";
 import type { ColumnLineageAnalyzer } from "../../lineage/column-analyzer.js";
 import { previousShanghaiDate, type LineageScheduler } from "../../lineage/scheduler.js";
 import { diagnoseLineageSource } from "../../lineage/sync-service.js";
-import { OdpsCommandClient, OdpsCommandError, withTemporaryOdpsConfig, type MaxComputeCredentials, type OdpsCommandOutput } from "../../lineage/maxcompute-client.js";
+import type { MaxComputeCredentials } from "../../lineage/maxcompute-client.js";
+import { PyOdpsClient, PyOdpsError, type PyOdpsDiagnostic } from "../../lineage/pyodps-client.js";
 import type { SecretBox } from "../../security/secret-box.js";
 import { HttpError, readJsonBody, sendJson } from "../core.js";
 import { assertOnlyKeys, inputBoolean, inputEnum, inputInteger, inputString, inputStringList, objectBody, optionalQuery, queryInteger } from "../validation.js";
@@ -101,23 +102,24 @@ export class LineageRoutes {
     if (!config?.project || !config.endpoint || !config.credentialCiphertext) throw new HttpError(400, "MAXCOMPUTE_CONFIG_INCOMPLETE", "请先保存项目、Endpoint 和 AccessKey。");
     const credential = this.options.secretBox.decrypt<MaxComputeCredentials>(config.credentialCiphertext);
     const startedAt = this.options.now();
-    let output: OdpsCommandOutput = { stdout: "", stderr: "" };
+    let diagnostic: PyOdpsDiagnostic | null = null;
     let projects: MaxComputeProject[] = [];
     try {
-      await withTemporaryOdpsConfig({ ...credential, endpoint: config.endpoint, project: config.project }, async (configPath) => {
-        const client = new OdpsCommandClient({ command: config.command, args: config.args, project: config.project, configPath, timeoutMs: 90_000, onOutput: (value) => { output = value; } });
-        const rows = await client.query("SELECT catalog_name, status, region FROM SYSTEM_CATALOG.INFORMATION_SCHEMA.catalogs ORDER BY catalog_name", ["catalog_name", "status", "region"]);
-        projects = rows.map((row) => ({ name: row.catalog_name ?? "", status: row.status ?? "", region: row.region ?? "" })).filter((item) => item.name);
+      const client = new PyOdpsClient({
+        command: config.command, args: config.args, project: config.project, endpoint: config.endpoint,
+        credentials: credential, timeoutMs: 90_000, onDiagnostic: (value) => { diagnostic = value; },
       });
+      const rows = await client.query("SELECT catalog_name, status, region FROM SYSTEM_CATALOG.INFORMATION_SCHEMA.catalogs ORDER BY catalog_name", ["catalog_name", "status", "region"]);
+      projects = rows.map((row) => ({ name: row.catalog_name ?? "", status: row.status ?? "", region: row.region ?? "" })).filter((item) => item.name);
     } catch (error) {
       this.options.audit(auth.user.id, "lineage.connection_tested", "maxcompute_config", "singleton", { project: config.project, endpoint: config.endpoint, success: false });
-      if (error instanceof OdpsCommandError) {
-        const status = error.kind === "not_found" ? 400 : 502;
+      if (error instanceof PyOdpsError) {
+        const setupError = error.kind === "python_not_found" || error.kind === "pyodps_not_installed";
         throw new HttpError(
-          status,
-          error.kind === "not_found" ? "ODPSCMD_NOT_FOUND" : "MAXCOMPUTE_CONNECTION_FAILED",
+          setupError ? 400 : 502,
+          error.kind === "python_not_found" ? "PYTHON_NOT_FOUND" : error.kind === "pyodps_not_installed" ? "PYODPS_NOT_INSTALLED" : "MAXCOMPUTE_CONNECTION_FAILED",
           error.message,
-          { diagnostic: { stdout: diagnosticPreview(output.stdout, credential), stderr: diagnosticPreview(output.stderr, credential), parsed: [] } },
+          { diagnostic: connectionDiagnostic(error.diagnostic ?? diagnostic, [], credential) },
         );
       }
       throw error;
@@ -130,11 +132,7 @@ export class LineageRoutes {
       latencyMs: this.options.now() - startedAt,
       checkedAt: this.options.now(),
       projects,
-      diagnostic: {
-        stdout: diagnosticPreview(output.stdout, credential),
-        stderr: diagnosticPreview(output.stderr, credential),
-        parsed: projects.slice(0, 20),
-      },
+      diagnostic: connectionDiagnostic(diagnostic, projects.slice(0, 20), credential),
     });
   }
 
@@ -166,14 +164,15 @@ export class LineageRoutes {
     const credential = this.options.secretBox.decrypt<MaxComputeCredentials>(config.credentialCiphertext);
     const dataDate = previousShanghaiDate(this.options.now());
     try {
-      const diagnostic = await withTemporaryOdpsConfig({ ...credential, endpoint: config.endpoint, project: config.project }, async (configPath) => {
-        const client = new OdpsCommandClient({ command: config.command, args: config.args, project: config.project, configPath, timeoutMs: 120_000 });
-        return diagnoseLineageSource(client, config.collectionMode === "all" ? null : config.collectionProjects, dataDate);
+      const client = new PyOdpsClient({
+        command: config.command, args: config.args, project: config.project, endpoint: config.endpoint,
+        credentials: credential, timeoutMs: 120_000,
       });
+      const diagnostic = await diagnoseLineageSource(client, config.collectionMode === "all" ? null : config.collectionProjects, dataDate);
       const storage = this.options.repository.lineageStorageStats(dataDate);
       const displayCapSignature = storage.processedJobs > 0 && storage.processedJobs % 10_000 === 0;
       const warnings = [...diagnostic.warnings];
-      if (displayCapSignature) warnings.push(`系统库恰好有 ${storage.processedJobs} 个已处理标记，符合 MaxCompute 结果被 10000 行上限截断的特征，建议清空后重建。`);
+      if (displayCapSignature) warnings.push(`系统库恰好有 ${storage.processedJobs} 个已处理标记，符合旧版命令行同步被 10000 行上限截断的特征，建议清空后重建。`);
       const recoveryRecommended = diagnostic.lineageReadyJobs > 0 && storage.processedJobs > 0
         && (storage.totalEdges === 0 || warnings.length > 0 || displayCapSignature);
       this.options.audit(auth.user.id, "lineage.source.diagnosed", "lineage_sync", dataDate, {
@@ -185,7 +184,10 @@ export class LineageRoutes {
       });
       sendJson(response, 200, { diagnostic: { ...diagnostic, warnings, storage, recoveryRecommended } });
     } catch (error) {
-      if (error instanceof OdpsCommandError) throw new HttpError(502, "LINEAGE_SOURCE_DIAGNOSTIC_FAILED", error.message);
+      if (error instanceof PyOdpsError) {
+        const status = ["python_not_found", "pyodps_not_installed"].includes(error.kind) ? 400 : 502;
+        throw new HttpError(status, "LINEAGE_SOURCE_DIAGNOSTIC_FAILED", error.message);
+      }
       throw error;
     }
   }
@@ -283,6 +285,17 @@ function configDto(config: MaxComputeConfig, admin: boolean, secretBox: SecretBo
 }
 
 function maskAccessKey(value: string): string { return value.length <= 8 ? `${value.slice(0, 2)}••••` : `${value.slice(0, 4)}••••${value.slice(-4)}`; }
+function connectionDiagnostic(diagnostic: Partial<PyOdpsDiagnostic> | null, parsed: MaxComputeProject[], credential: MaxComputeCredentials): Record<string, unknown> {
+  const summary = diagnostic
+    ? [
+      diagnostic.pythonVersion ? `Python ${diagnostic.pythonVersion}` : "Python 3",
+      diagnostic.sdkVersion ? `PyODPS ${diagnostic.sdkVersion}` : "PyODPS",
+      `${diagnostic.rows ?? parsed.length} 行`,
+      diagnostic.instanceId ? `Instance ${diagnostic.instanceId}` : "",
+    ].filter(Boolean).join(" · ")
+    : "PyODPS 未返回运行信息";
+  return { stdout: summary, stderr: diagnosticPreview(diagnostic?.stderr ?? "", credential), parsed };
+}
 function diagnosticPreview(value: string, credential: MaxComputeCredentials): string {
   return value
     .replaceAll(credential.accessKeySecret, "[REDACTED]")

@@ -2,7 +2,8 @@ import { createId } from "../domain/index.js";
 import type { LineageSyncRun, MaxComputeConfig } from "../domain/index.js";
 import type { PersistenceRepository } from "../persistence/index.js";
 import type { SecretBox } from "../security/secret-box.js";
-import { OdpsCommandClient, withTemporaryOdpsConfig, type MaxComputeCredentials } from "./maxcompute-client.js";
+import type { MaxComputeCredentials } from "./maxcompute-client.js";
+import { PyOdpsClient } from "./pyodps-client.js";
 import { LineageSyncService, type LineageSyncResult } from "./sync-service.js";
 
 export interface LineageSchedulerOptions {
@@ -112,16 +113,20 @@ export class LineageScheduler {
     if (!config.credentialCiphertext || !this.options.secretBox) return Promise.reject(new Error("请先配置 MaxCompute AccessKey 并验证连接。"));
     if (!config.endpoint) return Promise.reject(new Error("请先配置 MaxCompute Endpoint。"));
     const credential = this.options.secretBox.decrypt<MaxComputeCredentials>(config.credentialCiphertext);
-    return withTemporaryOdpsConfig({ ...credential, endpoint: config.endpoint, project: config.project }, async (configPath) => {
-      const client = new OdpsCommandClient({ command: config.command, args: config.args, project: config.project, configPath });
-      return new LineageSyncService({
-        repository: this.options.repository,
-        client,
-        project: config.project,
-        projects: config.collectionMode === "all" ? null : config.collectionProjects,
-        now: this.now,
-      }).sync(dataDate);
+    const client = new PyOdpsClient({
+      command: config.command,
+      args: config.args,
+      project: config.project,
+      endpoint: config.endpoint,
+      credentials: credential,
     });
+    return new LineageSyncService({
+      repository: this.options.repository,
+      client,
+      project: config.project,
+      projects: config.collectionMode === "all" ? null : config.collectionProjects,
+      now: this.now,
+    }).sync(dataDate);
   }
 }
 

@@ -104,6 +104,8 @@ export function loadConfig(rootDir = process.cwd()): AppConfig {
   const port = positiveInteger("PORT", 8068);
   const explicitOrigins = csv("ALLOWED_ORIGINS");
   const localOrigins = [`http://localhost:${port}`, `http://127.0.0.1:${port}`];
+  const maxComputeCommand = process.env.MAXCOMPUTE_PYTHON_COMMAND || process.env.MAXCOMPUTE_COMMAND || "auto";
+  const legacyOdpsCommand = maxComputeCommand.toLowerCase().includes("odpscmd");
   return {
     rootDir,
     publicDir: resolve(process.env.PUBLIC_DIR || join(rootDir, "dist", "public")),
@@ -135,8 +137,8 @@ export function loadConfig(rootDir = process.cwd()): AppConfig {
     credentialKeyFile: resolve(process.env.CREDENTIAL_KEY_FILE || join(dataDir, "credential.key")),
     maxCompute: {
       enabled: process.env.MAXCOMPUTE_ENABLED === "true",
-      command: process.env.MAXCOMPUTE_COMMAND || "odpscmd",
-      args: process.env.MAXCOMPUTE_ARGS || "",
+      command: legacyOdpsCommand ? "auto" : maxComputeCommand,
+      args: legacyOdpsCommand ? "" : process.env.MAXCOMPUTE_PYTHON_ARGS || process.env.MAXCOMPUTE_ARGS || "",
       project: process.env.MAXCOMPUTE_PROJECT || "",
       scheduleTime: scheduleTime("MAXCOMPUTE_SCHEDULE_TIME", "06:15"),
     },

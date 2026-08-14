@@ -457,6 +457,15 @@ const migrations: Migration[] = [
       ALTER TABLE lineage_sync_runs ADD COLUMN projects_processed INTEGER NOT NULL DEFAULT 0;
     `,
   },
+  {
+    version: 8,
+    name: "maxcompute_pyodps_runtime",
+    sql: `
+      UPDATE maxcompute_config
+      SET command='auto', args=''
+      WHERE lower(command) LIKE '%odpscmd%';
+    `,
+  },
 ];
 
 export function migrateSchema(database: Database.Database): void {

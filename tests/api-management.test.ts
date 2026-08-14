@@ -52,7 +52,7 @@ describe("management API", () => {
       allowedOrigins: ["http://localhost:8068"], concurrency: { global: 2, perTeam: 1, perUser: 1 },
       modelContextTokens: 1_000_000, autoCompactRatio: 0.62, autoCompactEnabled: true, mcpToolAllowlist: [],
       credentialEncryptionKey: "", credentialKeyFile: join(root, "credential.key"),
-      maxCompute: { enabled: false, command: "odpscmd", args: "", project: "", scheduleTime: "06:15" },
+      maxCompute: { enabled: false, command: "auto", args: "", project: "", scheduleTime: "06:15" },
       backup: { enabled: false, directory: join(root, "backups"), intervalMs: 60_000, retention: 2 },
     };
     events = new SseHub();
@@ -247,11 +247,11 @@ describe("management API", () => {
     expect(JSON.parse(scoped.body).config).toMatchObject({ collectionMode: "selected", collectionProjects: ["analytics", "finance"] });
     expect(repository.getMaxComputeConfig()).toMatchObject({ collectionMode: "selected", collectionProjects: ["analytics", "finance"] });
 
-    const missingClient = await call(api, "PATCH", "/api/lineage/config", "admin-token", { command: "definitely-missing-odpscmd-test" });
+    const missingClient = await call(api, "PATCH", "/api/lineage/config", "admin-token", { command: "definitely-missing-python-test" });
     expect(missingClient.status).toBe(200);
     const tested = await call(api, "POST", "/api/lineage/connection-test", "admin-token", {});
     expect(tested.status).toBe(400);
-    expect(JSON.parse(tested.body)).toMatchObject({ code: "ODPSCMD_NOT_FOUND" });
+    expect(JSON.parse(tested.body)).toMatchObject({ code: "PYTHON_NOT_FOUND" });
   });
 });
 
@@ -311,7 +311,7 @@ function seed(repository: PersistenceRepository, workspace: string): void {
   const config: ClaudeConfig = { command: "secret-command-path", args: "--safe", workspaceRoot: workspace, modelContextTokens: 1_000_000, autoCompactRatio: 0.62, autoCompactEnabled: true, mcpToolAllowlist: [], enabled: true, available: true, version: "1", latencyMs: 1, authenticated: true, lastCheckAt: now, healthMessage: null, updatedAt: now };
   repository.saveClaudeConfig(config);
   const maxCompute: MaxComputeConfig = {
-    enabled: false, command: "odpscmd", args: "", project: "", endpoint: "", credentialCiphertext: null,
+    enabled: false, command: "auto", args: "", project: "", endpoint: "", credentialCiphertext: null,
     collectionMode: "all", collectionProjects: [], discoveredProjects: [],
     credentialUpdatedAt: null, scheduleTime: "06:15", timezone: "Asia/Shanghai", lastStartedAt: null,
     lastCompletedAt: null, lastStatus: "idle", lastError: null, lastDataDate: null, nextRunAt: null, updatedAt: now,

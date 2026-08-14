@@ -12,6 +12,7 @@ await mkdir("dist/public", { recursive: true });
 await Promise.all([
   cp("index.html", "dist/public/index.html"),
   cp("styles.css", "dist/public/styles.css"),
+  cp("src/lineage/pyodps-helper.py", "dist/lineage/pyodps-helper.py"),
 ]);
 
 await build({

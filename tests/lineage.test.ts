@@ -6,7 +6,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ClaudeConfig, MaxComputeConfig } from "../src/domain/index.js";
 import { ColumnLineageAnalyzer } from "../src/lineage/column-analyzer.js";
-import { buildOdpsScript, decodeOdpsOutput, extractOdpsFailure, parseOdpsRows, parseOdpsRowsFromChannels, resolveOdpsInvocation, type MaxComputeQueryClient, type MaxComputeRow } from "../src/lineage/maxcompute-client.js";
+import type { MaxComputeQueryClient, MaxComputeRow } from "../src/lineage/maxcompute-client.js";
+import { PyOdpsClient, pythonInvocations } from "../src/lineage/pyodps-client.js";
 import { LineageScheduler, nextShanghaiRun, previousShanghaiDate } from "../src/lineage/scheduler.js";
 import { diagnoseLineageSource, LineageSyncService, parseTableList } from "../src/lineage/sync-service.js";
 import { PersistenceRepository } from "../src/persistence/index.js";
@@ -28,8 +29,8 @@ async function repository(): Promise<PersistenceRepository> {
 function config(overrides: Partial<MaxComputeConfig> = {}): MaxComputeConfig {
   return {
     enabled: true,
-    command: "odpscmd",
-    args: "--config=/run/secrets/odps.ini",
+    command: "auto",
+    args: "",
     project: "analytics",
     collectionMode: "all",
     collectionProjects: [],
@@ -78,101 +79,39 @@ class FixtureClient implements MaxComputeQueryClient {
   }
 }
 
+describe("PyODPS bridge", () => {
+  it("selects sensible Python 3 launchers and treats legacy odpscmd settings as auto", () => {
+    expect(pythonInvocations("auto", "", "win32")).toEqual([
+      { command: "py", args: ["-3"] }, { command: "python", args: [] }, { command: "python3", args: [] },
+    ]);
+    expect(pythonInvocations('"C:\\Program Files\\Python311\\python.exe"', "-X utf8", "win32")).toEqual([
+      { command: "C:\\Program Files\\Python311\\python.exe", args: ["-X", "utf8"] },
+    ]);
+    expect(pythonInvocations("odpscmd", "", "linux")[0]).toEqual({ command: "python3", args: [] });
+  });
+
+  it("reads structured NDJSON rows without exposing credentials in process arguments", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cc-pyodps-fixture-"));
+    roots.push(root);
+    const fixture = join(root, "helper-fixture.mjs");
+    await writeFile(fixture, `let body="";process.stdin.setEncoding("utf8");process.stdin.on("data",c=>body+=c);process.stdin.on("end",()=>{const req=JSON.parse(body);if(process.argv.join(" ").includes(req.accessKeySecret))process.exit(9);if(req.sql==="FAIL"){console.error(JSON.stringify({type:"error",code:"MAXCOMPUTE_QUERY_FAILED",message:"failed",detail:req.accessKeySecret}));process.exitCode=1;return;}console.log(JSON.stringify({type:"meta",pythonVersion:"3.11.9",sdkVersion:"0.13.0",instanceId:"i-test"}));console.log(JSON.stringify({type:"row",value:{catalog_name:"analytics",status:"NORMAL"}}));console.log(JSON.stringify({type:"done",rows:1}));});`);
+    let diagnostic: unknown;
+    const client = new PyOdpsClient({
+      command: process.execPath, args: `"${fixture}"`, project: "analytics",
+      endpoint: "https://service.cn-shanghai.maxcompute.aliyun.com/api",
+      credentials: { accessKeyId: "test-id", accessKeySecret: "super-secret" },
+      onDiagnostic: (value) => { diagnostic = value; },
+    });
+    await expect(client.query("SELECT 1", ["catalog_name", "status"])).resolves.toEqual([{ catalog_name: "analytics", status: "NORMAL" }]);
+    expect(diagnostic).toMatchObject({ pythonVersion: "3.11.9", sdkVersion: "0.13.0", instanceId: "i-test", rows: 1 });
+    const failure = await client.query("FAIL", ["catalog_name", "status"]).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(String(failure)).toContain("[REDACTED]");
+    expect(String(failure)).not.toContain("super-secret");
+  });
+});
+
 describe("MaxCompute table lineage sync", () => {
-  it("launches Windows batch clients through cmd.exe without requiring a manual wrapper", () => {
-    expect(resolveOdpsInvocation("C:\\MaxCompute Client\\bin\\odpscmd.bat", ["--project=analytics", "-f", "C:\\Temp\\query.sql"], "win32", "C:\\Windows\\System32\\cmd.exe")).toEqual({
-      command: "C:\\Windows\\System32\\cmd.exe",
-      args: ["/d", "/c", '"C:\\MaxCompute Client\\bin\\odpscmd.bat"', "--project=analytics", "-f", "C:\\Temp\\query.sql"],
-    });
-    expect(resolveOdpsInvocation("odpscmd", [], "win32")).toMatchObject({ command: "cmd.exe", args: ["/d", "/c", "odpscmd"] });
-    expect(resolveOdpsInvocation("C:\\MaxCompute\\odpscmd.exe", ["--help"], "win32")).toEqual({ command: "C:\\MaxCompute\\odpscmd.exe", args: ["--help"] });
-    expect(resolveOdpsInvocation("C:\\Windows\\System32\\cmd.exe", ["/d", "/s", "/c", "C:\\MaxCompute\\odpscmd.bat", "--project=analytics"], "win32")).toEqual({
-      command: "C:\\Windows\\System32\\cmd.exe",
-      args: ["/d", "/c", "C:\\MaxCompute\\odpscmd.bat", "--project=analytics"],
-    });
-  });
-
-  it("decodes UTF-8 and common Chinese Windows odpscmd output", () => {
-    expect(decodeOdpsOutput(Buffer.from("连接成功", "utf8"))).toBe("连接成功");
-    expect(decodeOdpsOutput(Buffer.from([0xb4, 0xed, 0xce, 0xf3]))).toBe("错误");
-  });
-
-  it("enables tenant namespace and treats SQL failures as errors even when odpscmd exits zero", () => {
-    expect(buildOdpsScript("SELECT * FROM SYSTEM_CATALOG.INFORMATION_SCHEMA.catalogs")).toContain("set odps.namespace.schema=true;");
-    expect(extractOdpsFailure("OK\r\nFAILED: ODPS-0130161: Parse exception", "")).toBe("FAILED: ODPS-0130161: Parse exception");
-    expect(extractOdpsFailure("OK\r\ntable_catalog\r\n", "")).toBe("");
-  });
-
-  it("parses odpscmd tab, case-insensitive pipe, headerless, and empty outputs", () => {
-    expect(parseOdpsRows("TABLE_CATALOG\tTABLE_NAME\r\nanalytics\tdws_sales\r\nOK\r\n", ["table_catalog", "table_name"])).toEqual([
-      { table_catalog: "analytics", table_name: "dws_sales" },
-    ]);
-    expect(parseOdpsRows("+---------------+-----------+\r\n| table_catalog | table_name |\r\n+---------------+-----------+\r\n| analytics     | dws_sales  |\r\n+---------------+-----------+\r\n", ["table_catalog", "table_name"])).toEqual([
-      { table_catalog: "analytics", table_name: "dws_sales" },
-    ]);
-    expect(parseOdpsRows("analytics\tdws_sales\r\nOK\r\n", ["table_catalog", "table_name"])).toEqual([
-      { table_catalog: "analytics", table_name: "dws_sales" },
-    ]);
-    expect(parseOdpsRows("OK\r\n", ["table_catalog", "table_name"])).toEqual([]);
-    expect(parseOdpsRows("catalog_name      status    region\r\nbtn_bft           NORMAL    cn-shanghai\r\n", ["catalog_name", "status", "region"])).toEqual([
-      { catalog_name: "btn_bft", status: "NORMAL", region: "cn-shanghai" },
-    ]);
-  });
-
-  it("prefers the fixed-width result table over tab-separated odps job progress", () => {
-    const separator = "+--------------------+--------+------------+";
-    const row = (first: string, second: string, third: string) => ` ${first.padEnd(20)} ${second.padEnd(8)} ${third.padEnd(12)} `;
-    const output = [
-      "2026-08-13 18:15:33\tM1_job_0:0/3/3[TERMINATED]\tR2_1_job_0:0/0/1[RUNNING]",
-      separator,
-      row("catalog_name", "status", "region"),
-      separator,
-      row("btn_bft", "NORMAL", "cn-shanghai"),
-      row("btn_bi", "NORMAL", "cn-shanghai"),
-      separator,
-    ].join("\r\n");
-    expect(parseOdpsRows(output, ["catalog_name", "status", "region"])).toEqual([
-      { catalog_name: "btn_bft", status: "NORMAL", region: "cn-shanghai" },
-      { catalog_name: "btn_bi", status: "NORMAL", region: "cn-shanghai" },
-    ]);
-  });
-
-  it("preserves long project names when tab-delimited rows are enclosed by result separators", () => {
-    const output = [
-      "+--------------------+--------+------------+",
-      "catalog_name\tstatus\tregion",
-      "+--------------------+--------+------------+",
-      "btn_bi_normal\tNORMAL\tcn-shanghai",
-      "btn_datalake_cdm\tNORMAL\tcn-shanghai",
-      "btn_datalake_finance_dev\tNORMAL\tcn-shanghai",
-      "+--------------------+--------+------------+",
-    ].join("\r\n");
-    expect(parseOdpsRows(output, ["catalog_name", "status", "region"])).toEqual([
-      { catalog_name: "btn_bi_normal", status: "NORMAL", region: "cn-shanghai" },
-      { catalog_name: "btn_datalake_cdm", status: "NORMAL", region: "cn-shanghai" },
-      { catalog_name: "btn_datalake_finance_dev", status: "NORMAL", region: "cn-shanghai" },
-    ]);
-  });
-
-  it("preserves trailing empty tab fields inside a fixed-width result block", () => {
-    const output = [
-      "+----------------+----------------+----------+----------------+",
-      "task_catalog\ttask_name\ttask_type\text_bizdate",
-      "+----------------+----------------+----------+----------------+",
-      "btn_datastrategy\tjdbc_session_query_1\tSQLRT\t",
-      "+----------------+----------------+----------+----------------+",
-    ].join("\r\n");
-    expect(parseOdpsRows(output, ["task_catalog", "task_name", "task_type", "ext_bizdate"])).toEqual([{
-      task_catalog: "btn_datastrategy", task_name: "jdbc_session_query_1", task_type: "SQLRT", ext_bizdate: "",
-    }]);
-  });
-
-  it("includes a compact output summary when odpscmd returns an unknown format", () => {
-    expect(() => parseOdpsRows("unexpected console output", ["table_catalog"])).toThrow("输出摘要：unexpected console output");
-    expect(parseOdpsRowsFromChannels("", "TABLE_CATALOG\tTABLE_NAME\r\nanalytics\tdws_sales\r\n", ["table_catalog", "table_name"])).toEqual([
-      { table_catalog: "analytics", table_name: "dws_sales" },
-    ]);
-  });
 
   it("persists rich metadata and derives idempotent input-to-output edges", async () => {
     const repo = await repository();
@@ -235,7 +174,7 @@ describe("MaxCompute table lineage sync", () => {
     repo.close();
   });
 
-  it("pages metadata below the MaxCompute display cap without widening the selected project scope", async () => {
+  it("accepts complete SDK result sets without adding command-line pagination", async () => {
     const repo = await repository();
     const sql: string[] = [];
     const tableRow = (project: string, name: string): MaxComputeRow => ({
@@ -245,11 +184,9 @@ describe("MaxCompute table lineage sync", () => {
       async query(statement) {
         sql.push(statement);
         if (statement.includes("INFORMATION_SCHEMA.tables")) {
-          if (!statement.includes("COALESCE(sync_page.table_catalog")) return [tableRow("p1", "a"), tableRow("p2", "b")];
-          return [tableRow("p3", "c")];
+          return [tableRow("p1", "a"), tableRow("p2", "b"), tableRow("p3", "c")];
         }
         if (statement.includes("INFORMATION_SCHEMA.columns")) {
-          if (statement.includes("COALESCE(sync_page.table_catalog")) return [];
           const duplicate = { table_catalog: "p1", table_name: "a", column_name: "id", ordinal_position: "1", data_type: "STRING" };
           return [duplicate, { ...duplicate }];
         }
@@ -257,13 +194,12 @@ describe("MaxCompute table lineage sync", () => {
       },
     };
     await expect(new LineageSyncService({
-      repository: repo, client, project: "p1", projects: ["p1", "p2", "p3"], pageSize: 2, now: () => now,
-    }).sync("20260812")).resolves.toMatchObject({ projectsProcessed: 3, tablesProcessed: 3, columnsProcessed: 1 });
+      repository: repo, client, project: "p1", projects: ["p1", "p2", "p3"], now: () => now,
+    }).sync("20260812")).resolves.toMatchObject({ projectsProcessed: 3, tablesProcessed: 3, columnsProcessed: 2 });
     const tableQueries = sql.filter((statement) => statement.includes("INFORMATION_SCHEMA.tables"));
-    expect(tableQueries).toHaveLength(2);
+    expect(tableQueries).toHaveLength(1);
     expect(tableQueries.every((statement) => statement.includes("table_catalog IN ('p1', 'p2', 'p3')"))).toBe(true);
-    expect(tableQueries[0]).not.toContain("OFFSET");
-    expect(tableQueries[1]).toContain("COALESCE(sync_page.table_catalog, '')>'p2'");
+    expect(tableQueries[0]).not.toContain("sync_page");
     expect(repo.listLineageColumns("p1.a")).toHaveLength(1);
     expect(sql.find((statement) => statement.includes("INFORMATION_SCHEMA.tasks_history"))).toContain("COALESCE(output_tables");
     repo.close();
