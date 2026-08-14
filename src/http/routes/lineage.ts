@@ -2,7 +2,8 @@ import { canSeeTeam, isSystemAdmin, type JsonObject, type LineageEdge, type Line
 import type { PersistenceRepository } from "../../persistence/index.js";
 import type { ClaudeConfig } from "../../domain/index.js";
 import type { ColumnLineageAnalyzer } from "../../lineage/column-analyzer.js";
-import type { LineageScheduler } from "../../lineage/scheduler.js";
+import { previousShanghaiDate, type LineageScheduler } from "../../lineage/scheduler.js";
+import { diagnoseLineageSource } from "../../lineage/sync-service.js";
 import { OdpsCommandClient, OdpsCommandError, withTemporaryOdpsConfig, type MaxComputeCredentials, type OdpsCommandOutput } from "../../lineage/maxcompute-client.js";
 import type { SecretBox } from "../../security/secret-box.js";
 import { HttpError, readJsonBody, sendJson } from "../core.js";
@@ -29,6 +30,8 @@ export class LineageRoutes {
       { method: "GET", path: "/api/lineage/status", handle: (input) => this.status(input) },
       { method: "PATCH", path: "/api/lineage/config", handle: (input) => this.updateConfig(input) },
       { method: "POST", path: "/api/lineage/sync", handle: (input) => this.manualSync(input) },
+      { method: "POST", path: "/api/lineage/reprocess", handle: (input) => this.reprocess(input) },
+      { method: "POST", path: "/api/lineage/source-diagnostic", handle: (input) => this.sourceDiagnostic(input) },
       { method: "POST", path: "/api/lineage/connection-test", handle: (input) => this.testConnection(input) },
       { method: "GET", path: "/api/lineage/tables", handle: (input) => this.searchTables(input) },
       { method: "GET", path: /^\/api\/lineage\/tables\/([^/]+)$/, handle: (input) => this.tableDetail(input) },
@@ -141,6 +144,45 @@ export class LineageRoutes {
     void this.options.scheduler.run("manual", auth.user.id).catch(() => undefined);
     this.options.audit(auth.user.id, "lineage.sync.triggered", "lineage_sync", "manual", {});
     sendJson(response, 202, { accepted: true });
+  }
+
+  private reprocess({ response, auth }: RouteRequest): void {
+    if (!isSystemAdmin(auth.user)) throw forbidden();
+    if (this.options.scheduler.isRunning()) throw new HttpError(409, "LINEAGE_SYNC_RUNNING", "血缘同步正在执行中。");
+    const dataDate = previousShanghaiDate(this.options.now());
+    const storage = this.options.repository.lineageStorageStats(dataDate);
+    if (storage.totalEdges > 0) throw new HttpError(409, "LINEAGE_REPROCESS_UNSAFE", "系统库已存在血缘关系，请先使用来源诊断确认问题，避免重复累计关系次数。");
+    const resetJobs = this.options.repository.resetLineageProcessedJobs(dataDate);
+    void this.options.scheduler.run("manual", auth.user.id).catch(() => undefined);
+    this.options.audit(auth.user.id, "lineage.sync.reprocessed", "lineage_sync", dataDate, { resetJobs });
+    sendJson(response, 202, { accepted: true, dataDate, resetJobs });
+  }
+
+  private async sourceDiagnostic({ response, auth }: RouteRequest): Promise<void> {
+    if (!isSystemAdmin(auth.user)) throw forbidden();
+    const config = this.options.repository.getMaxComputeConfig();
+    if (!config?.project || !config.endpoint || !config.credentialCiphertext) throw new HttpError(400, "MAXCOMPUTE_CONFIG_INCOMPLETE", "请先保存项目、Endpoint 和 AccessKey。");
+    const credential = this.options.secretBox.decrypt<MaxComputeCredentials>(config.credentialCiphertext);
+    const dataDate = previousShanghaiDate(this.options.now());
+    try {
+      const diagnostic = await withTemporaryOdpsConfig({ ...credential, endpoint: config.endpoint, project: config.project }, async (configPath) => {
+        const client = new OdpsCommandClient({ command: config.command, args: config.args, project: config.project, configPath, timeoutMs: 120_000 });
+        return diagnoseLineageSource(client, config.collectionMode === "all" ? null : config.collectionProjects, dataDate);
+      });
+      const storage = this.options.repository.lineageStorageStats(dataDate);
+      const recoveryRecommended = diagnostic.lineageReadyJobs > 0 && storage.totalEdges === 0 && storage.processedJobs > 0;
+      this.options.audit(auth.user.id, "lineage.source.diagnosed", "lineage_sync", dataDate, {
+        totalJobs: diagnostic.totalJobs,
+        lineageReadyJobs: diagnostic.lineageReadyJobs,
+        processedJobs: storage.processedJobs,
+        totalEdges: storage.totalEdges,
+        recoveryRecommended,
+      });
+      sendJson(response, 200, { diagnostic: { ...diagnostic, storage, recoveryRecommended } });
+    } catch (error) {
+      if (error instanceof OdpsCommandError) throw new HttpError(502, "LINEAGE_SOURCE_DIAGNOSTIC_FAILED", error.message);
+      throw error;
+    }
   }
 
   private searchTables({ response, url, auth }: RouteRequest): void {

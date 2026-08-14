@@ -13,6 +13,37 @@ export interface LineageSyncResult {
   edgesProcessed: number;
 }
 
+export interface LineageSourceDiagnosticGroup {
+  project: string;
+  taskType: string;
+  status: string;
+  jobs: number;
+  withInputs: number;
+  withOutputs: number;
+  lineageReady: number;
+}
+
+export interface LineageSourceDiagnosticSample {
+  project: string;
+  taskName: string;
+  taskType: string;
+  instanceId: string;
+  status: string;
+  inputTables: string;
+  outputTables: string;
+  parsedInputs: string[];
+  parsedOutputs: string[];
+}
+
+export interface LineageSourceDiagnostic {
+  dataDate: string;
+  totalJobs: number;
+  lineageReadyJobs: number;
+  groups: LineageSourceDiagnosticGroup[];
+  samples: LineageSourceDiagnosticSample[];
+  warnings: string[];
+}
+
 export interface LineageSyncServiceOptions {
   repository: PersistenceRepository;
   client: MaxComputeQueryClient;
@@ -80,6 +111,8 @@ export class LineageSyncService {
       const taskProject = row.task_catalog || this.options.project;
       const inputs = parseTableList(row.input_tables, taskProject);
       const outputs = parseTableList(row.output_tables, taskProject);
+      const invalidInputs = tableListHasContent(row.input_tables) && inputs.length === 0;
+      const invalidOutputs = tableListHasContent(row.output_tables) && outputs.length === 0;
       const endedAt = maxComputeTime(row.end_time) ?? at;
       this.options.repository.transaction(() => {
         for (const output of outputs) {
@@ -118,7 +151,7 @@ export class LineageSyncService {
             }
           }
         }
-        this.options.repository.markLineageJobProcessed(instanceId, dataDate, at);
+        if (!invalidInputs && !invalidOutputs) this.options.repository.markLineageJobProcessed(instanceId, dataDate, at);
       });
       jobsProcessed += 1;
     }
@@ -172,6 +205,60 @@ function tasksSql(projects: readonly string[] | null, dataDate: string): string 
     ${cleanText("input_tables")}, ${cleanText("output_tables")}, ext_node_id, ${cleanText("ext_node_name")},
     ext_node_onduty, ext_bizdate FROM SYSTEM_CATALOG.INFORMATION_SCHEMA.tasks_history
     ${where(catalogFilter("task_catalog", projects), `ds=${quote(dataDate)}`, "task_type IN ('SQL','SQLRT')")}`;
+}
+
+export async function diagnoseLineageSource(
+  client: MaxComputeQueryClient,
+  projects: readonly string[] | null,
+  dataDate: string,
+): Promise<LineageSourceDiagnostic> {
+  if (!/^\d{8}$/.test(dataDate)) throw new Error("诊断日期必须使用 yyyyMMdd 格式。");
+  const filter = where(catalogFilter("task_catalog", projects), `ds=${quote(dataDate)}`, "task_type IN ('SQL','SQLRT')");
+  const groups = await client.query(`SELECT task_catalog, task_type, status,
+    CAST(COUNT(1) AS STRING) AS job_count,
+    CAST(SUM(CASE WHEN TRIM(COALESCE(input_tables, '')) NOT IN ('', '[]') THEN 1 ELSE 0 END) AS STRING) AS with_inputs,
+    CAST(SUM(CASE WHEN TRIM(COALESCE(output_tables, '')) NOT IN ('', '[]') THEN 1 ELSE 0 END) AS STRING) AS with_outputs,
+    CAST(SUM(CASE WHEN status='Terminated' AND TRIM(COALESCE(input_tables, '')) NOT IN ('', '[]')
+      AND TRIM(COALESCE(output_tables, '')) NOT IN ('', '[]') THEN 1 ELSE 0 END) AS STRING) AS lineage_ready
+    FROM SYSTEM_CATALOG.INFORMATION_SCHEMA.tasks_history${filter}
+    GROUP BY task_catalog, task_type, status ORDER BY task_catalog, task_type, status`,
+  ["task_catalog", "task_type", "status", "job_count", "with_inputs", "with_outputs", "lineage_ready"]);
+  const samples = await client.query(`SELECT task_catalog, ${cleanText("task_name")}, task_type, inst_id, status,
+    ${cleanText("input_tables")}, ${cleanText("output_tables")}
+    FROM SYSTEM_CATALOG.INFORMATION_SCHEMA.tasks_history${filter}
+    ORDER BY end_time DESC LIMIT 20`,
+  ["task_catalog", "task_name", "task_type", "inst_id", "status", "input_tables", "output_tables"]);
+  const mappedGroups = groups.map((row) => ({
+    project: field(row, "task_catalog"),
+    taskType: field(row, "task_type"),
+    status: field(row, "status"),
+    jobs: integer(row.job_count),
+    withInputs: integer(row.with_inputs),
+    withOutputs: integer(row.with_outputs),
+    lineageReady: integer(row.lineage_ready),
+  }));
+  const mappedSamples = samples.map((row) => {
+    const project = field(row, "task_catalog");
+    return {
+      project,
+      taskName: field(row, "task_name"),
+      taskType: field(row, "task_type"),
+      instanceId: field(row, "inst_id"),
+      status: field(row, "status"),
+      inputTables: field(row, "input_tables"),
+      outputTables: field(row, "output_tables"),
+      parsedInputs: parseTableList(row.input_tables, project),
+      parsedOutputs: parseTableList(row.output_tables, project),
+    };
+  });
+  const totalJobs = mappedGroups.reduce((sum, group) => sum + group.jobs, 0);
+  const lineageReadyJobs = mappedGroups.reduce((sum, group) => sum + group.lineageReady, 0);
+  const warnings: string[] = [];
+  if (!totalJobs) warnings.push(`${dataDate} 没有返回 SQL/SQLRT 作业，请核对采集项目、AK 权限和数据日期。`);
+  else if (!lineageReadyJobs) warnings.push("作业已返回，但没有同时包含输入表和输出表的成功任务，暂时无法生成表血缘。");
+  if (mappedSamples.some((sample) => tableListHasContent(sample.inputTables) && !sample.parsedInputs.length)) warnings.push("部分 input_tables 非空但无法解析，请提供诊断 JSON 中的样例格式。");
+  if (mappedSamples.some((sample) => tableListHasContent(sample.outputTables) && !sample.parsedOutputs.length)) warnings.push("部分 output_tables 非空但无法解析，请提供诊断 JSON 中的样例格式。");
+  return { dataDate, totalJobs, lineageReadyJobs, groups: mappedGroups, samples: mappedSamples, warnings };
 }
 
 function catalogFilter(field: string, projects: readonly string[] | null): string {
@@ -235,14 +322,20 @@ function columnFromRow(tableIdValue: string, row: MaxComputeRow, at: number): Li
 export function parseTableList(value: string | undefined, defaultProject: string): string[] {
   const normalized = (value ?? "").trim().replace(/^\[/, "").replace(/\]$/, "");
   if (!normalized) return [];
-  const ids = normalized.split(/[,，]/).map((item) => item.trim().replaceAll("`", "").replace(/\([^)]*\)$/, "")).flatMap((item) => {
+  const ids = normalized.split(/[,，]/).map((item) => item.trim().replaceAll("`", "").replace(/^['"]|['"]$/g, "").replace(/\([^)]*\)$/, "")).flatMap((item) => {
     const parts = item.split(".").filter(Boolean);
-    if (parts.length === 1) return [tableId(defaultProject, parts[0]!)];
-    if (parts.length === 2) return [tableId(parts[0]!, parts[1]!)];
-    if (parts.length === 3 && parts[1]?.toLowerCase() === "default") return [tableId(parts[0]!, parts[2]!)];
+    if (parts.length === 1 && validTableIdentifier(parts[0]!)) return [tableId(defaultProject, parts[0]!)];
+    if (parts.length === 2 && parts.every(validTableIdentifier)) return [tableId(parts[0]!, parts[1]!)];
+    if (parts.length === 3 && parts[1]?.toLowerCase() === "default" && validTableIdentifier(parts[0]!) && validTableIdentifier(parts[2]!)) return [tableId(parts[0]!, parts[2]!)];
     return [];
   });
   return [...new Set(ids)];
+}
+
+function validTableIdentifier(value: string): boolean { return /^[A-Za-z0-9_$-]+$/.test(value); }
+
+function tableListHasContent(value: string | undefined): boolean {
+  return Boolean((value ?? "").replace(/[\[\]\s]/g, ""));
 }
 
 function tableId(project: string, name: string): string { return `${project.trim()}.${name.trim()}`; }

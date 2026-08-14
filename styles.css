@@ -181,6 +181,22 @@
 .diagnostic-summary small { color: #526f91; }
 .sync-diagnostic pre { max-height: 220px; margin: 0; padding: 12px; overflow: auto; border: 1px solid #d6e4f7; border-radius: 6px; background: #fff; color: #203a5b; font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
 .sync-diagnostic details summary { color: #335780; cursor: pointer; }
+.source-diagnostic { border: 1px solid #b9d2f5; border-radius: 8px; background: #f8fbff; }
+.source-diagnostic > summary { padding: 11px 13px; color: #174d8e; font-weight: 720; cursor: pointer; }
+.source-diagnostic-body { display: grid; gap: 12px; padding: 0 13px 13px; }
+.source-diagnostic-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.source-diagnostic-metrics span { display: grid; gap: 2px; padding: 10px; border: 1px solid #d6e4f7; border-radius: 7px; background: #fff; color: #526f91; font-size: 11px; }
+.source-diagnostic-metrics strong { color: #174d8e; font-size: 18px; }
+.source-diagnostic-warnings { margin: 0; padding: 10px 10px 10px 28px; border-radius: 7px; background: #fffbe6; color: #874d00; font-size: 12px; }
+.source-diagnostic-ok { margin: 0; padding: 10px; border-radius: 7px; background: #f6ffed; color: #237804; font-size: 12px; }
+.source-diagnostic-recovery { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px; border: 1px solid #ffe58f; border-radius: 7px; background: #fff; }
+.source-diagnostic-recovery p { margin: 0; color: #614700; font-size: 12px; line-height: 1.55; }
+.source-diagnostic-table-wrap { overflow: auto; border: 1px solid #d6e4f7; border-radius: 7px; background: #fff; }
+.source-diagnostic table { width: 100%; border-collapse: collapse; font-size: 11px; white-space: nowrap; }
+.source-diagnostic th, .source-diagnostic td { padding: 8px 9px; border-bottom: 1px solid #edf2f8; text-align: left; }
+.source-diagnostic th { background: #f4f8fd; color: #526f91; font-weight: 700; }
+.source-diagnostic-body > details summary { color: #335780; cursor: pointer; font-size: 12px; }
+.source-diagnostic pre { max-height: 280px; margin: 8px 0 0; padding: 12px; overflow: auto; border-radius: 7px; background: #111827; color: #d6e4ff; font: 11px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
 .form-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .sync-history { display: grid; gap: 16px; }
 .sync-run-list { display: grid; }
@@ -2602,9 +2618,11 @@ body {
 }
 
 .lineage-workbench {
-  min-height: calc(100dvh - 112px);
+  width: 100%;
+  height: clamp(640px, calc(100dvh - 112px), 820px);
+  min-height: 640px;
   display: grid;
-  grid-template-rows: auto auto minmax(560px, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   border: 1px solid #d9e3f0;
   border-radius: 12px;
   overflow: hidden;
@@ -2753,9 +2771,11 @@ body {
 
 .lineage-stage {
   min-width: 0;
-  min-height: 560px;
+  min-height: 0;
+  height: 100%;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
+  overflow: hidden;
   background:
     linear-gradient(rgba(231, 237, 246, 0.58) 1px, transparent 1px),
     linear-gradient(90deg, rgba(231, 237, 246, 0.58) 1px, transparent 1px),
@@ -2767,7 +2787,7 @@ body {
 
 .lineage-canvas {
   min-width: 0;
-  min-height: 560px;
+  min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
@@ -3095,6 +3115,8 @@ body {
 }
 
 @media (max-width: 980px) {
+  .lineage-workbench { height: auto; max-height: none; grid-template-rows: auto auto; }
+  .lineage-stage { height: auto; overflow: visible; }
   .lineage-stage.has-inspector { grid-template-columns: minmax(0, 1fr); }
   .lineage-inspector { border-top: 1px solid var(--line); border-left: 0; max-height: 680px; }
   .lineage-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -3121,6 +3143,8 @@ body {
   .lineage-canvas-toolbar > span { padding-top: 6px; }
   .lineage-graph { min-height: 450px; }
   .lineage-top-actions .sync-pill { display: none; }
+  .source-diagnostic-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .source-diagnostic-recovery { align-items: stretch; flex-direction: column; }
 }
 
 /* Admin-only bulk work stays compact inside the existing session rail. */

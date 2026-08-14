@@ -7,6 +7,16 @@ import type {
 interface LineageStatus { config: MaxComputeConfigView | null; running: boolean; runs: LineageSyncRun[] }
 interface LineageDetail { table: LineageTable; columns: LineageColumn[]; relations: { upstream: number; downstream: number } }
 interface ConnectionDiagnostic { stdout: string; stderr: string; parsed: Array<{ name: string; status: string; region: string }> }
+interface SourceDiagnostic {
+  dataDate: string;
+  totalJobs: number;
+  lineageReadyJobs: number;
+  groups: Array<{ project: string; taskType: string; status: string; jobs: number; withInputs: number; withOutputs: number; lineageReady: number }>;
+  samples: Array<{ project: string; taskName: string; taskType: string; instanceId: string; status: string; inputTables: string; outputTables: string; parsedInputs: string[]; parsedOutputs: string[] }>;
+  warnings: string[];
+  storage: { processedJobs: number; totalEdges: number };
+  recoveryRecommended: boolean;
+}
 
 export interface LineageFeatureDeps {
   state(): AppState;
@@ -32,6 +42,7 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
   let graphLoading = false;
   let analysisLoading = false;
   let connectionDiagnostic: ConnectionDiagnostic | null = null;
+  let sourceDiagnostic: SourceDiagnostic | null = null;
   let searchTimer: number | undefined;
   let zoom = 1;
 
@@ -97,6 +108,7 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
       ? discovered.map((project) => `<label class="sync-project-option ${config.collectionMode === "all" ? "readonly" : ""}"><input type="checkbox" name="collectionProjects" value="${deps.escape(project.name)}" ${config.collectionMode === "all" || selected.has(project.name) ? "checked" : ""} ${config.collectionMode === "all" ? "disabled" : ""} /><span><strong>${deps.escape(project.name)}</strong><small>${deps.escape([project.region, project.status].filter(Boolean).join(" · ") || "可访问")}</small></span></label>`).join("")
       : '<p class="empty-inline">保存连接后点击“发现项目”，系统会读取当前 AK 可见的项目。</p>';
     const diagnostic = connectionDiagnostic ? `<details class="sync-diagnostic" open><summary>最近一次采集预览</summary><div><div class="diagnostic-summary"><span>${connectionDiagnostic.parsed.length} 个项目已解析</span><small>仅显示连接验证的 CATALOGS 查询，不包含 AccessKey</small></div><pre>${deps.escape(connectionDiagnostic.stdout || connectionDiagnostic.stderr || "命令执行成功，但客户端未返回控制台文本。")}</pre><details><summary>查看解析后的 JSON</summary><pre>${deps.escape(JSON.stringify(connectionDiagnostic.parsed, null, 2))}</pre></details></div></details>` : "";
+    const sourceDiagnosticPanel = sourceDiagnostic ? renderSourceDiagnostic(sourceDiagnostic) : "";
     return `<section class="content data-sync-page">
       <div class="sync-overview">
         <article class="card sync-summary-card"><span>连接状态</span><strong>${credentialState}</strong><small>${discovered.length ? `已发现 ${discovered.length} 个可访问项目` : (config.endpoint ? deps.escape(config.endpoint) : "请配置服务 Endpoint")}</small></article>
@@ -111,11 +123,18 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
           <fieldset class="sync-project-scope"><legend>采集项目</legend><div class="sync-scope-options"><label><input type="radio" name="collectionMode" value="all" ${config.collectionMode === "all" ? "checked" : ""} />同一元数据中心内全部可见项目</label><label><input type="radio" name="collectionMode" value="selected" ${config.collectionMode === "selected" ? "checked" : ""} />仅采集勾选项目</label></div><div class="sync-project-list">${projectChoices}</div><p class="helper">租户级 Information Schema 会按当前 AK 权限返回项目；不同元数据中心需单独配置数据源。</p></fieldset>
           <div class="sync-schedule-row"><label class="toggle-row"><input type="checkbox" name="enabled" ${config.enabled ? "checked" : ""} />启用每日自动同步</label><div class="field"><label for="mc-schedule">每日执行时间（Asia/Shanghai）</label><input class="input" id="mc-schedule" type="time" name="scheduleTime" value="${deps.escape(config.scheduleTime)}" required /></div></div>
           <details class="advanced-settings"><summary>高级执行设置</summary><div class="grid two"><div class="field"><label for="mc-command">odpscmd 命令</label><input class="input" id="mc-command" name="command" value="${deps.escape(config.command || "odpscmd")}" placeholder="Windows 可填写 C:\\MaxCompute\\bin\\odpscmd.bat" required /><small class="helper">Windows 直接填写 odpscmd.bat 的绝对路径，不要再填写 cmd.exe。</small></div><div class="field"><label for="mc-args">额外启动参数</label><input class="input" id="mc-args" name="args" value="${deps.escape(config.args || "")}" placeholder="通常留空" /><small class="helper">系统会自动传入临时配置、Project 和 SQL 文件。</small></div></div></details>
-          ${diagnostic}<div class="form-actions"><button class="button primary" type="submit">保存数据源与调度</button><button class="button" type="button" data-action="lineage-test-connection">发现项目并验证连接</button><button class="button" type="button" data-action="lineage-sync" ${status?.running ? "disabled" : ""}>${status?.running ? "正在同步" : "立即同步"}</button></div>
+          ${diagnostic}${sourceDiagnosticPanel}<div class="form-actions"><button class="button primary" type="submit">保存数据源与调度</button><button class="button" type="button" data-action="lineage-test-connection">发现项目并验证连接</button><button class="button" type="button" data-action="lineage-source-diagnostic">诊断血缘来源</button><button class="button" type="button" data-action="lineage-sync" ${status?.running ? "disabled" : ""}>${status?.running ? "正在同步" : "立即同步"}</button></div>
         </form>
-        <aside class="card card-padding-lg sync-history"><div class="section-title"><h3>最近执行</h3><span class="meta">数据日期 T-1</span></div><div class="sync-run-list">${status?.runs.map((run) => `<div class="sync-run-row"><span class="run-dot ${run.status}"></span><div><strong>${run.trigger === "manual" ? "手动同步" : "自动调度"}</strong><small>${deps.fmt(run.startedAt)} · 数据日 ${deps.escape(run.dataDate)}</small></div><span>${run.status === "success" ? "成功" : run.status === "failed" ? "失败" : "运行中"}</span></div>`).join("") || '<p class="empty-inline">暂无执行记录</p>'}</div>${config.lastError ? `<div class="inline-alert error"><strong>最近同步失败</strong><span>${deps.escape(config.lastError)}</span></div>` : ""}<div class="security-note"><strong>凭据安全</strong><p>生产环境建议设置 <code>CREDENTIAL_ENCRYPTION_KEY</code> 并使用独立 RAM 用户、最小权限和定期轮换。页面与接口不会回传 Secret。</p></div></aside>
+        <aside class="card card-padding-lg sync-history"><div class="section-title"><h3>最近执行</h3><span class="meta">数据日期 T-1</span></div><div class="sync-run-list">${status?.runs.map((run) => `<div class="sync-run-row"><span class="run-dot ${run.status}"></span><div><strong>${run.trigger === "manual" ? "手动同步" : "自动调度"}</strong><small>${deps.fmt(run.startedAt)} · ${run.jobsProcessed} 个任务 · ${run.edgesProcessed} 条关系</small></div><span>${run.status === "success" ? "成功" : run.status === "failed" ? "失败" : "运行中"}</span></div>`).join("") || '<p class="empty-inline">暂无执行记录</p>'}</div>${config.lastError ? `<div class="inline-alert error"><strong>最近同步失败</strong><span>${deps.escape(config.lastError)}</span></div>` : ""}<div class="security-note"><strong>凭据安全</strong><p>生产环境建议设置 <code>CREDENTIAL_ENCRYPTION_KEY</code> 并使用独立 RAM 用户、最小权限和定期轮换。页面与接口不会回传 Secret。</p></div></aside>
       </div>
     </section>`;
+  }
+
+  function renderSourceDiagnostic(value: SourceDiagnostic): string {
+    const groups = value.groups.map((group) => `<tr><td>${deps.escape(group.project)}</td><td>${deps.escape(group.taskType)}</td><td>${deps.escape(group.status)}</td><td>${group.jobs}</td><td>${group.withInputs}</td><td>${group.withOutputs}</td><td>${group.lineageReady}</td></tr>`).join("");
+    const warnings = value.warnings.length ? `<ul class="source-diagnostic-warnings">${value.warnings.map((warning) => `<li>${deps.escape(warning)}</li>`).join("")}</ul>` : '<p class="source-diagnostic-ok">来源任务具备生成血缘的输入与输出信息。</p>';
+    const recovery = value.recoveryRecommended ? '<div class="source-diagnostic-recovery"><p>来源中存在可生成血缘的任务，但系统库仍为 0 条关系。此前错误解析留下的“已处理”标记很可能阻止了补建。</p><button class="button" type="button" data-action="lineage-reprocess">清除 T-1 旧标记并重新同步</button></div>' : "";
+    return `<details class="source-diagnostic" open><summary>血缘来源诊断 · ${deps.escape(value.dataDate)}</summary><div class="source-diagnostic-body"><div class="source-diagnostic-metrics"><span><strong>${value.totalJobs}</strong>来源任务</span><span><strong>${value.lineageReadyJobs}</strong>可建血缘</span><span><strong>${value.storage.processedJobs}</strong>已处理标记</span><span><strong>${value.storage.totalEdges}</strong>系统库关系</span></div>${warnings}${recovery}<div class="source-diagnostic-table-wrap"><table><thead><tr><th>项目</th><th>类型</th><th>状态</th><th>任务</th><th>有输入</th><th>有输出</th><th>可建血缘</th></tr></thead><tbody>${groups || '<tr><td colspan="7">未返回分组数据</td></tr>'}</tbody></table></div><details><summary>查看可提供给开发人员的诊断 JSON</summary><pre>${deps.escape(JSON.stringify(value, null, 2))}</pre></details></div></details>`;
   }
 
   function renderCanvas(): string {
@@ -248,6 +267,23 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
     pollStatus();
   }
 
+  async function diagnoseSource(): Promise<void> {
+    const form = document.querySelector<HTMLFormElement>('[data-form="lineage-config"]');
+    if (form) await saveConfig(form, false);
+    const response = await api<{ diagnostic: SourceDiagnostic }>("/api/lineage/source-diagnostic", { method: "POST", body: "{}" });
+    sourceDiagnostic = response.diagnostic;
+    deps.toast(`诊断完成：${sourceDiagnostic.totalJobs} 个来源任务，${sourceDiagnostic.lineageReadyJobs} 个可生成血缘`, sourceDiagnostic.lineageReadyJobs ? "success" : "info");
+    deps.scheduleRender();
+  }
+
+  async function reprocess(): Promise<void> {
+    const response = await api<{ resetJobs: number }>("/api/lineage/reprocess", { method: "POST", body: "{}" });
+    deps.toast(`已清除 ${response.resetJobs} 个旧标记并启动重新同步`, "success");
+    sourceDiagnostic = null;
+    await load();
+    pollStatus();
+  }
+
   function search(value: string): void {
     queryText = value;
     window.clearTimeout(searchTimer);
@@ -298,7 +334,7 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
 
   function dateText(value?: number | null): string { return value ? deps.fmt(value) : "暂无"; }
 
-  return { render, renderDataSync, load, submitQuery, saveConfig, testConnection, triggerSync, search, selectNode, setMode, setCollectionMode, closeDetail, chooseColumn, zoomBy, fit, downloadGraph };
+  return { render, renderDataSync, load, submitQuery, saveConfig, testConnection, triggerSync, diagnoseSource, reprocess, search, selectNode, setMode, setCollectionMode, closeDetail, chooseColumn, zoomBy, fit, downloadGraph };
 }
 
 function isConnectionDiagnostic(value: unknown): value is { diagnostic: ConnectionDiagnostic } {

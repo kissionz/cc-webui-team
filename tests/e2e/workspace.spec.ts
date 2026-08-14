@@ -151,6 +151,17 @@ test("数据同步集中配置后可查询血缘并手动触发", async ({ page,
   await page.getByRole("button", { name: "保存数据源与调度" }).click();
   await expect(page.getByText("同步设置已保存")).toBeVisible();
   await expect(page.locator(".sync-summary-card", { hasText: "自动调度" })).toContainText("07:30");
+  await page.route("**/api/lineage/source-diagnostic", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({ diagnostic: {
+      dataDate: "20260812", totalJobs: 12, lineageReadyJobs: 7,
+      groups: [{ project: "analytics", taskType: "SQL", status: "Terminated", jobs: 12, withInputs: 10, withOutputs: 8, lineageReady: 7 }],
+      samples: [], warnings: [], storage: { processedJobs: 12, totalEdges: 0 }, recoveryRecommended: true,
+    } }),
+  }));
+  await page.getByRole("button", { name: "诊断血缘来源" }).click();
+  await expect(page.locator(".source-diagnostic")).toContainText("12来源任务");
+  await expect(page.getByRole("button", { name: "清除 T-1 旧标记并重新同步" })).toBeVisible();
 
   if (isMobile) await page.getByRole("button", { name: "打开导航" }).click();
   await page.getByRole("button", { name: "数据血缘" }).click();
@@ -169,6 +180,10 @@ test("数据同步集中配置后可查询血缘并手动触发", async ({ page,
   });
   const root = table("analytics.dws_sales", "dws_sales");
   const upstream = table("analytics.ods_orders", "ods_orders");
+  const columns = Array.from({ length: 80 }, (_, index) => ({
+    tableId: root.id, name: `field_${String(index + 1).padStart(3, "0")}`, ordinalPosition: index + 1,
+    dataType: "STRING", comment: `字段 ${index + 1}`, nullable: true, partitionKey: false, primaryKey: false, updatedAt: 1,
+  }));
   await page.route("**/api/lineage/graph?*", (route) => route.fulfill({
     contentType: "application/json",
     body: JSON.stringify({
@@ -178,12 +193,15 @@ test("数据同步集中配置后可查询血缘并手动触发", async ({ page,
   }));
   await page.route("**/api/lineage/tables/analytics.dws_sales", (route) => route.fulfill({
     contentType: "application/json",
-    body: JSON.stringify({ table: root, columns: [], relations: { upstream: 1, downstream: 0 } }),
+    body: JSON.stringify({ table: root, columns, relations: { upstream: 1, downstream: 0 } }),
   }));
   await page.getByLabel("查询表").fill("analytics.dws_sales");
   await page.getByRole("button", { name: "查询血缘" }).click();
   await expect(page.locator(".lineage-svg-node", { hasText: "dws_sales" })).toBeVisible();
   await expect(page.locator(".lineage-inspector")).toContainText("销售日汇总");
+  const inspectorOverflow = await page.locator(".inspector-scroll").evaluate((element) => ({ clientHeight: element.clientHeight, scrollHeight: element.scrollHeight }));
+  expect(inspectorOverflow.scrollHeight).toBeGreaterThan(inspectorOverflow.clientHeight);
+  if (!isMobile) expect((await page.locator(".lineage-workbench").boundingBox())?.height ?? 0).toBeLessThanOrEqual(822);
 
   const syncRequest = page.waitForRequest((request) => request.method() === "POST" && new URL(request.url()).pathname === "/api/lineage/sync");
   await page.route("**/api/lineage/sync", (route) => route.fulfill({ status: 202, contentType: "application/json", body: JSON.stringify({ accepted: true }) }));

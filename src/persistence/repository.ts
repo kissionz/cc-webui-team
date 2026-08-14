@@ -798,6 +798,16 @@ export class PersistenceRepository {
       .run(instanceId, dataDate, at);
   }
 
+  lineageStorageStats(dataDate: string): { processedJobs: number; totalEdges: number } {
+    const processed = this.getOne("SELECT COUNT(*) count FROM lineage_processed_jobs WHERE data_date=?", dataDate);
+    const edges = this.getOne("SELECT COUNT(*) count FROM lineage_edges");
+    return { processedJobs: num(processed?.count ?? 0), totalEdges: num(edges?.count ?? 0) };
+  }
+
+  resetLineageProcessedJobs(dataDate: string): number {
+    return Number(this.database.prepare("DELETE FROM lineage_processed_jobs WHERE data_date=?").run(dataDate).changes);
+  }
+
   upsertLineageAccess(tableId: string, ds: string, accessCount: number, accessBytes: number, at = this.now()): void {
     this.ensureLineageTable(tableId, at);
     this.database.prepare(`INSERT INTO lineage_access_daily(table_id, ds, access_count, access_bytes, updated_at)

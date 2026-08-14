@@ -801,6 +801,8 @@ document.addEventListener("click", (event) => {
       await refresh();
     } else if (actionName === "lineage-sync") await lineageFeature.triggerSync();
     else if (actionName === "lineage-test-connection") await lineageFeature.testConnection();
+    else if (actionName === "lineage-source-diagnostic") await lineageFeature.diagnoseSource();
+    else if (actionName === "lineage-reprocess") await lineageFeature.reprocess();
     else if (actionName === "lineage-close-detail") lineageFeature.closeDetail();
     else if (actionName === "lineage-zoom-in") lineageFeature.zoomBy(0.15);
     else if (actionName === "lineage-zoom-out") lineageFeature.zoomBy(-0.15);

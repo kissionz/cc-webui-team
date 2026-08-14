@@ -8,7 +8,7 @@ import type { ClaudeConfig, MaxComputeConfig } from "../src/domain/index.js";
 import { ColumnLineageAnalyzer } from "../src/lineage/column-analyzer.js";
 import { buildOdpsScript, decodeOdpsOutput, extractOdpsFailure, parseOdpsRows, parseOdpsRowsFromChannels, resolveOdpsInvocation, type MaxComputeQueryClient, type MaxComputeRow } from "../src/lineage/maxcompute-client.js";
 import { LineageScheduler, nextShanghaiRun, previousShanghaiDate } from "../src/lineage/scheduler.js";
-import { LineageSyncService, parseTableList } from "../src/lineage/sync-service.js";
+import { diagnoseLineageSource, LineageSyncService, parseTableList } from "../src/lineage/sync-service.js";
 import { PersistenceRepository } from "../src/persistence/index.js";
 
 const roots: string[] = [];
@@ -176,7 +176,24 @@ describe("MaxCompute table lineage sync", () => {
 
     expect(await service.sync("20260812")).toEqual({ tablesProcessed: 1, columnsProcessed: 2, jobsProcessed: 0, edgesProcessed: 0 });
     expect(repo.listLineageEdges("analytics.dws_sales", "up", 3, 20).map((edge) => edge.occurrenceCount)).toEqual([1, 1]);
+    expect(repo.lineageStorageStats("20260812")).toEqual({ processedJobs: 1, totalEdges: 2 });
     expect(client.sql.every((sql) => sql.includes("SYSTEM_CATALOG.INFORMATION_SCHEMA"))).toBe(true);
+    repo.close();
+  });
+
+  it("does not permanently mark jobs whose non-empty table lists cannot be parsed", async () => {
+    const repo = await repository();
+    const fixture = new FixtureClient();
+    const client: MaxComputeQueryClient = {
+      query: (statement, fields, options) => statement.includes("INFORMATION_SCHEMA.tasks_history")
+        ? Promise.resolve([{
+          task_catalog: "analytics", task_name: "broken", task_type: "SQL", inst_id: "broken-1", status: "Terminated",
+          end_time: "2026-08-12 06:15:30", input_tables: "{not-a-table}", output_tables: "[analytics.dws_sales]",
+        }])
+        : fixture.query(statement, fields, options),
+    };
+    expect(await new LineageSyncService({ repository: repo, client, project: "analytics", now: () => now }).sync("20260812")).toMatchObject({ jobsProcessed: 1, edgesProcessed: 0 });
+    expect(repo.isLineageJobProcessed("broken-1")).toBe(false);
     repo.close();
   });
 
@@ -185,6 +202,7 @@ describe("MaxCompute table lineage sync", () => {
       "p.ods_order", "p.dwd_order", "p.local_table",
     ]);
     expect(parseTableList("p.custom.fact", "p")).toEqual([]);
+    expect(parseTableList("{not-a-table}", "p")).toEqual([]);
   });
 
   it("queries every visible project or a selected project list from tenant Information Schema", async () => {
@@ -199,6 +217,31 @@ describe("MaxCompute table lineage sync", () => {
     expect(selected.sql.find((sql) => sql.includes("INFORMATION_SCHEMA.tables"))).toContain("table_catalog IN ('analytics', 'finance')");
     expect(selected.sql.find((sql) => sql.includes("INFORMATION_SCHEMA.tasks_history"))).toContain("task_catalog IN ('analytics', 'finance')");
     repo.close();
+  });
+
+  it("summarizes source jobs and exposes parser-safe diagnostic samples", async () => {
+    const sql: string[] = [];
+    const client: MaxComputeQueryClient = {
+      async query(statement) {
+        sql.push(statement);
+        if (statement.includes("GROUP BY task_catalog")) return [{
+          task_catalog: "analytics", task_type: "SQL", status: "Terminated", job_count: "12",
+          with_inputs: "10", with_outputs: "8", lineage_ready: "7",
+        }];
+        return [{
+          task_catalog: "analytics", task_name: "daily_sales", task_type: "SQL", inst_id: "i-1", status: "Terminated",
+          input_tables: "[analytics.ods_orders]", output_tables: "[analytics.dws_sales]",
+        }];
+      },
+    };
+    await expect(diagnoseLineageSource(client, ["analytics"], "20260812")).resolves.toMatchObject({
+      totalJobs: 12,
+      lineageReadyJobs: 7,
+      warnings: [],
+      samples: [{ parsedInputs: ["analytics.ods_orders"], parsedOutputs: ["analytics.dws_sales"] }],
+    });
+    expect(sql).toHaveLength(2);
+    expect(sql.every((statement) => statement.includes("task_catalog IN ('analytics')"))).toBe(true);
   });
 });
 
