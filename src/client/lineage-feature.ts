@@ -1,7 +1,7 @@
 import { ApiError, api } from "./api.js";
 import type {
-  AppState, ColumnLineageResult, HtmlValue, LineageColumn, LineageGraph, LineageSyncRun,
-  LineageTable, MaxComputeConfigView,
+  AppState, ColumnLineageResult, ColumnSelectionAnalysisResult, DataWorksColumnGraph, HtmlValue,
+  LineageColumn, LineageGraph, LineageSyncRun, LineageTable, MaxComputeConfigView,
 } from "./types.js";
 
 interface LineageStatus { config: MaxComputeConfigView | null; running: boolean; runs: LineageSyncRun[] }
@@ -34,8 +34,20 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
   let suggestions: LineageTable[] = [];
   let graph: LineageGraph | null = null;
   let detail: LineageDetail | null = null;
-  let columnResult: ColumnLineageResult | null = null;
+  let columnGraph: DataWorksColumnGraph | null = null;
+  let selectionAnalysis: ColumnSelectionAnalysisResult | null = null;
+  const selectedColumns = new Set<string>();
   let mode: "table" | "column" = "table";
+  let tableScope: "first" | "deep" | "terminal" | "path" = "first";
+  let tableDirection: "up" | "down" | "both" = "both";
+  let columnDepth = 3;
+  let canvasMode: "select" | "pan" = "select";
+  let maximized = false;
+  let spacePressed = false;
+  let canvasView: { x: number; y: number; width: number; height: number } | null = null;
+  let drag: { kind: "pan" | "box" | "node"; startX: number; startY: number; lastX: number; lastY: number; nodeId?: string; additive: boolean; view?: { x: number; y: number; width: number; height: number } } | null = null;
+  let analysisTeamId = "";
+  let analysisController: AbortController | null = null;
   let queryText = "";
   let targetText = "";
   let columnText = "";
@@ -44,7 +56,6 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
   let connectionDiagnostic: ConnectionDiagnostic | null = null;
   let sourceDiagnostic: SourceDiagnostic | null = null;
   let searchTimer: number | undefined;
-  let zoom = 1;
 
   async function load(): Promise<void> {
     status = await api<LineageStatus>("/api/lineage/status");
@@ -56,9 +67,9 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
     const actions = `<div class="lineage-top-actions">${syncBadge}${deps.isAdmin() ? '<button class="button" type="button" data-action="lineage-sync">立即同步</button>' : ""}</div>`;
     return deps.appRoot(`${deps.topbar("数据血缘", "查询表级依赖，或让 Claude Code 从工作区实时分析字段加工逻辑", actions)}
       <section class="content lineage-page">
-        <div class="lineage-workbench">
+        <div class="lineage-workbench ${maximized ? "maximized" : ""}">
           ${renderQueryBar()}
-          <div class="lineage-stage ${detail || columnResult ? "has-inspector" : ""}">
+          <div class="lineage-stage ${(mode === "table" ? detail : selectionAnalysis) ? "has-inspector" : ""}">
             <section class="lineage-canvas" aria-label="血缘关系图">
               ${renderCanvas()}
             </section>
@@ -76,23 +87,21 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
     const modeButtons = `<div class="segmented" role="group" aria-label="查询类型"><button type="button" class="segment ${mode === "table" ? "active" : ""}" data-lineage-mode="table">表血缘</button><button type="button" class="segment ${mode === "column" ? "active" : ""}" data-lineage-mode="column">字段血缘</button></div>`;
     return `<form class="lineage-querybar" data-form="lineage-query">
       <div class="lineage-query-main">
-        <div class="lineage-mode-row">${modeButtons}<span class="lineage-source-note">${mode === "table" ? "系统库 · 每日同步" : "Claude Code · 实时只读分析"}</span></div>
+        <div class="lineage-mode-row">${modeButtons}<span class="lineage-source-note">${mode === "table" ? "系统库 · 每日同步" : "DataWorks 多层字段关系 · 按需调用 Claude"}</span></div>
         <div class="lineage-controls">
           <label class="lineage-field lineage-table-field"><span>查询表</span><input class="input" name="table" list="lineage-table-options" value="${deps.escape(queryText)}" placeholder="${deps.escape(configProject ? `${configProject}.table_name` : "输入 project.table 搜索")}" data-lineage-table-search autocomplete="off" required /></label>
           <datalist id="lineage-table-options">${tableOptions}</datalist>
           ${mode === "table" ? renderTableControls() : `<label class="lineage-field"><span>字段</span><input class="input" name="column" list="lineage-column-options" value="${deps.escape(columnText)}" placeholder="输入字段名" required /></label><datalist id="lineage-column-options">${columnOptions}</datalist><label class="lineage-field"><span>工作区</span><select class="select" name="teamId">${deps.state().teams.map((team) => `<option value="${deps.escape(team.id)}" ${team.id === selectedTeam ? "selected" : ""}>${deps.escape(team.name)}</option>`).join("")}</select></label>`}
-          <button class="button primary lineage-submit" type="submit" ${graphLoading || analysisLoading ? "disabled" : ""}>${analysisLoading ? "正在分析…" : graphLoading ? "正在查询…" : mode === "table" ? "查询血缘" : "分析字段"}</button>
+          <button class="button primary lineage-submit" type="submit" ${graphLoading ? "disabled" : ""}>${graphLoading ? "正在查询…" : mode === "table" ? "查询血缘" : "查看字段血缘"}</button>
         </div>
       </div>
     </form>`;
   }
 
   function renderTableControls(): string {
-    const scope = graph?.scope || "first";
-    const direction = graph?.direction || "both";
-    return `<label class="lineage-field"><span>血缘范围</span><select class="select" name="scope"><option value="first" ${scope === "first" ? "selected" : ""}>第一层</option><option value="deep" ${scope === "deep" ? "selected" : ""}>逐层展开</option><option value="terminal" ${scope === "terminal" ? "selected" : ""}>仅最终血缘</option><option value="path" ${scope === "path" ? "selected" : ""}>两表路径</option></select></label>
-      <label class="lineage-field"><span>展开方向</span><select class="select" name="direction"><option value="both" ${direction === "both" ? "selected" : ""}>上下游</option><option value="up" ${direction === "up" ? "selected" : ""}>向上展开</option><option value="down" ${direction === "down" ? "selected" : ""}>向下展开</option></select></label>
-      <label class="lineage-field lineage-target-field"><span>目标表（路径查询）</span><input class="input" name="target" list="lineage-table-options" value="${deps.escape(targetText)}" placeholder="选择路径终点" /></label>`;
+    return `<div class="lineage-field lineage-scope-field"><span>血缘范围</span><div class="lineage-scope-buttons" role="group" aria-label="血缘范围"><button type="button" class="${tableScope === "first" ? "active" : ""}" data-lineage-scope="first">一层</button><button type="button" class="${tableScope === "deep" ? "active" : ""}" data-lineage-scope="deep">全部</button><button type="button" class="${tableScope === "terminal" ? "active" : ""}" data-lineage-scope="terminal">最终</button><button type="button" class="${tableScope === "path" ? "active" : ""}" data-lineage-scope="path">查路径</button></div></div>
+      <label class="lineage-field"><span>展开方向</span><select class="select" name="direction"><option value="both" ${tableDirection === "both" ? "selected" : ""}>上下游</option><option value="up" ${tableDirection === "up" ? "selected" : ""}>向上展开</option><option value="down" ${tableDirection === "down" ? "selected" : ""}>向下展开</option></select></label>
+      ${tableScope === "path" ? `<label class="lineage-field lineage-target-field"><span>目标表（路径查询）</span><input class="input" name="target" list="lineage-table-options" value="${deps.escape(targetText)}" placeholder="选择路径终点" required /></label>` : ""}`;
   }
 
   function renderDataSync(): string {
@@ -142,46 +151,45 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
   }
 
   function renderCanvas(): string {
-    const toolbar = `<div class="lineage-canvas-toolbar"><span>${graph ? `${graph.tables.length} 个节点 · ${graph.edges.length} 条关系` : "关系画布"}</span><div><button class="icon-button compact" type="button" title="缩小" aria-label="缩小血缘图" data-action="lineage-zoom-out">−</button><button class="icon-button compact" type="button" title="适应画布" aria-label="适应画布" data-action="lineage-fit">⌗</button><button class="icon-button compact" type="button" title="放大" aria-label="放大血缘图" data-action="lineage-zoom-in">＋</button><button class="button compact" type="button" data-action="lineage-download">导出 SVG</button></div></div>`;
-    if (graphLoading || analysisLoading) return `${toolbar}<div class="lineage-skeleton"><span></span><span></span><span></span><p>${analysisLoading ? "Claude Code 正在工作区中定位字段定义与转换逻辑…" : "正在读取系统库中的血缘关系…"}</p></div>`;
-    if (mode === "column" && columnResult) return `${toolbar}${renderColumnGraph(columnResult)}`;
-    if (graph) return `${toolbar}${graphSvg(graph, zoom, deps.escape)}`;
-    return `${toolbar}<div class="lineage-empty"><svg viewBox="0 0 96 96" aria-hidden="true"><circle cx="48" cy="48" r="24"/><path d="M24 48H10m76 0H72M48 24V10m0 76V72"/><circle cx="10" cy="48" r="5"/><circle cx="86" cy="48" r="5"/><circle cx="48" cy="10" r="5"/><circle cx="48" cy="86" r="5"/></svg><h2>从一张表开始探索</h2><p>搜索表名后可查看上下游关系；字段模式会实时读取所选工作区，不保存字段加工逻辑。</p></div>`;
+    const nodeCount = mode === "column" ? columnGraph?.nodes.length : graph?.tables.length;
+    const edgeCount = mode === "column" ? columnGraph?.edges.length : graph?.edges.length;
+    const modeTools = mode === "column" ? `<div class="canvas-mode-switch" role="group" aria-label="画布工具"><button type="button" class="${canvasMode === "select" ? "active" : ""}" data-lineage-canvas-mode="select">选择</button><button type="button" class="${canvasMode === "pan" ? "active" : ""}" data-lineage-canvas-mode="pan">拖动</button></div><div class="column-depth-switch" role="group" aria-label="字段血缘层数"><span>层数</span>${[1, 3, 5].map((depth) => `<button type="button" class="${columnDepth === depth ? "active" : ""}" data-lineage-depth="${depth}">${depth}</button>`).join("")}</div>` : "";
+    const toolbar = `<div class="lineage-canvas-toolbar"><span>${nodeCount !== undefined ? `${nodeCount} 个节点 · ${edgeCount} 条关系` : "关系画布"}</span><div>${modeTools}<button class="icon-button compact" type="button" title="缩小" aria-label="缩小血缘图" data-action="lineage-zoom-out">−</button><button class="icon-button compact" type="button" title="适应画布" aria-label="适应画布" data-action="lineage-fit">⌗</button><button class="icon-button compact" type="button" title="放大" aria-label="放大血缘图" data-action="lineage-zoom-in">＋</button><button class="icon-button compact" type="button" title="${maximized ? "退出大画布" : "放大画布"}" aria-label="${maximized ? "退出大画布" : "放大画布"}" data-action="lineage-maximize">${maximized ? "↙" : "↗"}</button><button class="button compact" type="button" data-action="lineage-download">导出 SVG</button></div></div>`;
+    if (graphLoading) return `${toolbar}<div class="lineage-skeleton"><span></span><span></span><span></span><p>${mode === "column" ? `正在从 DataWorks 加载 ${columnDepth} 层字段关系…` : "正在读取系统库中的血缘关系…"}</p></div>`;
+    if (mode === "column" && columnGraph) return `${toolbar}${renderColumnGraph(columnGraph)}`;
+    if (graph) return `${toolbar}${graphSvg(graph, canvasView, deps.escape)}`;
+    return `${toolbar}<div class="lineage-empty"><svg viewBox="0 0 96 96" aria-hidden="true"><circle cx="48" cy="48" r="24"/><path d="M24 48H10m76 0H72M48 24V10m0 76V72"/><circle cx="10" cy="48" r="5"/><circle cx="86" cy="48" r="5"/><circle cx="48" cy="10" r="5"/><circle cx="48" cy="86" r="5"/></svg><h2>从一张表开始探索</h2><p>${mode === "column" ? "先从 DataWorks 加载多层字段关系，再框选字段按需调用 Claude 总结加工逻辑。" : "搜索表名后查看上下游关系，可切换一层、全部、最终血缘或查询两表路径。"}</p></div>`;
   }
 
-  function renderColumnGraph(result: ColumnLineageResult): string {
-    if (!result.relations.length) return `<div class="lineage-empty"><h2>没有找到可验证的字段关系</h2><p>${deps.escape(result.summary || "Claude Code 未在工作区中找到足够的代码证据。")}</p></div>`;
-    const tables = new Map<string, { table: string; column: string; side: "source" | "target" | "center" }>();
-    result.relations.forEach((relation) => {
-      const sourceKey = `${relation.sourceTable}.${relation.sourceColumn}`;
-      const targetKey = `${relation.targetTable}.${relation.targetColumn}`;
-      tables.set(sourceKey, { table: relation.sourceTable, column: relation.sourceColumn, side: targetKey === `${result.table}.${result.column}` ? "source" : "source" });
-      tables.set(targetKey, { table: relation.targetTable, column: relation.targetColumn, side: sourceKey === `${result.table}.${result.column}` ? "target" : "target" });
-    });
-    tables.set(`${result.table}.${result.column}`, { table: result.table, column: result.column, side: "center" });
-    const items = [...tables.entries()];
-    const sources = items.filter(([, value]) => value.side === "source" && `${value.table}.${value.column}` !== `${result.table}.${result.column}`);
-    const targets = items.filter(([, value]) => value.side === "target" && `${value.table}.${value.column}` !== `${result.table}.${result.column}`);
-    const height = Math.max(380, Math.max(sources.length, targets.length, 1) * 100 + 100);
-    const centerY = height / 2;
-    const node = (key: string, value: { table: string; column: string }, x: number, y: number, active = false) => `<g class="lineage-svg-node column-node ${active ? "root" : ""}" transform="translate(${x} ${y})"><rect width="210" height="66" rx="8"/><text class="node-name" x="14" y="27">${deps.escape(shortName(value.table, 25))}</text><text class="node-meta" x="14" y="49">${deps.escape(value.column)}</text><title>${deps.escape(key)}</title></g>`;
-    const positions = new Map<string, { x: number; y: number }>();
-    sources.forEach(([key], index) => positions.set(key, { x: 50, y: spread(index, sources.length, height) }));
-    targets.forEach(([key], index) => positions.set(key, { x: 710, y: spread(index, targets.length, height) }));
-    positions.set(`${result.table}.${result.column}`, { x: 380, y: centerY - 33 });
-    const paths = result.relations.map((relation) => {
-      const from = positions.get(`${relation.sourceTable}.${relation.sourceColumn}`);
-      const to = positions.get(`${relation.targetTable}.${relation.targetColumn}`);
+  function renderColumnGraph(value: DataWorksColumnGraph): string {
+    if (!value.nodes.length) return `<div class="lineage-empty"><h2>DataWorks 没有返回该字段</h2><p>请确认表名、字段名、项目权限和 DataWorks 元数据血缘是否可用。</p></div>`;
+    const layout = columnGraphLayout(value);
+    const view = canvasView ?? { x: 0, y: 0, width: layout.width, height: layout.height };
+    const paths = value.edges.map((edge) => {
+      const from = layout.positions.get(edge.sourceId); const to = layout.positions.get(edge.targetId);
       if (!from || !to) return "";
-      return `<path class="lineage-edge" d="M${from.x + 210} ${from.y + 33} C${from.x + 270} ${from.y + 33},${to.x - 60} ${to.y + 33},${to.x} ${to.y + 33}" marker-end="url(#lineage-arrow)"/><text class="edge-label" x="${(from.x + to.x + 210) / 2}" y="${(from.y + to.y) / 2 + 23}">${deps.escape(shortName(relation.transformation, 24))}</text>`;
+      const active = selectedColumns.has(edge.sourceId) && selectedColumns.has(edge.targetId);
+      return `<path class="lineage-edge ${active ? "selected" : ""}" d="M${from.x + 210} ${from.y + 33} C${from.x + 260} ${from.y + 33},${to.x - 50} ${to.y + 33},${to.x} ${to.y + 33}" marker-end="url(#lineage-arrow)"/>`;
     }).join("");
-    const nodes = items.map(([key, value]) => { const pos = positions.get(key); return pos ? node(key, value, pos.x, pos.y, value.side === "center") : ""; }).join("");
-    return `<div class="lineage-svg-wrap"><svg class="lineage-graph" id="lineage-graph-svg" viewBox="0 0 970 ${height}" role="img" aria-label="${deps.escape(result.table)} 的字段血缘图"><defs><marker id="lineage-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z"/></marker></defs>${paths}${nodes}</svg></div>`;
+    const nodes = value.nodes.map((node) => {
+      const pos = layout.positions.get(node.id); if (!pos) return "";
+      const selected = selectedColumns.has(node.id);
+      const separator = node.table.lastIndexOf(".");
+      const project = separator > 0 ? node.table.slice(0, separator) : "";
+      const table = separator > 0 ? node.table.slice(separator + 1) : node.table;
+      const meta = project ? `${project} · ${node.column}` : node.column;
+      return `<g class="lineage-svg-node column-node ${node.root ? "root" : ""} ${selected ? "selected" : ""}" transform="translate(${pos.x} ${pos.y})" tabindex="0" role="button" data-lineage-field-node="${deps.escape(node.id)}"><rect width="210" height="66" rx="8"/><text class="node-name" x="14" y="26">${deps.escape(shortName(table, 28))}</text><text class="node-meta" x="14" y="48">${deps.escape(shortName(meta, 31))}</text>${node.boundary && value.depth < 5 ? '<circle class="boundary-dot" cx="198" cy="12" r="4"/>' : ""}<title>${deps.escape(`${node.table}.${node.column}`)}</title></g>`;
+    }).join("");
+    const action = selectedColumns.size ? `<div class="lineage-selection-action"><div><strong>${selectedColumns.size} 个字段已选</strong><span>最多 20 个，Claude 仅在点击后运行</span></div>${analysisLoading ? '<button class="button" type="button" data-action="lineage-cancel-analysis">取消分析</button>' : '<button class="button primary" type="button" data-action="lineage-analyze-selection">分析字段逻辑</button>'}</div>` : "";
+    return `<div class="lineage-svg-wrap ${canvasMode === "pan" ? "pan-mode" : "select-mode"}" data-lineage-canvas><svg class="lineage-graph" id="lineage-graph-svg" viewBox="${view.x} ${view.y} ${view.width} ${view.height}" role="img" aria-label="字段血缘图"><defs><marker id="lineage-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z"/></marker></defs>${paths}${nodes}</svg><div class="lineage-selection-box" data-lineage-selection-box hidden></div>${action}<div class="lineage-canvas-help"><strong>画布操作</strong><span>单击选择 · Ctrl/⌘ 多选 · 左键拖框选择</span><span>Space + 拖动 / 中键平移 · 滚轮缩放 · Esc 清空</span></div>${value.truncated ? '<div class="graph-notice">字段节点较多，当前结果已限制为 180 个节点。</div>' : ""}</div>`;
   }
 
   function renderInspector(): string {
-    if (!detail && !columnResult) return "";
-    if (mode === "column" && columnResult) return `<aside class="lineage-inspector"><div class="inspector-header"><div><span class="inspector-kicker">字段加工逻辑</span><h2>${deps.escape(columnResult.column)}</h2><p>${deps.escape(columnResult.table)}</p></div><button class="icon-button" type="button" aria-label="关闭详情" data-action="lineage-close-detail">×</button></div><div class="inspector-scroll">${columnResult.summary ? `<section class="inspector-section"><h3>分析总结</h3><p class="lineage-summary">${deps.escape(columnResult.summary)}</p></section>` : ""}${renderRelations(columnResult)}${renderEvidence(columnResult)}${columnResult.warnings.length ? `<section class="inspector-section"><h3>注意事项</h3><ul class="warning-list">${columnResult.warnings.map((warning) => `<li>${deps.escape(warning)}</li>`).join("")}</ul></section>` : ""}</div></aside>`;
+    if (mode === "column") {
+      if (!selectionAnalysis) return "";
+      const relationCount = selectionAnalysis.groups.reduce((total, group) => total + group.relations.length, 0);
+      return `<aside class="lineage-inspector"><div class="inspector-header"><div><span class="inspector-kicker">Claude 字段加工分析</span><h2>${selectionAnalysis.groups.length} 组链路</h2><p>${relationCount} 条加工关系 · 不展示文件与行号</p></div><button class="icon-button" type="button" aria-label="关闭分析" data-action="lineage-close-detail">×</button></div><div class="inspector-scroll"><section class="inspector-section"><h3>分析总结</h3><p class="lineage-summary">${deps.escape(selectionAnalysis.summary || "已完成所选字段的加工逻辑分析。")}</p></section>${selectionAnalysis.groups.map((group) => `<section class="inspector-section analysis-group"><div class="section-title"><h3>${deps.escape(group.title)}</h3><span>${group.relations.length} 条</span></div>${group.fields.length ? `<div class="analysis-fields">${group.fields.map((field) => `<span>${deps.escape(field)}</span>`).join("")}</div>` : ""}<div class="column-relations">${group.relations.map(renderRelationCard).join("") || '<p class="empty-inline">没有可确认的加工关系</p>'}</div></section>`).join("")}${selectionAnalysis.warnings.length ? `<section class="inspector-section"><h3>注意事项</h3><ul class="warning-list">${selectionAnalysis.warnings.map((warning) => `<li>${deps.escape(warning)}</li>`).join("")}</ul></section>` : ""}</div></aside>`;
+    }
     if (!detail) return "";
     const table = detail.table;
     return `<aside class="lineage-inspector"><div class="inspector-header"><div><span class="inspector-kicker">${deps.escape(table.type)}</span><h2>${deps.escape(table.name)}</h2><p>${deps.escape(table.project)}</p></div><button class="icon-button" type="button" aria-label="关闭详情" data-action="lineage-close-detail">×</button></div><div class="inspector-scroll"><section class="inspector-section"><p class="lineage-summary">${deps.escape(table.comment || "暂无表说明")}</p><div class="lineage-relation-count"><span><strong>${detail.relations.upstream}</strong>上游</span><span><strong>${detail.relations.downstream}</strong>下游</span></div></section>${metadataGrid(table)}<section class="inspector-section"><div class="section-title"><h3>字段</h3><span>${detail.columns.length} 个</span></div><div class="lineage-column-list">${detail.columns.map((column) => `<button type="button" data-lineage-column="${deps.escape(column.name)}"><span><strong>${deps.escape(column.name)}</strong><small>${deps.escape(column.comment || (column.partitionKey ? "分区字段" : ""))}</small></span><code>${deps.escape(column.dataType)}</code></button>`).join("") || '<p class="empty-inline">暂未同步字段元数据</p>'}</div></section></div></aside>`;
@@ -199,12 +207,8 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
     return `<section class="inspector-section"><h3>表信息</h3><dl class="metadata-grid">${items.map(([label, value]) => `<div><dt>${deps.escape(label)}</dt><dd>${deps.escape(value)}</dd></div>`).join("")}</dl></section>`;
   }
 
-  function renderRelations(result: ColumnLineageResult): string {
-    return `<section class="inspector-section"><div class="section-title"><h3>字段关系</h3><span>${result.relations.length} 条</span></div><div class="column-relations">${result.relations.map((relation) => `<div><div class="relation-path"><code>${deps.escape(relation.sourceTable)}.${deps.escape(relation.sourceColumn)}</code><span>→</span><code>${deps.escape(relation.targetTable)}.${deps.escape(relation.targetColumn)}</code></div><p>${deps.escape(relation.transformation)}</p><span class="confidence ${relation.confidence}">${relation.confidence === "high" ? "高置信" : relation.confidence === "medium" ? "中置信" : "低置信"}</span></div>`).join("")}</div></section>`;
-  }
-
-  function renderEvidence(result: ColumnLineageResult): string {
-    return `<section class="inspector-section"><div class="section-title"><h3>代码证据</h3><span>${result.evidence.length} 处</span></div><div class="code-evidence">${result.evidence.map((item, index) => `<details ${index === 0 ? "open" : ""}><summary><span>${deps.escape(item.path)}</span><small>L${item.startLine}–${item.endLine}</small></summary><p>${deps.escape(item.explanation)}</p><pre><code>${deps.escape(item.snippet)}</code></pre></details>`).join("") || '<p class="empty-inline">没有可验证的代码片段</p>'}</div></section>`;
+  function renderRelationCard(relation: ColumnLineageResult["relations"][number]): string {
+    return `<div><div class="relation-path"><code>${deps.escape(relation.sourceTable)}.${deps.escape(relation.sourceColumn)}</code><span>→</span><code>${deps.escape(relation.targetTable)}.${deps.escape(relation.targetColumn)}</code></div><p>${deps.escape(relation.transformation)}</p><span class="confidence ${relation.confidence}">${relation.confidence === "high" ? "高置信" : relation.confidence === "medium" ? "中置信" : "低置信"}</span></div>`;
   }
 
   async function submitQuery(form: HTMLFormElement): Promise<void> {
@@ -216,25 +220,26 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
     if (mode === "column") {
       const rawColumn = String(data.get("column") || "").trim();
       columnText = detail?.columns.find((item) => item.name.toLocaleLowerCase() === rawColumn.toLocaleLowerCase())?.name ?? rawColumn;
-      analysisLoading = true; columnResult = null; graph = null; deps.scheduleRender();
+      analysisTeamId = String(data.get("teamId") || "");
+      graphLoading = true; columnGraph = null; selectionAnalysis = null; selectedColumns.clear(); graph = null; canvasView = null; deps.scheduleRender();
       try {
-        const payload = { teamId: String(data.get("teamId") || ""), table, column: columnText };
-        const response = await api<{ result: ColumnLineageResult }>("/api/lineage/columns/analyze", { method: "POST", body: JSON.stringify(payload) });
-        columnResult = response.result;
+        const response = await api<{ graph: DataWorksColumnGraph }>("/api/lineage/columns/graph", { method: "POST", body: JSON.stringify({ table, column: columnText, depth: columnDepth, direction: "both" }) });
+        columnGraph = response.graph;
         await loadDetail(table, false);
-      } finally { analysisLoading = false; deps.scheduleRender(); }
+      } finally { graphLoading = false; deps.scheduleRender(); }
       return;
     }
-    graphLoading = true; columnResult = null; deps.scheduleRender();
+    graphLoading = true; deps.scheduleRender();
     try {
-      const scope = String(data.get("scope") || "first");
-      const direction = String(data.get("direction") || "both");
+      const scope = tableScope;
+      tableDirection = String(data.get("direction") || "both") as typeof tableDirection;
+      const direction = tableDirection;
       targetText = String(data.get("target") || "").trim();
       if (scope === "path" && !targetText) throw new Error("路径查询需要选择目标表。");
       const params = new URLSearchParams({ table, scope, direction, depth: "6", limit: "160" });
       if (targetText) params.set("target", targetText.includes(".") || !project ? targetText : `${project}.${targetText}`);
       graph = await api<LineageGraph>(`/api/lineage/graph?${params}`);
-      zoom = 1;
+      canvasView = null;
       await loadDetail(table, false);
     } finally { graphLoading = false; deps.scheduleRender(); }
   }
@@ -313,7 +318,20 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
     if (rerender) deps.scheduleRender();
   }
 
-  function setMode(value: "table" | "column"): void { mode = value; graph = null; columnResult = null; deps.scheduleRender(); }
+  function setMode(value: "table" | "column"): void {
+    mode = value; graph = null; columnGraph = null; selectionAnalysis = null; selectedColumns.clear(); canvasView = null; deps.scheduleRender();
+  }
+  function setScope(value: "first" | "deep" | "terminal" | "path"): void { tableScope = value; deps.scheduleRender(); }
+  function setCanvasMode(value: "select" | "pan"): void { canvasMode = value; deps.scheduleRender(); }
+  async function setColumnDepth(value: number): Promise<void> {
+    columnDepth = Math.max(1, Math.min(5, value));
+    if (!columnGraph || !queryText || !columnText) { deps.scheduleRender(); return; }
+    graphLoading = true; selectionAnalysis = null; selectedColumns.clear(); canvasView = null; deps.scheduleRender();
+    try {
+      const response = await api<{ graph: DataWorksColumnGraph }>("/api/lineage/columns/graph", { method: "POST", body: JSON.stringify({ table: queryText, column: columnText, depth: columnDepth, direction: "both" }) });
+      columnGraph = response.graph;
+    } finally { graphLoading = false; deps.scheduleRender(); }
+  }
   function setCollectionMode(value: "all" | "selected"): void {
     document.querySelectorAll<HTMLInputElement>('[name="collectionProjects"]').forEach((input) => {
       input.disabled = value === "all";
@@ -321,10 +339,132 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
       input.closest(".sync-project-option")?.classList.toggle("readonly", value === "all");
     });
   }
-  function closeDetail(): void { detail = null; columnResult = null; deps.scheduleRender(); }
+  function closeDetail(): void {
+    if (mode === "column") selectionAnalysis = null;
+    else detail = null;
+    deps.scheduleRender();
+  }
   function chooseColumn(column: string): void { mode = "column"; columnText = column; deps.scheduleRender(); window.setTimeout(() => { document.querySelector<HTMLInputElement>('[name="column"]')?.focus(); }, 0); }
-  function zoomBy(delta: number): void { zoom = Math.max(0.55, Math.min(1.8, zoom + delta)); deps.scheduleRender(); }
-  function fit(): void { zoom = 1; deps.scheduleRender(); }
+  function zoomBy(delta: number): void {
+    const svg = document.querySelector<SVGSVGElement>("#lineage-graph-svg");
+    if (!svg) return;
+    const view = readSvgView(svg);
+    const factor = delta > 0 ? 0.84 : 1.19;
+    const width = Math.max(240, Math.min(12_000, view.width * factor));
+    const height = view.height * (width / view.width);
+    canvasView = { x: view.x + (view.width - width) / 2, y: view.y + (view.height - height) / 2, width, height };
+    deps.scheduleRender();
+  }
+  function fit(): void { canvasView = null; deps.scheduleRender(); }
+  function toggleMaximize(): void { maximized = !maximized; deps.scheduleRender(); }
+
+  async function analyzeSelection(): Promise<void> {
+    if (!columnGraph || !selectedColumns.size) return;
+    const nodes = columnGraph.nodes.filter((node) => selectedColumns.has(node.id)).slice(0, 20).map(({ id, table, column }) => ({ id, table, column }));
+    const connected = connectedRelations(columnGraph, new Set(nodes.map((node) => node.id))).slice(0, 200);
+    analysisController?.abort();
+    analysisController = new AbortController();
+    analysisLoading = true; selectionAnalysis = null; deps.scheduleRender();
+    try {
+      const response = await api<{ result: ColumnSelectionAnalysisResult }>("/api/lineage/columns/analyze-selection", {
+        method: "POST", signal: analysisController.signal,
+        body: JSON.stringify({ teamId: analysisTeamId || deps.state().selectedTeamId, nodes, relations: connected }),
+      });
+      selectionAnalysis = response.result;
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "AbortError")) throw error;
+    } finally {
+      analysisLoading = false; analysisController = null; deps.scheduleRender();
+    }
+  }
+
+  function cancelAnalysis(): void { analysisController?.abort(); analysisLoading = false; deps.scheduleRender(); }
+
+  function pointerDown(event: PointerEvent): void {
+    const origin = event.target instanceof Element ? event.target : null;
+    const canvas = origin?.closest<HTMLElement>("[data-lineage-canvas]");
+    if (!canvas || origin?.closest("button") || (event.button !== 0 && event.button !== 1)) return;
+    const svg = canvas.querySelector<SVGSVGElement>("#lineage-graph-svg");
+    if (!svg) return;
+    const node = origin?.closest<SVGElement>("[data-lineage-field-node]");
+    const pan = event.button === 1 || spacePressed || canvasMode === "pan";
+    if (!pan && origin?.closest("[data-lineage-node]")) return;
+    drag = { kind: pan ? "pan" : node ? "node" : "box", startX: event.clientX, startY: event.clientY, lastX: event.clientX, lastY: event.clientY, nodeId: node?.dataset.lineageFieldNode, additive: event.ctrlKey || event.metaKey, view: readSvgView(svg) };
+    canvas.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  }
+
+  function pointerMove(event: PointerEvent): void {
+    if (!drag) return;
+    const canvas = document.querySelector<HTMLElement>("[data-lineage-canvas]");
+    const svg = canvas?.querySelector<SVGSVGElement>("#lineage-graph-svg");
+    if (!canvas || !svg) return;
+    drag.lastX = event.clientX; drag.lastY = event.clientY;
+    if (drag.kind === "pan" && drag.view) {
+      const dx = (event.clientX - drag.startX) * drag.view.width / Math.max(1, svg.clientWidth);
+      const dy = (event.clientY - drag.startY) * drag.view.height / Math.max(1, svg.clientHeight);
+      svg.setAttribute("viewBox", `${drag.view.x - dx} ${drag.view.y - dy} ${drag.view.width} ${drag.view.height}`);
+    } else if (drag.kind === "box") {
+      const rect = canvas.getBoundingClientRect();
+      const box = canvas.querySelector<HTMLElement>("[data-lineage-selection-box]");
+      if (!box) return;
+      const left = Math.max(0, Math.min(drag.startX, event.clientX) - rect.left);
+      const top = Math.max(0, Math.min(drag.startY, event.clientY) - rect.top);
+      box.hidden = false; box.style.left = `${left}px`; box.style.top = `${top}px`;
+      box.style.width = `${Math.abs(event.clientX - drag.startX)}px`; box.style.height = `${Math.abs(event.clientY - drag.startY)}px`;
+    }
+  }
+
+  function pointerUp(): void {
+    if (!drag) return;
+    const current = drag; drag = null;
+    const canvas = document.querySelector<HTMLElement>("[data-lineage-canvas]");
+    const svg = canvas?.querySelector<SVGSVGElement>("#lineage-graph-svg");
+    if (!canvas || !svg) return;
+    const moved = Math.hypot(current.lastX - current.startX, current.lastY - current.startY);
+    if (current.kind === "pan") canvasView = readSvgView(svg);
+    if (current.kind === "node" && current.nodeId && moved < 6) {
+      if (!current.additive) selectedColumns.clear();
+      if (current.additive && selectedColumns.has(current.nodeId)) selectedColumns.delete(current.nodeId);
+      else if (selectedColumns.size < 20) selectedColumns.add(current.nodeId);
+      else deps.toast("一次最多选择 20 个字段", "info");
+    }
+    if (current.kind === "box" && moved >= 4) {
+      if (!current.additive) selectedColumns.clear();
+      const selection = { left: Math.min(current.startX, current.lastX), right: Math.max(current.startX, current.lastX), top: Math.min(current.startY, current.lastY), bottom: Math.max(current.startY, current.lastY) };
+      for (const node of canvas.querySelectorAll<SVGElement>("[data-lineage-field-node]")) {
+        const rect = node.getBoundingClientRect();
+        if (rect.right < selection.left || rect.left > selection.right || rect.bottom < selection.top || rect.top > selection.bottom) continue;
+        if (selectedColumns.size >= 20) break;
+        if (node.dataset.lineageFieldNode) selectedColumns.add(node.dataset.lineageFieldNode);
+      }
+    }
+    canvas.querySelector<HTMLElement>("[data-lineage-selection-box]")?.setAttribute("hidden", "");
+    deps.scheduleRender();
+  }
+
+  function wheel(event: WheelEvent): void {
+    const origin = event.target instanceof Element ? event.target : null;
+    const canvas = origin?.closest<HTMLElement>("[data-lineage-canvas]");
+    const svg = canvas?.querySelector<SVGSVGElement>("#lineage-graph-svg");
+    if (!canvas || !svg) return;
+    event.preventDefault();
+    const rect = svg.getBoundingClientRect(); const view = readSvgView(svg);
+    const factor = event.deltaY > 0 ? 1.12 : 0.89;
+    const width = Math.max(240, Math.min(12_000, view.width * factor));
+    const height = view.height * (width / view.width);
+    const ratioX = (event.clientX - rect.left) / Math.max(1, rect.width);
+    const ratioY = (event.clientY - rect.top) / Math.max(1, rect.height);
+    const x = view.x + view.width * ratioX - width * ratioX;
+    const y = view.y + view.height * ratioY - height * ratioY;
+    canvasView = { x, y, width, height }; svg.setAttribute("viewBox", `${x} ${y} ${width} ${height}`);
+  }
+
+  function keyDown(event: KeyboardEvent): void {
+    if (event.key === " " && !(event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement)) spacePressed = true;
+    if (event.key === "Escape" && selectedColumns.size) { selectedColumns.clear(); deps.scheduleRender(); }
+  }
+  function keyUp(event: KeyboardEvent): void { if (event.key === " ") spacePressed = false; }
 
   function downloadGraph(): void {
     const svg = document.querySelector<SVGSVGElement>("#lineage-graph-svg");
@@ -335,7 +475,8 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
     style.textContent = `.lineage-edge{fill:none;stroke:#91a3bd;stroke-width:1.5}.lineage-svg-node rect{fill:#fff;stroke:#b9c8dc;stroke-width:1.25}.lineage-svg-node.root rect{fill:#eef5ff;stroke:#1677ff;stroke-width:2}.node-name{font:600 14px system-ui;fill:#172033}.node-meta{font:12px system-ui;fill:#68778d}.edge-label{font:11px system-ui;fill:#68778d;text-anchor:middle}marker path{fill:#91a3bd}`;
     copy.prepend(style);
     const blob = new Blob([new XMLSerializer().serializeToString(copy)], { type: "image/svg+xml;charset=utf-8" });
-    const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = `lineage-${(graph?.rootId || columnResult?.table || "graph").replaceAll(".", "-")}.svg`; link.click(); window.setTimeout(() => URL.revokeObjectURL(link.href), 1_000);
+    const rootLabel = graph?.rootId || columnGraph?.nodes.find((node) => node.root)?.table || "graph";
+    const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = `lineage-${rootLabel.replaceAll(".", "-")}.svg`; link.click(); window.setTimeout(() => URL.revokeObjectURL(link.href), 1_000);
   }
 
   function pollStatus(): void {
@@ -346,7 +487,14 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
 
   function dateText(value?: number | null): string { return value ? deps.fmt(value) : "暂无"; }
 
-  return { render, renderDataSync, load, submitQuery, saveConfig, testConnection, triggerSync, diagnoseSource, reprocess, search, selectNode, setMode, setCollectionMode, closeDetail, chooseColumn, zoomBy, fit, downloadGraph };
+  document.addEventListener("pointerdown", pointerDown);
+  document.addEventListener("pointermove", pointerMove);
+  document.addEventListener("pointerup", pointerUp);
+  document.addEventListener("wheel", wheel, { passive: false });
+  document.addEventListener("keydown", keyDown);
+  document.addEventListener("keyup", keyUp);
+
+  return { render, renderDataSync, load, submitQuery, saveConfig, testConnection, triggerSync, diagnoseSource, reprocess, search, selectNode, setMode, setScope, setCanvasMode, setColumnDepth, setCollectionMode, closeDetail, chooseColumn, zoomBy, fit, toggleMaximize, analyzeSelection, cancelAnalysis, downloadGraph };
 }
 
 function isConnectionDiagnostic(value: unknown): value is { diagnostic: ConnectionDiagnostic } {
@@ -363,12 +511,9 @@ function syncStatus(status: LineageStatus | null): string {
   return `<span class="sync-pill neutral"><i></i>${status.config.enabled ? "等待首次同步" : "自动同步已关闭"}</span>`;
 }
 
-function graphSvg(graph: LineageGraph, zoom: number, escape: (value: HtmlValue) => string): string {
+function graphSvg(graph: LineageGraph, selectedView: { x: number; y: number; width: number; height: number } | null, escape: (value: HtmlValue) => string): string {
   const layout = graphLayout(graph);
-  const viewWidth = layout.width / zoom;
-  const viewHeight = layout.height / zoom;
-  const viewX = (layout.width - viewWidth) / 2;
-  const viewY = (layout.height - viewHeight) / 2;
+  const view = selectedView ?? { x: 0, y: 0, width: layout.width, height: layout.height };
   const paths = graph.edges.map((edge) => {
     const from = layout.positions.get(edge.sourceTableId); const to = layout.positions.get(edge.targetTableId);
     if (!from || !to) return "";
@@ -381,7 +526,7 @@ function graphSvg(graph: LineageGraph, zoom: number, escape: (value: HtmlValue) 
     const tone = table.type.includes("VIEW") ? "view" : "table";
     return `<g class="lineage-svg-node ${tone} ${root ? "root" : ""}" transform="translate(${pos.x} ${pos.y})" tabindex="0" role="button" data-lineage-node="${escape(table.id)}"><rect width="210" height="70" rx="8"/><rect class="node-icon-bg" x="12" y="18" width="32" height="32" rx="6"/><text class="node-icon" x="28" y="39">${tone === "view" ? "V" : "T"}</text><text class="node-name" x="54" y="29">${escape(shortName(table.name, 23))}</text><text class="node-meta" x="54" y="50">${escape(shortName(table.project, 26))}</text><title>${escape(table.id)}${table.comment ? ` · ${escape(table.comment)}` : ""}</title></g>`;
   }).join("");
-  return `<div class="lineage-svg-wrap"><svg class="lineage-graph" id="lineage-graph-svg" viewBox="${viewX} ${viewY} ${viewWidth} ${viewHeight}" role="img" aria-label="${escape(graph.rootId)} 的表血缘图"><defs><marker id="lineage-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z"/></marker></defs>${paths}${nodes}</svg>${graph.truncated ? '<div class="graph-notice">节点数量较多，当前结果已截断。可缩小展开范围后重新查询。</div>' : ""}</div>`;
+  return `<div class="lineage-svg-wrap" data-lineage-canvas><svg class="lineage-graph" id="lineage-graph-svg" viewBox="${view.x} ${view.y} ${view.width} ${view.height}" role="img" aria-label="${escape(graph.rootId)} 的表血缘图"><defs><marker id="lineage-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z"/></marker></defs>${paths}${nodes}</svg><div class="lineage-canvas-help compact-help"><strong>画布操作</strong><span>Space + 拖动 / 中键平移 · 滚轮缩放</span></div>${graph.truncated ? '<div class="graph-notice">节点数量较多，当前结果已截断。可缩小展开范围后重新查询。</div>' : ""}</div>`;
 }
 
 function graphLayout(graph: LineageGraph): { positions: Map<string, { x: number; y: number }>; width: number; height: number } {
@@ -403,6 +548,40 @@ function graphLayout(graph: LineageGraph): { positions: Map<string, { x: number;
   const positions = new Map<string, { x: number; y: number }>();
   for (const [level, ids] of groups) ids.forEach((id, index) => positions.set(id, { x: 50 + (level - minLevel) * 270, y: spread(index, ids.length, height) }));
   return { positions, width, height };
+}
+
+function columnGraphLayout(graph: DataWorksColumnGraph): { positions: Map<string, { x: number; y: number }>; width: number; height: number } {
+  const levels = new Map<string, number>([[graph.rootId, 0]]);
+  for (let pass = 0; pass < graph.nodes.length + 2; pass += 1) {
+    for (const edge of graph.edges) {
+      const source = levels.get(edge.sourceId); const target = levels.get(edge.targetId);
+      if (source !== undefined && target === undefined) levels.set(edge.targetId, source + 1);
+      else if (target !== undefined && source === undefined) levels.set(edge.sourceId, target - 1);
+    }
+  }
+  graph.nodes.forEach((node) => { if (!levels.has(node.id)) levels.set(node.id, node.depth); });
+  const values = [...levels.values()];
+  const minLevel = Math.min(...values, 0); const maxLevel = Math.max(...values, 0);
+  const groups = new Map<number, string[]>();
+  for (const node of graph.nodes) {
+    const level = levels.get(node.id) ?? 0; const group = groups.get(level) ?? []; group.push(node.id); groups.set(level, group);
+  }
+  groups.forEach((ids) => ids.sort((left, right) => left.localeCompare(right)));
+  const maxRows = Math.max(1, ...[...groups.values()].map((ids) => ids.length));
+  const width = Math.max(760, (maxLevel - minLevel + 1) * 285 + 90);
+  const height = Math.max(440, maxRows * 92 + 110);
+  const positions = new Map<string, { x: number; y: number }>();
+  for (const [level, ids] of groups) ids.forEach((id, index) => positions.set(id, { x: 45 + (level - minLevel) * 285, y: spread(index, ids.length, height) }));
+  return { positions, width, height };
+}
+
+function readSvgView(svg: SVGSVGElement): { x: number; y: number; width: number; height: number } {
+  const view = svg.viewBox.baseVal;
+  return { x: view.x, y: view.y, width: view.width || 760, height: view.height || 440 };
+}
+
+function connectedRelations(graph: DataWorksColumnGraph, selected: Set<string>): DataWorksColumnGraph["edges"] {
+  return graph.edges.filter((edge) => selected.has(edge.sourceId) || selected.has(edge.targetId));
 }
 
 function spread(index: number, count: number, height: number): number { return count <= 1 ? height / 2 - 35 : 50 + index * ((height - 120) / (count - 1)); }

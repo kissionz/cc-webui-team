@@ -775,6 +775,18 @@ document.addEventListener("click", (event) => {
     lineageFeature.chooseColumn(target.dataset.lineageColumn);
     return;
   }
+  if (target.dataset.lineageScope === "first" || target.dataset.lineageScope === "deep" || target.dataset.lineageScope === "terminal" || target.dataset.lineageScope === "path") {
+    lineageFeature.setScope(target.dataset.lineageScope);
+    return;
+  }
+  if (target.dataset.lineageCanvasMode === "select" || target.dataset.lineageCanvasMode === "pan") {
+    lineageFeature.setCanvasMode(target.dataset.lineageCanvasMode);
+    return;
+  }
+  if (target.dataset.lineageDepth) {
+    void runAction(`lineage-depth:${target.dataset.lineageDepth}`, target, () => lineageFeature.setColumnDepth(Number(target.dataset.lineageDepth)));
+    return;
+  }
 
   const key = `click:${actionName || target.dataset.permission || target.dataset.deleteSession || target.dataset.deleteTeam || target.dataset.toggleUser || target.dataset.copyMessage || "action"}`;
   void runAction(key, target, async () => {
@@ -807,6 +819,9 @@ document.addEventListener("click", (event) => {
     else if (actionName === "lineage-zoom-in") lineageFeature.zoomBy(0.15);
     else if (actionName === "lineage-zoom-out") lineageFeature.zoomBy(-0.15);
     else if (actionName === "lineage-fit") lineageFeature.fit();
+    else if (actionName === "lineage-maximize") lineageFeature.toggleMaximize();
+    else if (actionName === "lineage-analyze-selection") await lineageFeature.analyzeSelection();
+    else if (actionName === "lineage-cancel-analysis") lineageFeature.cancelAnalysis();
     else if (actionName === "lineage-download") lineageFeature.downloadGraph();
     else if (target.dataset.deleteSession) await deleteSession(target.dataset.deleteSession);
     else if (target.dataset.deleteTeam) await deleteTeam(target.dataset.deleteTeam);

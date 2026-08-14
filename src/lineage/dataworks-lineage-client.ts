@@ -4,13 +4,33 @@ import type { MaxComputeConfig } from "../domain/index.js";
 import type { MaxComputeCredentials } from "./maxcompute-client.js";
 
 export interface DataWorksColumnRelation {
+  sourceId: string;
   sourceTable: string;
   sourceColumn: string;
+  targetId: string;
   targetTable: string;
   targetColumn: string;
   taskId: string | null;
   taskType: string | null;
   createTime: number | null;
+}
+
+export interface DataWorksColumnNode {
+  id: string;
+  table: string;
+  column: string;
+  depth: number;
+  root: boolean;
+  boundary: boolean;
+}
+
+export interface DataWorksColumnGraph {
+  rootId: string;
+  depth: number;
+  direction: "up" | "down" | "both";
+  nodes: DataWorksColumnNode[];
+  edges: DataWorksColumnRelation[];
+  truncated: boolean;
 }
 
 interface DataWorksColumn { id?: string; name?: string }
@@ -95,16 +115,7 @@ export class DataWorksColumnLineageClient {
   }
 
   async queryColumn(input: { project: string; table: string; column: string }): Promise<DataWorksColumnRelation[]> {
-    const tableId = `maxcompute-table:::${input.project}::${input.table}`;
-    const columns = (await this.client.listColumns(this.columnsRequest({
-      tableId,
-      name: input.column,
-      pageNumber: 1,
-      pageSize: 100,
-      sortBy: "Name",
-      order: "Asc",
-    }))).body?.pagingInfo?.columns ?? [];
-    const selected = columns.find((item) => item.name?.toLocaleLowerCase() === input.column.toLocaleLowerCase());
+    const selected = await this.resolveColumn(input);
     if (!selected?.id || !selected.name) return [];
 
     const lineages = [
@@ -120,8 +131,10 @@ export class DataWorksColumnLineageClient {
         const target = parseMaxComputeColumn(relationship?.dstEntity) ?? outerTarget;
         if (!source || !target) continue;
         const relation: DataWorksColumnRelation = {
+          sourceId: source.id,
           sourceTable: `${source.project}.${source.table}`,
           sourceColumn: source.column,
+          targetId: target.id,
           targetTable: `${target.project}.${target.table}`,
           targetColumn: target.column,
           taskId: relationship?.task?.id ?? null,
@@ -132,6 +145,74 @@ export class DataWorksColumnLineageClient {
       }
     }
     return [...relations.values()];
+  }
+
+  async queryColumnGraph(input: {
+    project: string;
+    table: string;
+    column: string;
+    depth?: number;
+    direction?: "up" | "down" | "both";
+    maximumNodes?: number;
+  }): Promise<DataWorksColumnGraph> {
+    const maximumDepth = Math.max(1, Math.min(5, input.depth ?? 3));
+    const maximumNodes = Math.max(20, Math.min(300, input.maximumNodes ?? 180));
+    const direction = input.direction ?? "both";
+    const selected = await this.resolveColumn(input);
+    if (!selected?.id || !selected.name) {
+      return { rootId: "", depth: maximumDepth, direction, nodes: [], edges: [], truncated: false };
+    }
+    const root = parseMaxComputeColumn({ id: selected.id, name: selected.name });
+    if (!root) return { rootId: "", depth: maximumDepth, direction, nodes: [], edges: [], truncated: false };
+
+    const nodeDepth = new Map<string, number>([[root.id, 0]]);
+    const nodeValues = new Map<string, ReturnType<typeof parseMaxComputeColumn>>([[root.id, root]]);
+    const edges = new Map<string, DataWorksColumnRelation>();
+    const expanded = new Set<string>();
+    let frontier = [root.id];
+    let truncated = false;
+    for (let currentDepth = 1; currentDepth <= maximumDepth && frontier.length; currentDepth += 1) {
+      const next = new Set<string>();
+      for (let offset = 0; offset < frontier.length; offset += 6) {
+        const batch = frontier.slice(offset, offset + 6).filter((id) => !expanded.has(id));
+        const batches = await Promise.all(batch.map(async (id) => ({
+          id,
+          lineages: [
+            ...(direction !== "down" ? await this.listDirection({ dstEntityId: id }) : []),
+            ...(direction !== "up" ? await this.listDirection({ srcEntityId: id }) : []),
+          ],
+        })));
+        for (const item of batches) {
+          expanded.add(item.id);
+          for (const relation of relationsFromLineages(item.lineages)) {
+            const neighborId = relation.sourceId === item.id ? relation.targetId : relation.sourceId;
+            if (!nodeDepth.has(neighborId)) {
+              if (nodeDepth.size >= maximumNodes) { truncated = true; continue; }
+              nodeDepth.set(neighborId, currentDepth);
+              nodeValues.set(neighborId, parseMaxComputeColumn({ id: neighborId }));
+              next.add(neighborId);
+            }
+            if (nodeDepth.has(relation.sourceId) && nodeDepth.has(relation.targetId)) edges.set(relationKey(relation), relation);
+          }
+        }
+      }
+      frontier = [...next];
+    }
+    const nodes: DataWorksColumnNode[] = [];
+    for (const [id, depth] of nodeDepth) {
+      const value = nodeValues.get(id);
+      if (!value) continue;
+      nodes.push({ id, table: `${value.project}.${value.table}`, column: value.column, depth, root: id === root.id, boundary: depth === maximumDepth });
+    }
+    return { rootId: root.id, depth: maximumDepth, direction, nodes, edges: [...edges.values()], truncated };
+  }
+
+  private async resolveColumn(input: { project: string; table: string; column: string }): Promise<DataWorksColumn | undefined> {
+    const tableId = `maxcompute-table:::${input.project}::${input.table}`;
+    const columns = (await this.client.listColumns(this.columnsRequest({
+      tableId, name: input.column, pageNumber: 1, pageSize: 100, sortBy: "Name", order: "Asc",
+    }))).body?.pagingInfo?.columns ?? [];
+    return columns.find((item) => item.name?.toLocaleLowerCase() === input.column.toLocaleLowerCase());
   }
 
   private async listDirection(filter: { srcEntityId?: string; dstEntityId?: string }): Promise<DataWorksLineage[]> {
@@ -176,14 +257,35 @@ export function splitMaxComputeTable(value: string, defaultProject: string): { p
   return null;
 }
 
-function parseMaxComputeColumn(entity: DataWorksLineageEntity | undefined): { project: string; table: string; column: string } | null {
+function parseMaxComputeColumn(entity: DataWorksLineageEntity | undefined): { id: string; project: string; table: string; column: string } | null {
   if (!entity?.id) return null;
   const parts = entity.id.split(":");
   if (parts[0] !== "maxcompute-column" || parts.length < 7) return null;
   const project = parts[3] ?? "";
   const table = parts.at(-2) ?? "";
   const column = parts.at(-1) ?? "";
-  return project && table && column ? { project, table, column } : null;
+  return project && table && column ? { id: entity.id, project, table, column } : null;
+}
+
+function relationsFromLineages(lineages: DataWorksLineage[]): DataWorksColumnRelation[] {
+  const relations = new Map<string, DataWorksColumnRelation>();
+  for (const lineage of lineages) {
+    const outerSource = parseMaxComputeColumn(lineage.srcEntity);
+    const outerTarget = parseMaxComputeColumn(lineage.dstEntity);
+    for (const relationship of lineage.relationships?.length ? lineage.relationships : [undefined]) {
+      const source = parseMaxComputeColumn(relationship?.srcEntity) ?? outerSource;
+      const target = parseMaxComputeColumn(relationship?.dstEntity) ?? outerTarget;
+      if (!source || !target) continue;
+      const relation: DataWorksColumnRelation = {
+        sourceId: source.id, sourceTable: `${source.project}.${source.table}`, sourceColumn: source.column,
+        targetId: target.id, targetTable: `${target.project}.${target.table}`, targetColumn: target.column,
+        taskId: relationship?.task?.id ?? null, taskType: relationship?.task?.type ?? null,
+        createTime: relationship?.createTime ?? null,
+      };
+      relations.set(relationKey(relation), relation);
+    }
+  }
+  return [...relations.values()];
 }
 
 function relationKey(value: Pick<DataWorksColumnRelation, "sourceTable" | "sourceColumn" | "targetTable" | "targetColumn">): string {

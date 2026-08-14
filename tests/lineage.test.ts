@@ -344,6 +344,35 @@ describe("ColumnLineageAnalyzer", () => {
     expect(invocation.options?.sandbox).toBeUndefined();
     expect(invocation.prompt).toContain("FILE sales.sql L1-L2");
   });
+
+  it("analyzes an explicit field selection without returning workspace locations", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cc-lineage-selection-"));
+    roots.push(root);
+    await writeFile(join(root, "sales.sql"), "SELECT SUM(amount) AS total_amount FROM analytics.ods_orders;\n");
+    let prompt = "";
+    const queryFactory = ((input: { prompt: string }) => {
+      prompt = input.prompt;
+      return {
+        async *[Symbol.asyncIterator]() {
+          yield { type: "result", subtype: "success", is_error: false, structured_output: {
+            status: "found", summary: "sales.sql L1 中订单金额汇总为销售金额", warnings: [],
+            groups: [{ id: "g1", title: "销售金额汇总", fields: ["analytics.ods_orders.amount", "analytics.dws_sales.total_amount"], relations: [{ sourceTable: "analytics.ods_orders", sourceColumn: "amount", targetTable: "analytics.dws_sales", targetColumn: "total_amount", transformation: "sales.sql 第1行执行 SUM 聚合", confidence: "high" }] }],
+          } };
+        },
+      };
+    }) as never;
+    const claudeConfig: ClaudeConfig = {
+      command: "claude", args: "", workspaceRoot: root, modelContextTokens: 1_000_000, autoCompactRatio: 0.62,
+      autoCompactEnabled: true, mcpToolAllowlist: [], enabled: true, available: true, version: "test", latencyMs: 1,
+      authenticated: true, lastCheckAt: now, healthMessage: null, updatedAt: now,
+    };
+    const relation = { sourceId: "s", sourceTable: "analytics.ods_orders", sourceColumn: "amount", targetId: "t", targetTable: "analytics.dws_sales", targetColumn: "total_amount", taskId: "task-1", taskType: "sql", createTime: 1 };
+    const result = await new ColumnLineageAnalyzer({ queryFactory }).analyzeSelection({ cwd: root, nodes: [{ id: "t", table: "analytics.dws_sales", column: "total_amount" }], relations: [relation], config: claudeConfig });
+    expect(result.groups[0]?.relations[0]).toMatchObject({ sourceColumn: "amount", targetColumn: "total_amount", transformation: "工作区代码 执行 SUM 聚合" });
+    expect(result.summary).not.toMatch(/sales\.sql|L1/);
+    expect(result).not.toHaveProperty("evidence");
+    expect(prompt).toContain("不得返回文件名、文件路径、行号、代码片段");
+  });
 });
 
 describe("DataWorks field lineage", () => {
@@ -375,5 +404,27 @@ describe("DataWorks field lineage", () => {
   it("infers the DataWorks region from discovered projects or the MaxCompute endpoint", () => {
     expect(inferDataWorksRegion(config({ discoveredProjects: [{ name: "analytics", status: "NORMAL", region: "cn-beijing" }] }), "analytics")).toBe("cn-beijing");
     expect(inferDataWorksRegion(config(), "analytics")).toBe("cn-shanghai");
+  });
+
+  it("walks DataWorks column lineage across multiple layers", async () => {
+    const rootId = "maxcompute-column:::analytics::ods_orders:amount";
+    const middleId = "maxcompute-column:::analytics::dwd_orders:amount";
+    const targetId = "maxcompute-column:::analytics::dws_sales:total_amount";
+    const client = {
+      async listColumns() { return { body: { pagingInfo: { columns: [{ id: rootId, name: "amount" }] } } }; },
+      async listLineages(request: Record<string, unknown>) {
+        const edge = request.srcEntityId === rootId
+          ? { srcEntity: { id: rootId }, dstEntity: { id: middleId } }
+          : request.srcEntityId === middleId
+            ? { srcEntity: { id: middleId }, dstEntity: { id: targetId } }
+            : null;
+        return { body: { pagingInfo: { totalCount: edge ? 1 : 0, lineages: edge ? [edge] : [] } } };
+      },
+    };
+    const lineage = new DataWorksColumnLineageClient({ credentials: { accessKeyId: "id", accessKeySecret: "secret" }, region: "cn-shanghai", client: client as never });
+    const graph = await lineage.queryColumnGraph({ project: "analytics", table: "ods_orders", column: "amount", depth: 2, direction: "down" });
+    expect(graph.nodes.map((node) => `${node.table}.${node.column}`)).toEqual(expect.arrayContaining(["analytics.ods_orders.amount", "analytics.dwd_orders.amount", "analytics.dws_sales.total_amount"]));
+    expect(graph.edges).toHaveLength(2);
+    expect(graph.nodes.find((node) => node.id === targetId)).toMatchObject({ depth: 2, boundary: true });
   });
 });

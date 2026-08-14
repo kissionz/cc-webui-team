@@ -50,6 +50,11 @@ export interface LineageSyncRun { id: string; trigger: "schedule" | "manual"; re
 export interface ColumnLineageEvidence { id: string; path: string; startLine: number; endLine: number; language: string; snippet: string; explanation: string }
 export interface ColumnLineageRelation { sourceTable: string; sourceColumn: string; targetTable: string; targetColumn: string; transformation: string; confidence: "high" | "medium" | "low"; evidenceIds: string[] }
 export interface ColumnLineageResult { status: "found" | "partial" | "not_found"; table: string; column: string; summary: string; relations: ColumnLineageRelation[]; evidence: ColumnLineageEvidence[]; warnings: string[] }
+export interface DataWorksColumnNode { id: string; table: string; column: string; depth: number; root: boolean; boundary: boolean }
+export interface DataWorksColumnRelation { sourceId: string; sourceTable: string; sourceColumn: string; targetId: string; targetTable: string; targetColumn: string; taskId: string | null; taskType: string | null; createTime: number | null }
+export interface DataWorksColumnGraph { rootId: string; depth: number; direction: "up" | "down" | "both"; nodes: DataWorksColumnNode[]; edges: DataWorksColumnRelation[]; truncated: boolean }
+export interface ColumnSelectionAnalysisGroup { id: string; title: string; fields: string[]; relations: ColumnLineageRelation[] }
+export interface ColumnSelectionAnalysisResult { status: "found" | "partial" | "not_found"; summary: string; groups: ColumnSelectionAnalysisGroup[]; warnings: string[] }
 export interface SessionGroup { id: string; label: string; minimum: number; defaultExpanded: boolean; sessions: Session[] }
 export interface MessageTurn { id: string; user?: Message; messages: Message[] }
 export interface ScrollPosition { top: number; left: number; distanceFromBottom: number }

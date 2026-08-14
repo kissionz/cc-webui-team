@@ -1,12 +1,12 @@
 import { canSeeTeam, isSystemAdmin, type JsonObject, type LineageEdge, type LineageTable, type MaxComputeConfig, type MaxComputeProject } from "../../domain/index.js";
 import type { PersistenceRepository } from "../../persistence/index.js";
 import type { ClaudeConfig } from "../../domain/index.js";
-import type { ColumnLineageAnalyzer } from "../../lineage/column-analyzer.js";
+import type { ColumnLineageAnalyzer, ColumnSelectionNode } from "../../lineage/column-analyzer.js";
 import { previousShanghaiDate, type LineageScheduler } from "../../lineage/scheduler.js";
 import { diagnoseLineageSource } from "../../lineage/sync-service.js";
 import type { MaxComputeCredentials } from "../../lineage/maxcompute-client.js";
 import { PyOdpsClient, PyOdpsError, type PyOdpsDiagnostic } from "../../lineage/pyodps-client.js";
-import { DataWorksColumnLineageClient, inferDataWorksRegion, splitMaxComputeTable, type DataWorksColumnRelation } from "../../lineage/dataworks-lineage-client.js";
+import { DataWorksColumnLineageClient, inferDataWorksRegion, splitMaxComputeTable, type DataWorksColumnGraph, type DataWorksColumnRelation } from "../../lineage/dataworks-lineage-client.js";
 import type { SecretBox } from "../../security/secret-box.js";
 import { HttpError, readJsonBody, sendJson } from "../core.js";
 import { assertOnlyKeys, inputBoolean, inputEnum, inputInteger, inputString, inputStringList, objectBody, optionalQuery, queryInteger } from "../validation.js";
@@ -26,6 +26,7 @@ export interface LineageRoutesOptions {
 
 export class LineageRoutes {
   readonly definitions: readonly RouteDefinition[];
+  private readonly columnGraphCache = new Map<string, { expiresAt: number; graph: DataWorksColumnGraph }>();
 
   constructor(private readonly options: LineageRoutesOptions) {
     this.definitions = [
@@ -38,6 +39,8 @@ export class LineageRoutes {
       { method: "GET", path: "/api/lineage/tables", handle: (input) => this.searchTables(input) },
       { method: "GET", path: /^\/api\/lineage\/tables\/([^/]+)$/, handle: (input) => this.tableDetail(input) },
       { method: "GET", path: "/api/lineage/graph", handle: (input) => this.graph(input) },
+      { method: "POST", path: "/api/lineage/columns/graph", handle: (input) => this.columnGraph(input) },
+      { method: "POST", path: "/api/lineage/columns/analyze-selection", handle: (input) => this.analyzeColumnSelection(input) },
       { method: "POST", path: "/api/lineage/columns/analyze", handle: (input) => this.analyzeColumn(input) },
     ];
   }
@@ -275,6 +278,80 @@ export class LineageRoutes {
     }
   }
 
+  private async columnGraph({ request, response, auth }: RouteRequest): Promise<void> {
+    this.assertDirectoryAccess(auth.user);
+    const body = objectBody(await readJsonBody(request, this.options.maxBodySize));
+    assertOnlyKeys(body, ["table", "column", "depth", "direction"]);
+    const table = inputString(body.table, "table", 1, 260);
+    const column = inputString(body.column, "column", 1, 260);
+    const depth = body.depth === undefined ? 3 : inputInteger(body.depth, "depth", 1, 5);
+    const direction = body.direction === undefined ? "both" : inputEnum(body.direction, ["up", "down", "both"] as const, "direction");
+    validateColumnReference(table, column);
+    const source = this.options.repository.getMaxComputeConfig();
+    if (!source?.credentialCiphertext) throw new HttpError(400, "MAXCOMPUTE_CREDENTIAL_MISSING", "请先在系统设置的数据同步中配置 MaxCompute AccessKey。");
+    const reference = splitMaxComputeTable(table, source.project);
+    if (!reference) throw new HttpError(400, "INVALID_LINEAGE_IDENTIFIER", "无法确定字段所属的 MaxCompute 项目。");
+    const region = inferDataWorksRegion(source, reference.project);
+    if (!region) throw new HttpError(400, "DATAWORKS_REGION_UNKNOWN", "无法识别该项目所在的 DataWorks 地域。");
+    const cacheKey = [source.updatedAt, region, reference.project, reference.table, column.toLocaleLowerCase(), depth, direction].join("\u0000");
+    const cached = this.columnGraphCache.get(cacheKey);
+    if (cached && cached.expiresAt > this.options.now()) return sendJson(response, 200, { graph: cached.graph, cached: true });
+    const credentials = this.options.secretBox.decrypt<MaxComputeCredentials>(source.credentialCiphertext);
+    try {
+      const client = new DataWorksColumnLineageClient({ credentials, region });
+      const graph = await client.queryColumnGraph({ ...reference, column, depth, direction, maximumNodes: 180 });
+      this.columnGraphCache.set(cacheKey, { expiresAt: this.options.now() + 10 * 60 * 1_000, graph });
+      while (this.columnGraphCache.size > 100) this.columnGraphCache.delete(this.columnGraphCache.keys().next().value!);
+      this.options.audit(auth.user.id, "lineage.column.graph.viewed", "lineage_column", `${table}.${column}`, { depth, direction, nodes: graph.nodes.length, edges: graph.edges.length });
+      sendJson(response, 200, { graph, cached: false });
+    } catch (error) {
+      throw new HttpError(502, "DATAWORKS_COLUMN_LINEAGE_FAILED", `DataWorks 字段血缘查询失败：${safeDataWorksError(error, credentials)}`);
+    }
+  }
+
+  private async analyzeColumnSelection({ request, response, auth }: RouteRequest): Promise<void> {
+    this.assertDirectoryAccess(auth.user);
+    const body = objectBody(await readJsonBody(request, this.options.maxBodySize));
+    assertOnlyKeys(body, ["teamId", "nodes", "relations"]);
+    const teamId = inputString(body.teamId, "teamId", 1, 128);
+    const team = this.options.repository.getTeam(teamId);
+    if (!team || !canSeeTeam(this.options.repository, auth.user, teamId)) throw forbidden();
+    if (!Array.isArray(body.nodes) || body.nodes.length < 1 || body.nodes.length > 20) throw new HttpError(400, "INVALID_COLUMN_SELECTION", "请选择 1 到 20 个字段进行分析。");
+    if (!Array.isArray(body.relations) || body.relations.length > 200) throw new HttpError(400, "INVALID_COLUMN_RELATIONS", "字段关系数量不能超过 200 条。");
+    const nodes: ColumnSelectionNode[] = body.nodes.map((raw, index) => {
+      const item = objectBody(raw); assertOnlyKeys(item, ["id", "table", "column"]);
+      const node = { id: inputString(item.id, `nodes[${index}].id`, 1, 512), table: inputString(item.table, `nodes[${index}].table`, 1, 260), column: inputString(item.column, `nodes[${index}].column`, 1, 260) };
+      validateColumnReference(node.table, node.column); return node;
+    });
+    const relations: DataWorksColumnRelation[] = body.relations.map((raw, index) => {
+      const item = objectBody(raw); assertOnlyKeys(item, ["sourceId", "sourceTable", "sourceColumn", "targetId", "targetTable", "targetColumn", "taskId", "taskType", "createTime"]);
+      const relation: DataWorksColumnRelation = {
+        sourceId: inputString(item.sourceId, `relations[${index}].sourceId`, 1, 512),
+        sourceTable: inputString(item.sourceTable, `relations[${index}].sourceTable`, 1, 260),
+        sourceColumn: inputString(item.sourceColumn, `relations[${index}].sourceColumn`, 1, 260),
+        targetId: inputString(item.targetId, `relations[${index}].targetId`, 1, 512),
+        targetTable: inputString(item.targetTable, `relations[${index}].targetTable`, 1, 260),
+        targetColumn: inputString(item.targetColumn, `relations[${index}].targetColumn`, 1, 260),
+        taskId: item.taskId === null ? null : inputString(item.taskId, `relations[${index}].taskId`, 0, 512),
+        taskType: item.taskType === null ? null : inputString(item.taskType, `relations[${index}].taskType`, 0, 256),
+        createTime: item.createTime === null ? null : inputInteger(item.createTime, `relations[${index}].createTime`, 0, Number.MAX_SAFE_INTEGER),
+      };
+      validateColumnReference(relation.sourceTable, relation.sourceColumn);
+      validateColumnReference(relation.targetTable, relation.targetColumn);
+      return relation;
+    });
+    const config = this.options.claudeConfig();
+    if (!config?.enabled || !config.available || !config.authenticated) throw new HttpError(503, "CLAUDE_UNAVAILABLE", "Claude Code 当前不可用或未登录。");
+    try {
+      const result = await this.options.analyzer.analyzeSelection({ cwd: team.workspacePath, nodes, relations, config });
+      this.options.audit(auth.user.id, "lineage.column.selection_analyzed", "lineage_column", nodes.map((node) => `${node.table}.${node.column}`).join(","), { teamId, nodes: nodes.length, relations: relations.length, groups: result.groups.length, status: result.status });
+      sendJson(response, 200, { result });
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("任务已满")) throw new HttpError(429, "COLUMN_LINEAGE_BUSY", error.message);
+      throw error;
+    }
+  }
+
   private async dataWorksColumnRelations(table: string, column: string): Promise<{ relations: DataWorksColumnRelation[]; warnings: string[] }> {
     const source = this.options.repository.getMaxComputeConfig();
     if (!source?.credentialCiphertext) return { relations: [], warnings: ["未配置 MaxCompute AccessKey，字段血缘已使用 Claude Code 本地分析。"] };
@@ -312,6 +389,10 @@ function terminalEdges(rootId: string, edges: Array<LineageEdge & { depth: numbe
     const latest = candidates.sort((a, b) => b.lastSeenAt - a.lastSeenAt)[0]!;
     return { ...latest, sourceTableId: direction === "down" ? rootId : terminal, targetTableId: direction === "down" ? terminal : rootId, collapsed: Math.max(0, (latest.depth ?? 1) - 1) };
   });
+}
+
+function validateColumnReference(table: string, column: string): void {
+  if (!/^[A-Za-z0-9_.-]+$/.test(table) || !/^[A-Za-z0-9_$-]+$/.test(column)) throw new HttpError(400, "INVALID_LINEAGE_IDENTIFIER", "表名或字段名格式不正确。");
 }
 
 function configDto(config: MaxComputeConfig, admin: boolean, secretBox: SecretBox): Record<string, unknown> {
