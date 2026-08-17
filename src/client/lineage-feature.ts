@@ -6,6 +6,8 @@ import type {
 
 interface LineageStatus { config: MaxComputeConfigView | null; running: boolean; runs: LineageSyncRun[] }
 interface LineageDetail { table: LineageTable; columns: LineageColumn[]; relations: { upstream: number; downstream: number } }
+type ExpansionDirection = "up" | "down";
+interface DirectionalExpansion<T> { nodeId: string; direction: ExpansionDirection; graph: T }
 interface ConnectionDiagnostic { stdout: string; stderr: string; parsed: Array<{ name: string; status: string; region: string }> }
 interface SourceDiagnostic {
   dataDate: string;
@@ -61,11 +63,11 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
   let sourceDiagnostic: SourceDiagnostic | null = null;
   let searchTimer: number | undefined;
   let activeTablePicker: "source" | "target" | null = null;
-  const expandedColumnNodes = new Set<string>();
-  const expandedTableNodes = new Set<string>();
-  const expandingNodes = new Set<string>();
-  const columnExpansions = new Map<string, DataWorksColumnGraph>();
-  const tableExpansions = new Map<string, LineageGraph>();
+  const loadedColumnDirections = new Set<string>();
+  const loadedTableDirections = new Set<string>();
+  const expandingDirections = new Set<string>();
+  const columnExpansions = new Map<string, DirectionalExpansion<DataWorksColumnGraph>>();
+  const tableExpansions = new Map<string, DirectionalExpansion<LineageGraph>>();
 
   async function load(): Promise<void> {
     status = await api<LineageStatus>("/api/lineage/status");
@@ -201,11 +203,11 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
   function renderCanvas(): string {
     const nodeCount = mode === "column" ? columnGraph?.nodes.length : graph?.tables.length;
     const edgeCount = mode === "column" ? columnGraph?.edges.length : graph?.edges.length;
-    const modeTools = mode === "column" ? `<div class="canvas-mode-switch" role="group" aria-label="画布工具"><button type="button" class="${canvasMode === "select" ? "active" : ""}" data-lineage-canvas-mode="select">选择</button><button type="button" class="${canvasMode === "pan" ? "active" : ""}" data-lineage-canvas-mode="pan">拖动</button></div><span class="lineage-expand-hint">节点右上角 ＋ 展开，− 收回</span>` : "";
+    const modeTools = mode === "column" ? `<div class="canvas-mode-switch" role="group" aria-label="画布工具"><button type="button" class="${canvasMode === "select" ? "active" : ""}" data-lineage-canvas-mode="select">选择</button><button type="button" class="${canvasMode === "pan" ? "active" : ""}" data-lineage-canvas-mode="pan">拖动</button></div><span class="lineage-expand-hint">← 上游 · 下游 →</span>` : "";
     const toolbar = `<div class="lineage-canvas-toolbar"><span>${nodeCount !== undefined ? `${nodeCount} 个节点 · ${edgeCount} 条关系` : "关系画布"}</span><div>${modeTools}<button class="icon-button compact" type="button" title="缩小" aria-label="缩小血缘图" data-action="lineage-zoom-out">−</button><button class="icon-button compact" type="button" title="适应画布" aria-label="适应画布" data-action="lineage-fit">⌗</button><button class="icon-button compact" type="button" title="放大" aria-label="放大血缘图" data-action="lineage-zoom-in">＋</button><button class="icon-button compact" type="button" title="${maximized ? "退出大画布" : "放大画布"}" aria-label="${maximized ? "退出大画布" : "放大画布"}" data-action="lineage-maximize">${maximized ? "↙" : "↗"}</button><button class="button compact" type="button" data-action="lineage-download">导出 SVG</button></div></div>`;
     if (graphLoading) return `${toolbar}<div class="lineage-skeleton"><span></span><span></span><span></span><p>${mode === "column" ? "正在从 DataWorks 加载首层字段关系…" : "正在读取系统库中的血缘关系…"}</p></div>`;
     if (mode === "column" && columnGraph) return `${toolbar}${renderColumnGraph(columnGraph)}`;
-    if (graph) return `${toolbar}${graphSvg(graph, canvasView, deps.escape, expandedTableNodes, new Set(tableExpansions.keys()), expandingNodes)}`;
+    if (graph) return `${toolbar}${graphSvg(graph, canvasView, deps.escape, loadedTableDirections, tableExpansions, expandingDirections)}`;
     return `${toolbar}<div class="lineage-empty"><svg viewBox="0 0 96 96" aria-hidden="true"><circle cx="48" cy="48" r="24"/><path d="M24 48H10m76 0H72M48 24V10m0 76V72"/><circle cx="10" cy="48" r="5"/><circle cx="86" cy="48" r="5"/><circle cx="48" cy="10" r="5"/><circle cx="48" cy="86" r="5"/></svg><h2>从一张表开始探索</h2><p>${mode === "column" ? "先从 DataWorks 加载首层字段关系，点击边界节点的 ＋ 逐层探索，再框选字段让 Harness 总结加工逻辑。" : "搜索表名后查看上下游关系，可切换一层、全部、最终血缘或查询两表路径。"}</p></div>`;
   }
 
@@ -226,15 +228,11 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
       const project = separator > 0 ? node.table.slice(0, separator) : "";
       const table = separator > 0 ? node.table.slice(separator + 1) : node.table;
       const meta = project ? `${project} · ${node.column}` : node.column;
-      const canCollapse = columnExpansions.has(node.id);
-      const canExpand = node.boundary && !expandedColumnNodes.has(node.id);
-      const expand = canCollapse
-        ? `<g class="node-expand collapse" transform="translate(${pos.x + 198} ${pos.y + 12})" tabindex="0" role="button" aria-label="收回 ${deps.escape(table)}.${deps.escape(node.column)} 的下层关系" data-lineage-collapse-column="${deps.escape(node.id)}"><circle cx="0" cy="0" r="10"/><text x="0" y="4">−</text></g>`
-        : canExpand ? `<g class="node-expand ${expandingNodes.has(node.id) ? "loading" : ""}" transform="translate(${pos.x + 198} ${pos.y + 12})" tabindex="0" role="button" aria-label="展开 ${deps.escape(table)}.${deps.escape(node.column)} 的下一层" data-lineage-expand-column="${deps.escape(node.id)}"><circle cx="0" cy="0" r="10"/><text x="0" y="4">${expandingNodes.has(node.id) ? "·" : "+"}</text></g>` : "";
-      return `<g class="lineage-svg-node column-node ${node.root ? "root" : ""} ${selected ? "selected" : ""}" transform="translate(${pos.x} ${pos.y})" tabindex="0" role="button" data-lineage-field-node="${deps.escape(node.id)}"><rect width="210" height="66" rx="8"/><text class="node-name" x="14" y="26">${deps.escape(shortSvgName(table, 26))}</text><text class="node-meta" x="14" y="48">${deps.escape(shortSvgName(meta, 29))}</text><title>${deps.escape(`${node.table}.${node.column}`)}</title></g>${expand}`;
+      const controls = node.boundary ? directionalControls("column", node.id, `${table}.${node.column}`, pos, loadedColumnDirections, columnExpansions, expandingDirections, deps.escape) : "";
+      return `<g class="lineage-svg-node column-node ${node.root ? "root" : ""} ${selected ? "selected" : ""}" transform="translate(${pos.x} ${pos.y})" tabindex="0" role="button" data-lineage-field-node="${deps.escape(node.id)}"><rect width="210" height="66" rx="8"/><text class="node-name" x="14" y="26">${deps.escape(shortSvgName(table, 26))}</text><text class="node-meta" x="14" y="48">${deps.escape(shortSvgName(meta, 29))}</text><title>${deps.escape(`${node.table}.${node.column}`)}</title></g>${controls}`;
     }).join("");
     const action = selectedColumns.size ? `<div class="lineage-selection-action"><div><strong>${selectedColumns.size} 个字段已选</strong><span>最多 20 个，Harness 仅在点击后运行</span></div>${analysisLoading ? '<button class="button" type="button" data-action="lineage-cancel-analysis">取消分析</button>' : '<button class="button primary" type="button" data-action="lineage-analyze-selection">分析字段逻辑</button>'}</div>` : "";
-    return `<div class="lineage-svg-wrap ${canvasMode === "pan" ? "pan-mode" : "select-mode"}" data-lineage-canvas><svg class="lineage-graph" id="lineage-graph-svg" viewBox="${view.x} ${view.y} ${view.width} ${view.height}" role="img" aria-label="字段血缘图"><defs><marker id="lineage-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z"/></marker></defs>${paths}${nodes}</svg><div class="lineage-selection-box" data-lineage-selection-box hidden></div>${action}<div class="lineage-canvas-help"><strong>画布操作</strong><span>＋ 展开下一层 · − 收回下层 · 单击选择 · Ctrl/⌘ 多选</span><span>左键拖框 · Space + 拖动 / 中键平移 · 滚轮缩放 · Esc 清空</span></div>${value.truncated ? '<div class="graph-notice">当前节点返回数量已达到上限，可从边界节点继续展开。</div>' : ""}</div>`;
+    return `<div class="lineage-svg-wrap ${canvasMode === "pan" ? "pan-mode" : "select-mode"}" data-lineage-canvas><svg class="lineage-graph" id="lineage-graph-svg" data-lineage-layout-width="${layout.width}" data-lineage-layout-height="${layout.height}" viewBox="${view.x} ${view.y} ${view.width} ${view.height}" role="img" aria-label="字段血缘图"><defs><marker id="lineage-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z"/></marker></defs>${paths}${nodes}</svg><div class="lineage-selection-box" data-lineage-selection-box hidden></div>${action}<div class="lineage-canvas-help"><strong>画布操作</strong><span>←＋ 仅展开上游 · ＋→ 仅展开下游 · 对应减号单独收回</span><span>左键拖框 · Space + 拖动 / 中键平移 · 滚轮连续缩放 · Esc 清空</span></div>${value.truncated ? '<div class="graph-notice">当前节点返回数量已达到上限，可从边界节点继续展开。</div>' : ""}</div>`;
   }
 
   function renderInspector(): string {
@@ -293,8 +291,8 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
         const response = await api<{ graph: DataWorksColumnGraph }>("/api/lineage/columns/graph", { method: "POST", body: JSON.stringify({ table, column: columnText, depth: 1, direction: "both" }) });
         baseColumnGraph = response.graph; columnGraph = response.graph;
         columnExpansions.clear();
-        expandedColumnNodes.clear();
-        if (columnGraph.rootId) expandedColumnNodes.add(columnGraph.rootId);
+        loadedColumnDirections.clear();
+        if (columnGraph.rootId) directionsOf(columnGraph.direction).forEach((direction) => loadedColumnDirections.add(expansionKey(columnGraph!.rootId, direction)));
         await loadDetail(table, false);
       } finally { graphLoading = false; deps.scheduleRender(); }
       return;
@@ -310,8 +308,8 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
       if (targetText) params.set("target", targetText.includes(".") || !project ? targetText : `${project}.${targetText}`);
       graph = await api<LineageGraph>(`/api/lineage/graph?${params}`);
       baseTableGraph = graph; tableExpansions.clear();
-      expandedTableNodes.clear();
-      if (scope === "first" && graph.rootId) expandedTableNodes.add(graph.rootId);
+      loadedTableDirections.clear();
+      if (scope === "first" && graph.rootId) directionsOf(tableDirection).forEach((item) => loadedTableDirections.add(expansionKey(graph!.rootId, item)));
       canvasView = null;
       await loadDetail(table, false);
     } finally { graphLoading = false; deps.scheduleRender(); }
@@ -404,57 +402,71 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
     deps.scheduleRender();
   }
 
-  async function expandColumn(entityId: string): Promise<void> {
-    if (!columnGraph || expandingNodes.has(entityId) || expandedColumnNodes.has(entityId)) return;
+  async function expandColumn(entityId: string, direction: ExpansionDirection): Promise<void> {
+    const key = expansionKey(entityId, direction);
+    if (!columnGraph || expandingDirections.has(key) || loadedColumnDirections.has(key)) return;
     const node = columnGraph.nodes.find((item) => item.id === entityId);
     if (!node) return;
-    expandingNodes.add(entityId); deps.scheduleRender();
+    expandingDirections.add(key); deps.scheduleRender();
     try {
       const response = await api<{ graph: DataWorksColumnGraph }>("/api/lineage/columns/graph", {
         method: "POST",
-        body: JSON.stringify({ table: node.table, column: node.column, entityId, depth: 1, direction: "both" }),
+        body: JSON.stringify({ table: node.table, column: node.column, entityId, depth: 1, direction }),
       });
-      columnExpansions.set(entityId, response.graph);
-      expandedColumnNodes.add(entityId);
-      columnGraph = baseColumnGraph ? composeColumnGraph(baseColumnGraph, columnExpansions) : mergeColumnGraphs(columnGraph, response.graph, entityId);
-      canvasView = null;
+      const previousView = displayedCanvasView();
+      const previousPosition = columnGraphLayout(columnGraph).positions.get(entityId);
+      columnExpansions.set(key, { nodeId: entityId, direction, graph: response.graph });
+      loadedColumnDirections.add(key);
+      columnGraph = baseColumnGraph ? composeColumnGraph(baseColumnGraph, columnExpansions) : mergeColumnGraphs(columnGraph, response.graph, entityId, direction);
+      canvasView = preserveAnchor(previousView, previousPosition, columnGraphLayout(columnGraph).positions.get(entityId));
     } finally {
-      expandingNodes.delete(entityId); deps.scheduleRender();
+      expandingDirections.delete(key); deps.scheduleRender();
     }
   }
 
-  function collapseColumn(entityId: string): void {
-    if (!baseColumnGraph || !columnExpansions.delete(entityId)) return;
-    expandedColumnNodes.delete(entityId);
+  function collapseColumn(entityId: string, direction: ExpansionDirection): void {
+    const key = expansionKey(entityId, direction);
+    if (!baseColumnGraph || !columnExpansions.delete(key)) return;
+    const previousView = displayedCanvasView();
+    const previousPosition = columnGraph ? columnGraphLayout(columnGraph).positions.get(entityId) : undefined;
+    loadedColumnDirections.delete(key);
     columnGraph = composeColumnGraph(baseColumnGraph, columnExpansions);
-    pruneColumnExpansions(columnGraph, columnExpansions, expandedColumnNodes);
+    pruneColumnExpansions(columnGraph, columnExpansions, loadedColumnDirections);
     columnGraph = composeColumnGraph(baseColumnGraph, columnExpansions);
     selectedColumns.forEach((id) => { if (!columnGraph?.nodes.some((node) => node.id === id)) selectedColumns.delete(id); });
-    canvasView = null; deps.scheduleRender();
+    canvasView = preserveAnchor(previousView, previousPosition, columnGraphLayout(columnGraph).positions.get(entityId));
+    deps.scheduleRender();
   }
 
-  async function expandTable(tableId: string): Promise<void> {
-    if (!graph || expandingNodes.has(tableId) || expandedTableNodes.has(tableId)) return;
-    expandingNodes.add(tableId); deps.scheduleRender();
+  async function expandTable(tableId: string, direction: ExpansionDirection): Promise<void> {
+    const key = expansionKey(tableId, direction);
+    if (!graph || expandingDirections.has(key) || loadedTableDirections.has(key)) return;
+    expandingDirections.add(key); deps.scheduleRender();
     try {
-      const params = new URLSearchParams({ table: tableId, scope: "first", direction: tableDirection, depth: "1", limit: "160" });
+      const params = new URLSearchParams({ table: tableId, scope: "first", direction, depth: "1", limit: "160" });
       const patch = await api<LineageGraph>(`/api/lineage/graph?${params}`);
-      tableExpansions.set(tableId, patch);
-      expandedTableNodes.add(tableId);
+      const previousView = displayedCanvasView();
+      const previousPosition = graphLayout(graph).positions.get(tableId);
+      tableExpansions.set(key, { nodeId: tableId, direction, graph: patch });
+      loadedTableDirections.add(key);
       graph = baseTableGraph ? composeTableGraph(baseTableGraph, tableExpansions) : mergeTableGraphs(graph, patch);
-      canvasView = null;
+      canvasView = preserveAnchor(previousView, previousPosition, graphLayout(graph).positions.get(tableId));
     } finally {
-      expandingNodes.delete(tableId); deps.scheduleRender();
+      expandingDirections.delete(key); deps.scheduleRender();
     }
   }
 
-  function collapseTable(tableId: string): void {
-    if (!baseTableGraph || !tableExpansions.delete(tableId)) return;
-    expandedTableNodes.delete(tableId);
+  function collapseTable(tableId: string, direction: ExpansionDirection): void {
+    const key = expansionKey(tableId, direction);
+    if (!baseTableGraph || !tableExpansions.delete(key)) return;
+    const previousView = displayedCanvasView();
+    const previousPosition = graph ? graphLayout(graph).positions.get(tableId) : undefined;
+    loadedTableDirections.delete(key);
     graph = composeTableGraph(baseTableGraph, tableExpansions);
-    pruneTableExpansions(graph, tableExpansions, expandedTableNodes);
+    pruneTableExpansions(graph, tableExpansions, loadedTableDirections);
     graph = composeTableGraph(baseTableGraph, tableExpansions);
-    canvasView = null; deps.scheduleRender();
+    canvasView = preserveAnchor(previousView, previousPosition, graphLayout(graph).positions.get(tableId));
+    deps.scheduleRender();
   }
 
   async function selectNode(id: string): Promise<void> { await loadDetail(id, true); }
@@ -472,7 +484,7 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
   }
 
   function setMode(value: "table" | "column"): void {
-    stopAnalysisTimer(); mode = value; graph = null; baseTableGraph = null; columnGraph = null; baseColumnGraph = null; selectionAnalysis = null; selectedColumns.clear(); expandedColumnNodes.clear(); expandedTableNodes.clear(); columnExpansions.clear(); tableExpansions.clear(); canvasView = null; deps.scheduleRender();
+    stopAnalysisTimer(); mode = value; graph = null; baseTableGraph = null; columnGraph = null; baseColumnGraph = null; selectionAnalysis = null; selectedColumns.clear(); loadedColumnDirections.clear(); loadedTableDirections.clear(); expandingDirections.clear(); columnExpansions.clear(); tableExpansions.clear(); canvasView = null; deps.scheduleRender();
   }
   function setScope(value: "first" | "deep" | "terminal" | "path"): void { tableScope = value; deps.scheduleRender(); }
   function setCanvasMode(value: "select" | "pan"): void { canvasMode = value; deps.scheduleRender(); }
@@ -489,12 +501,17 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
     deps.scheduleRender();
   }
   function chooseColumn(column: string): void { mode = "column"; columnText = column; deps.scheduleRender(); window.setTimeout(() => { document.querySelector<HTMLInputElement>('[name="column"]')?.focus(); }, 0); }
+  function displayedCanvasView(): { x: number; y: number; width: number; height: number } | null {
+    const svg = document.querySelector<SVGSVGElement>("#lineage-graph-svg");
+    return svg ? readSvgView(svg) : canvasView;
+  }
   function zoomBy(delta: number): void {
     const svg = document.querySelector<SVGSVGElement>("#lineage-graph-svg");
     if (!svg) return;
     const view = readSvgView(svg);
     const factor = delta > 0 ? 0.84 : 1.19;
-    const width = Math.max(240, Math.min(12_000, view.width * factor));
+    const { minimumWidth, maximumWidth } = zoomBounds(svg);
+    const width = Math.max(minimumWidth, Math.min(maximumWidth, view.width * factor));
     const height = view.height * (width / view.width);
     canvasView = { x: view.x + (view.width - width) / 2, y: view.y + (view.height - height) / 2, width, height };
     deps.scheduleRender();
@@ -600,7 +617,8 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
     event.preventDefault();
     const rect = svg.getBoundingClientRect(); const view = readSvgView(svg);
     const factor = event.deltaY > 0 ? 1.12 : 0.89;
-    const width = Math.max(240, Math.min(12_000, view.width * factor));
+    const { minimumWidth, maximumWidth } = zoomBounds(svg);
+    const width = Math.max(minimumWidth, Math.min(maximumWidth, view.width * factor));
     const height = view.height * (width / view.width);
     const ratioX = (event.clientX - rect.left) / Math.max(1, rect.width);
     const ratioY = (event.clientY - rect.top) / Math.max(1, rect.height);
@@ -619,6 +637,7 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
     const svg = document.querySelector<SVGSVGElement>("#lineage-graph-svg");
     if (!svg) { deps.toast("当前没有可导出的血缘图", "info"); return; }
     const copy = svg.cloneNode(true) as SVGSVGElement;
+    copy.querySelectorAll(".node-expand").forEach((control) => control.remove());
     copy.setAttribute("xmlns", "http://www.w3.org/2000/svg");
     const style = document.createElementNS("http://www.w3.org/2000/svg", "style");
     style.textContent = `.lineage-edge{fill:none;stroke:#91a3bd;stroke-width:1.5}.lineage-svg-node rect{fill:#fff;stroke:#b9c8dc;stroke-width:1.25}.lineage-svg-node.root rect{fill:#eef5ff;stroke:#1677ff;stroke-width:2}.node-name{font:600 14px system-ui;fill:#172033}.node-meta{font:12px system-ui;fill:#68778d}.edge-label{font:11px system-ui;fill:#68778d;text-anchor:middle}marker path{fill:#91a3bd}`;
@@ -664,9 +683,9 @@ function graphSvg(
   graph: LineageGraph,
   selectedView: { x: number; y: number; width: number; height: number } | null,
   escape: (value: HtmlValue) => string,
-  expandedNodes: Set<string>,
-  collapsibleNodes: Set<string>,
-  expandingNodes: Set<string>,
+  loadedDirections: Set<string>,
+  expansions: Map<string, DirectionalExpansion<LineageGraph>>,
+  expandingDirections: Set<string>,
 ): string {
   const layout = graphLayout(graph);
   const view = selectedView ?? { x: 0, y: 0, width: layout.width, height: layout.height };
@@ -680,12 +699,8 @@ function graphSvg(
     const pos = layout.positions.get(table.id); if (!pos) return "";
     const root = table.id === graph.rootId;
     const tone = table.type.includes("VIEW") ? "view" : "table";
-    const canCollapse = graph.scope === "first" && collapsibleNodes.has(table.id);
-    const canExpand = graph.scope === "first" && !expandedNodes.has(table.id);
-    const expand = canCollapse
-      ? `<g class="node-expand collapse" transform="translate(${pos.x + 198} ${pos.y + 12})" tabindex="0" role="button" aria-label="收回 ${escape(table.name)} 的下层关系" data-lineage-collapse-table="${escape(table.id)}"><circle cx="0" cy="0" r="10"/><text x="0" y="4">−</text></g>`
-      : canExpand ? `<g class="node-expand ${expandingNodes.has(table.id) ? "loading" : ""}" transform="translate(${pos.x + 198} ${pos.y + 12})" tabindex="0" role="button" aria-label="展开 ${escape(table.name)} 的下一层" data-lineage-expand-table="${escape(table.id)}"><circle cx="0" cy="0" r="10"/><text x="0" y="4">${expandingNodes.has(table.id) ? "·" : "+"}</text></g>` : "";
-    return `<g class="lineage-svg-node ${tone} ${root ? "root" : ""}" transform="translate(${pos.x} ${pos.y})" tabindex="0" role="button" data-lineage-node="${escape(table.id)}"><rect width="210" height="70" rx="8"/><rect class="node-icon-bg" x="12" y="18" width="32" height="32" rx="6"/><text class="node-icon" x="28" y="39">${tone === "view" ? "V" : "T"}</text><text class="node-name" x="54" y="29">${escape(shortSvgName(table.name, 17))}</text><text class="node-meta" x="54" y="50">${escape(shortSvgName(table.project, 17))}</text><title>${escape(table.id)}${table.comment ? ` · ${escape(table.comment)}` : ""}</title></g>${expand}`;
+    const controls = graph.scope === "first" ? directionalControls("table", table.id, table.name, pos, loadedDirections, expansions, expandingDirections, escape) : "";
+    return `<g class="lineage-svg-node ${tone} ${root ? "root" : ""}" transform="translate(${pos.x} ${pos.y})" tabindex="0" role="button" data-lineage-node="${escape(table.id)}"><rect width="210" height="70" rx="8"/><rect class="node-icon-bg" x="12" y="18" width="32" height="32" rx="6"/><text class="node-icon" x="28" y="39">${tone === "view" ? "V" : "T"}</text><text class="node-name" x="54" y="29">${escape(shortSvgName(table.name, 17))}</text><text class="node-meta" x="54" y="50">${escape(shortSvgName(table.project, 17))}</text><title>${escape(table.id)}${table.comment ? ` · ${escape(table.comment)}` : ""}</title></g>${controls}`;
   }).join("");
   const pathNotice = graph.scope === "path"
     ? graph.pathFound === false
@@ -694,7 +709,7 @@ function graphSvg(
         ? '<div class="graph-notice info">已识别反向输入，并按真实数据流方向展示。</div>'
         : ""
     : graph.truncated ? '<div class="graph-notice">节点数量较多，当前结果已截断。可从边界节点继续展开。</div>' : "";
-  return `<div class="lineage-svg-wrap" data-lineage-canvas><svg class="lineage-graph" id="lineage-graph-svg" viewBox="${view.x} ${view.y} ${view.width} ${view.height}" role="img" aria-label="${escape(graph.rootId)} 的表血缘图"><defs><marker id="lineage-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z"/></marker></defs>${paths}${nodes}</svg><div class="lineage-canvas-help compact-help"><strong>画布操作</strong><span>＋ 展开下一层 · − 收回下层 · Space + 拖动 / 中键平移 · 滚轮缩放</span></div>${pathNotice}</div>`;
+  return `<div class="lineage-svg-wrap" data-lineage-canvas><svg class="lineage-graph" id="lineage-graph-svg" data-lineage-layout-width="${layout.width}" data-lineage-layout-height="${layout.height}" viewBox="${view.x} ${view.y} ${view.width} ${view.height}" role="img" aria-label="${escape(graph.rootId)} 的表血缘图"><defs><marker id="lineage-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z"/></marker></defs>${paths}${nodes}</svg><div class="lineage-canvas-help compact-help"><strong>画布操作</strong><span>←＋ 仅上游 · ＋→ 仅下游 · 对应减号单独收回 · 滚轮连续缩放</span></div>${pathNotice}</div>`;
 }
 
 function graphLayout(graph: LineageGraph): { positions: Map<string, { x: number; y: number }>; width: number; height: number } {
@@ -748,19 +763,59 @@ function readSvgView(svg: SVGSVGElement): { x: number; y: number; width: number;
   return { x: view.x, y: view.y, width: view.width || 760, height: view.height || 440 };
 }
 
+function zoomBounds(svg: SVGSVGElement): { minimumWidth: number; maximumWidth: number } {
+  const layoutWidth = Math.max(1, Number(svg.dataset.lineageLayoutWidth) || readSvgView(svg).width);
+  return { minimumWidth: 48, maximumWidth: Math.max(1_000_000, layoutWidth * 16) };
+}
+
+function preserveAnchor(
+  view: { x: number; y: number; width: number; height: number } | null,
+  before?: { x: number; y: number },
+  after?: { x: number; y: number },
+): { x: number; y: number; width: number; height: number } | null {
+  if (!view || !before || !after) return view;
+  return { ...view, x: view.x + after.x - before.x, y: view.y + after.y - before.y };
+}
+
+function expansionKey(nodeId: string, direction: ExpansionDirection): string { return `${direction}\u0000${nodeId}`; }
+function directionsOf(direction: "up" | "down" | "both"): ExpansionDirection[] { return direction === "both" ? ["up", "down"] : [direction]; }
+
+function directionalControls<T>(
+  kind: "column" | "table",
+  nodeId: string,
+  label: string,
+  position: { x: number; y: number },
+  loadedDirections: Set<string>,
+  expansions: Map<string, DirectionalExpansion<T>>,
+  expandingDirections: Set<string>,
+  escape: (value: HtmlValue) => string,
+): string {
+  return (["up", "down"] as const).map((direction) => {
+    const key = expansionKey(nodeId, direction);
+    const collapse = expansions.has(key);
+    const loading = expandingDirections.has(key);
+    if (loadedDirections.has(key) && !collapse && !loading) return "";
+    const relation = direction === "up" ? "上游" : "下游";
+    const action = collapse ? "收回" : "展开";
+    const attribute = collapse ? `data-lineage-collapse-${kind}` : `data-lineage-expand-${kind}`;
+    const x = direction === "up" ? position.x - 18 : position.x + 192;
+    const glyph = loading ? "···" : direction === "up" ? `←${collapse ? "−" : "＋"}` : `${collapse ? "−" : "＋"}→`;
+    return `<g class="node-expand direction-control ${direction === "up" ? "upstream" : "downstream"} ${collapse ? "collapse" : ""} ${loading ? "loading" : ""}" transform="translate(${x} ${position.y + 23})" tabindex="0" role="button" aria-label="${action} ${escape(label)} 的${relation}" ${attribute}="${escape(nodeId)}" data-lineage-direction="${direction}"><rect width="36" height="22" rx="11"/><text x="18" y="15">${glyph}</text></g>`;
+  }).join("");
+}
+
 function connectedRelations(graph: DataWorksColumnGraph, selected: Set<string>): DataWorksColumnGraph["edges"] {
   return graph.edges.filter((edge) => selected.has(edge.sourceId) || selected.has(edge.targetId));
 }
 
-function mergeColumnGraphs(current: DataWorksColumnGraph, patch: DataWorksColumnGraph, expandedId: string): DataWorksColumnGraph {
+function mergeColumnGraphs(current: DataWorksColumnGraph, patch: DataWorksColumnGraph, expandedId: string, direction: ExpansionDirection): DataWorksColumnGraph {
   const nodes = new Map(current.nodes.map((node) => [node.id, node]));
   const parentDepth = nodes.get(expandedId)?.depth ?? 0;
-  const expanded = nodes.get(expandedId);
-  if (expanded) nodes.set(expandedId, { ...expanded, boundary: false });
   for (const node of patch.nodes) {
     if (node.id === expandedId) continue;
     const existing = nodes.get(node.id);
-    if (!existing) nodes.set(node.id, { ...node, root: false, depth: parentDepth + 1, boundary: true });
+    const offset = node.depth < 0 ? -1 : node.depth > 0 ? 1 : direction === "up" ? -1 : 1;
+    if (!existing) nodes.set(node.id, { ...node, root: false, depth: parentDepth + offset, boundary: true });
   }
   const edges = new Map(current.edges.map((edge) => [`${edge.sourceId}\u0000${edge.targetId}`, edge]));
   patch.edges.forEach((edge) => edges.set(`${edge.sourceId}\u0000${edge.targetId}`, edge));
@@ -775,38 +830,38 @@ function mergeTableGraphs(current: LineageGraph, patch: LineageGraph): LineageGr
   return { ...current, tables: [...tables.values()], edges: [...edges.values()], truncated: current.truncated || patch.truncated };
 }
 
-function composeColumnGraph(base: DataWorksColumnGraph, expansions: Map<string, DataWorksColumnGraph>): DataWorksColumnGraph {
+function composeColumnGraph(base: DataWorksColumnGraph, expansions: Map<string, DirectionalExpansion<DataWorksColumnGraph>>): DataWorksColumnGraph {
   let result = base; const applied = new Set<string>(); let changed = true;
   while (changed) {
     changed = false;
-    for (const [id, patch] of expansions) {
-      if (applied.has(id) || !result.nodes.some((node) => node.id === id)) continue;
-      result = mergeColumnGraphs(result, patch, id); applied.add(id); changed = true;
+    for (const [key, expansion] of expansions) {
+      if (applied.has(key) || !result.nodes.some((node) => node.id === expansion.nodeId)) continue;
+      result = mergeColumnGraphs(result, expansion.graph, expansion.nodeId, expansion.direction); applied.add(key); changed = true;
     }
   }
   return result;
 }
 
-function composeTableGraph(base: LineageGraph, expansions: Map<string, LineageGraph>): LineageGraph {
+function composeTableGraph(base: LineageGraph, expansions: Map<string, DirectionalExpansion<LineageGraph>>): LineageGraph {
   let result = base; const applied = new Set<string>(); let changed = true;
   while (changed) {
     changed = false;
-    for (const [id, patch] of expansions) {
-      if (applied.has(id) || !result.tables.some((table) => table.id === id)) continue;
-      result = mergeTableGraphs(result, patch); applied.add(id); changed = true;
+    for (const [key, expansion] of expansions) {
+      if (applied.has(key) || !result.tables.some((table) => table.id === expansion.nodeId)) continue;
+      result = mergeTableGraphs(result, expansion.graph); applied.add(key); changed = true;
     }
   }
   return result;
 }
 
-function pruneColumnExpansions(graph: DataWorksColumnGraph, expansions: Map<string, DataWorksColumnGraph>, expanded: Set<string>): void {
+function pruneColumnExpansions(graph: DataWorksColumnGraph, expansions: Map<string, DirectionalExpansion<DataWorksColumnGraph>>, loaded: Set<string>): void {
   const visible = new Set(graph.nodes.map((node) => node.id));
-  for (const id of expansions.keys()) if (!visible.has(id)) { expansions.delete(id); expanded.delete(id); }
+  for (const [key, expansion] of expansions) if (!visible.has(expansion.nodeId)) { expansions.delete(key); loaded.delete(key); }
 }
 
-function pruneTableExpansions(graph: LineageGraph, expansions: Map<string, LineageGraph>, expanded: Set<string>): void {
+function pruneTableExpansions(graph: LineageGraph, expansions: Map<string, DirectionalExpansion<LineageGraph>>, loaded: Set<string>): void {
   const visible = new Set(graph.tables.map((table) => table.id));
-  for (const id of expansions.keys()) if (!visible.has(id)) { expansions.delete(id); expanded.delete(id); }
+  for (const [key, expansion] of expansions) if (!visible.has(expansion.nodeId)) { expansions.delete(key); loaded.delete(key); }
 }
 
 function spread(index: number, count: number, height: number): number { return count <= 1 ? height / 2 - 35 : 50 + index * ((height - 120) / (count - 1)); }

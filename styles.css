@@ -3101,6 +3101,15 @@ body {
 .node-expand.collapse circle { fill: #f6f8fb; stroke: #9aa9bd; }
 .node-expand.collapse text { fill: #526174; }
 .node-expand.collapse:hover circle { fill: #eef2f7; stroke: #64748b; }
+.node-expand.direction-control rect { fill: #fff; stroke: #69b1ff; stroke-width: 1.2; filter: drop-shadow(0 2px 4px rgba(22, 119, 255, 0.16)); }
+.node-expand.direction-control text { fill: #1677ff; font-size: 10px; font-weight: 750; letter-spacing: -0.02em; }
+.node-expand.direction-control:hover rect,
+.node-expand.direction-control:focus-visible rect { fill: #e8f3ff; stroke: #1677ff; }
+.node-expand.direction-control.collapse rect { fill: #f6f8fb; stroke: #9aa9bd; }
+.node-expand.direction-control.collapse text { fill: #526174; }
+.node-expand.direction-control.collapse:hover rect,
+.node-expand.direction-control.collapse:focus-visible rect { fill: #eef2f7; stroke: #64748b; }
+.node-expand.direction-control.loading rect { fill: #e8f3ff; stroke-dasharray: 3 2; }
 
 .lineage-svg-node.view .node-icon-bg { fill: #f6ffed; stroke: #b7eb8f; }
 .lineage-svg-node.table .node-icon-bg { fill: #e6f4ff; stroke: #91caff; }

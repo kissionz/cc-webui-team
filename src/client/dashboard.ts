@@ -692,23 +692,23 @@ document.addEventListener("click", (event) => {
   const origin = event.target;
   if (!(origin instanceof Element)) return;
   const expandColumn = origin.closest<SVGElement>("[data-lineage-expand-column]");
-  if (expandColumn?.dataset.lineageExpandColumn) {
-    void lineageFeature.expandColumn(expandColumn.dataset.lineageExpandColumn).catch(showError);
+  if (expandColumn?.dataset.lineageExpandColumn && (expandColumn.dataset.lineageDirection === "up" || expandColumn.dataset.lineageDirection === "down")) {
+    void lineageFeature.expandColumn(expandColumn.dataset.lineageExpandColumn, expandColumn.dataset.lineageDirection).catch(showError);
     return;
   }
   const collapseColumn = origin.closest<SVGElement>("[data-lineage-collapse-column]");
-  if (collapseColumn?.dataset.lineageCollapseColumn) {
-    lineageFeature.collapseColumn(collapseColumn.dataset.lineageCollapseColumn);
+  if (collapseColumn?.dataset.lineageCollapseColumn && (collapseColumn.dataset.lineageDirection === "up" || collapseColumn.dataset.lineageDirection === "down")) {
+    lineageFeature.collapseColumn(collapseColumn.dataset.lineageCollapseColumn, collapseColumn.dataset.lineageDirection);
     return;
   }
   const expandTable = origin.closest<SVGElement>("[data-lineage-expand-table]");
-  if (expandTable?.dataset.lineageExpandTable) {
-    void lineageFeature.expandTable(expandTable.dataset.lineageExpandTable).catch(showError);
+  if (expandTable?.dataset.lineageExpandTable && (expandTable.dataset.lineageDirection === "up" || expandTable.dataset.lineageDirection === "down")) {
+    void lineageFeature.expandTable(expandTable.dataset.lineageExpandTable, expandTable.dataset.lineageDirection).catch(showError);
     return;
   }
   const collapseTable = origin.closest<SVGElement>("[data-lineage-collapse-table]");
-  if (collapseTable?.dataset.lineageCollapseTable) {
-    lineageFeature.collapseTable(collapseTable.dataset.lineageCollapseTable);
+  if (collapseTable?.dataset.lineageCollapseTable && (collapseTable.dataset.lineageDirection === "up" || collapseTable.dataset.lineageDirection === "down")) {
+    lineageFeature.collapseTable(collapseTable.dataset.lineageCollapseTable, collapseTable.dataset.lineageDirection);
     return;
   }
   const lineageNode = origin.closest<SVGElement>("[data-lineage-node]");

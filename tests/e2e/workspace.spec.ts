@@ -215,8 +215,11 @@ test("数据同步集中配置后可查询血缘并手动触发", async ({ page,
     contentType: "application/json",
     body: JSON.stringify({ tables: [root, upstream] }),
   }));
+  const tableExpansionDirections: string[] = [];
   await page.route("**/api/lineage/graph?*", (route) => {
-    const path = new URL(route.request().url()).searchParams.get("scope") === "path";
+    const parameters = new URL(route.request().url()).searchParams;
+    const path = parameters.get("scope") === "path";
+    if (parameters.get("table") === upstream.id && !path) tableExpansionDirections.push(parameters.get("direction") || "");
     return route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({
@@ -239,13 +242,25 @@ test("数据同步集中配置后可查询血缘并手动触发", async ({ page,
   const inspectorOverflow = await page.locator(".inspector-scroll").evaluate((element) => ({ clientHeight: element.clientHeight, scrollHeight: element.scrollHeight }));
   expect(inspectorOverflow.scrollHeight).toBeGreaterThan(inspectorOverflow.clientHeight);
   if (!isMobile) expect((await page.locator(".lineage-workbench").boundingBox())?.height ?? 0).toBeLessThanOrEqual(822);
-  const tableExpand = page.locator(`[data-lineage-expand-table="${upstream.id}"]`);
-  await expect(tableExpand).toBeVisible();
-  await tableExpand.click();
-  const tableCollapse = page.locator(`[data-lineage-collapse-table="${upstream.id}"]`);
-  await expect(tableCollapse).toBeVisible();
-  await tableCollapse.click();
-  await expect(tableExpand).toBeVisible();
+  const tableUpExpand = page.locator(`[data-lineage-expand-table="${upstream.id}"][data-lineage-direction="up"]`);
+  const tableDownExpand = page.locator(`[data-lineage-expand-table="${upstream.id}"][data-lineage-direction="down"]`);
+  await expect(tableUpExpand).toBeVisible();
+  await expect(tableDownExpand).toBeVisible();
+  await tableUpExpand.click();
+  const tableUpCollapse = page.locator(`[data-lineage-collapse-table="${upstream.id}"][data-lineage-direction="up"]`);
+  await expect(tableUpCollapse).toBeVisible();
+  await expect(tableDownExpand).toBeVisible();
+  expect(tableExpansionDirections).toContain("up");
+  await tableUpCollapse.click();
+  await expect(tableUpExpand).toBeVisible();
+  const graphSvg = page.locator("#lineage-graph-svg");
+  for (let index = 0; index < 10; index += 1) await graphSvg.dispatchEvent("wheel", { deltaY: -100, clientX: 200, clientY: 200 });
+  expect(Number((await graphSvg.getAttribute("viewBox"))?.split(/\s+/)[2])).toBeLessThan(240);
+  await page.getByRole("button", { name: "适应画布" }).click();
+  await expect.poll(async () => Number((await graphSvg.getAttribute("viewBox"))?.split(/\s+/)[2])).toBe(760);
+  for (let index = 0; index < 26; index += 1) await graphSvg.dispatchEvent("wheel", { deltaY: 100, clientX: 200, clientY: 200 });
+  expect(Number((await graphSvg.getAttribute("viewBox"))?.split(/\s+/)[2])).toBeGreaterThan(12_000);
+  await page.getByRole("button", { name: "适应画布" }).click();
 
   await page.getByRole("button", { name: "查路径" }).click();
   await page.getByLabel("表 B").fill("analytics.ods");
@@ -258,17 +273,22 @@ test("数据同步集中配置后可查询血缘并手动触发", async ({ page,
 
   const columnRootId = "maxcompute-column:::analytics::dws_sales:total_amount";
   const columnSourceId = "maxcompute-column:::analytics::ods_orders:amount";
-  await page.route("**/api/lineage/columns/graph", (route) => route.fulfill({
-    contentType: "application/json",
-    body: JSON.stringify({ graph: {
+  const columnExpansionDirections: string[] = [];
+  await page.route("**/api/lineage/columns/graph", (route) => {
+    const request = route.request().postDataJSON() as { entityId?: string; direction?: string };
+    if (request.entityId) columnExpansionDirections.push(request.direction || "");
+    return route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ graph: {
       rootId: columnRootId, depth: 1, direction: "both", truncated: false,
       nodes: [
         { id: columnSourceId, table: upstream.id, column: "amount", depth: -1, root: false, boundary: true },
         { id: columnRootId, table: root.id, column: "total_amount", depth: 0, root: true, boundary: false },
       ],
       edges: [{ sourceId: columnSourceId, sourceTable: upstream.id, sourceColumn: "amount", targetId: columnRootId, targetTable: root.id, targetColumn: "total_amount", taskId: "task-1", taskType: "sql", createTime: 1 }],
-    } }),
-  }));
+      } }),
+    });
+  });
   await page.route("**/api/lineage/columns/analyze-selection", async (route) => {
     await new Promise((resolve) => setTimeout(resolve, 350));
     await route.fulfill({
@@ -284,6 +304,13 @@ test("数据同步集中配置后可查询血缘并手动触发", async ({ page,
   await page.getByLabel("查询表").fill(root.id);
   await page.getByLabel("字段").fill("total_amount");
   await page.getByRole("button", { name: "查看字段血缘" }).click();
+  const columnUpExpand = page.locator(`[data-lineage-expand-column="${columnSourceId}"][data-lineage-direction="up"]`);
+  const columnDownExpand = page.locator(`[data-lineage-expand-column="${columnSourceId}"][data-lineage-direction="down"]`);
+  await expect(columnUpExpand).toBeVisible();
+  await columnUpExpand.click();
+  await expect(page.locator(`[data-lineage-collapse-column="${columnSourceId}"][data-lineage-direction="up"]`)).toBeVisible();
+  await expect(columnDownExpand).toBeVisible();
+  expect(columnExpansionDirections).toContain("up");
   await page.locator(`[data-lineage-field-node="${columnRootId}"]`).click();
   await page.getByRole("button", { name: "分析字段逻辑" }).click();
   await expect(page.locator(".lineage-inspector")).toContainText("Harness 分析中");
