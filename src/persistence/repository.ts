@@ -979,6 +979,11 @@ export class PersistenceRepository {
   }
 
   findLineagePath(sourceId: string, targetId: string, maximumDepth = 12): LineageEdge[] {
+    const direct = this.findDirectedLineagePath(sourceId, targetId, maximumDepth);
+    return direct.length ? direct : this.findDirectedLineagePath(targetId, sourceId, maximumDepth);
+  }
+
+  private findDirectedLineagePath(sourceId: string, targetId: string, maximumDepth: number): LineageEdge[] {
     const row = this.getOne(`WITH RECURSIVE p(node, route, depth) AS (
       SELECT ?, ?, 0
       UNION ALL

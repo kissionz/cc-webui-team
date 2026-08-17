@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ClaudeConfig, MaxComputeConfig } from "../src/domain/index.js";
 import { ColumnLineageAnalyzer } from "../src/lineage/column-analyzer.js";
-import { DataWorksColumnLineageClient, inferDataWorksRegion } from "../src/lineage/dataworks-lineage-client.js";
+import { DataWorksColumnLineageClient, inferDataWorksRegion, isDataWorksThrottleError } from "../src/lineage/dataworks-lineage-client.js";
 import type { MaxComputeQueryClient, MaxComputeRow } from "../src/lineage/maxcompute-client.js";
 import { PyOdpsClient, pythonInvocations } from "../src/lineage/pyodps-client.js";
 import { LineageScheduler, nextShanghaiRun, previousShanghaiDate } from "../src/lineage/scheduler.js";
@@ -129,6 +129,9 @@ describe("MaxCompute table lineage sync", () => {
     });
     expect(repo.listLineageColumns("analytics.dws_sales").map((column) => column.name)).toEqual(["customer_id", "ds"]);
     expect(repo.listLineageEdges("analytics.dws_sales", "up", 3, 20)).toHaveLength(2);
+    expect(repo.findLineagePath("analytics.dws_sales", "analytics.ods_orders", 6)).toEqual([
+      expect.objectContaining({ sourceTableId: "analytics.ods_orders", targetTableId: "analytics.dws_sales" }),
+    ]);
 
     expect(await service.sync("20260812")).toEqual({ projectsProcessed: 1, tablesProcessed: 1, columnsProcessed: 2, tasksStaged: 1, jobsProcessed: 0, edgesProcessed: 0 });
     expect(repo.listLineageEdges("analytics.dws_sales", "up", 3, 20).map((edge) => edge.occurrenceCount)).toEqual([1, 1]);
@@ -481,5 +484,31 @@ describe("DataWorks field lineage", () => {
     expect(graph.nodes.map((node) => `${node.table}.${node.column}`)).toEqual(expect.arrayContaining(["analytics.ods_orders.amount", "analytics.dwd_orders.amount", "analytics.dws_sales.total_amount"]));
     expect(graph.edges).toHaveLength(2);
     expect(graph.nodes.find((node) => node.id === targetId)).toMatchObject({ depth: 2, boundary: true });
+  });
+
+  it("expands one canonical field entity without listing columns again", async () => {
+    const rootId = "maxcompute-column:::analytics::dwd_orders:amount";
+    const targetId = "maxcompute-column:::analytics::dws_sales:total_amount";
+    let columnsCalled = false;
+    const client = {
+      async listColumns() { columnsCalled = true; return { body: { pagingInfo: { columns: [] } } }; },
+      async listLineages(request: Record<string, unknown>) {
+        const edge = request.srcEntityId === rootId ? { srcEntity: { id: rootId }, dstEntity: { id: targetId } } : null;
+        return { body: { pagingInfo: { totalCount: edge ? 1 : 0, lineages: edge ? [edge] : [] } } };
+      },
+    };
+    const lineage = new DataWorksColumnLineageClient({ credentials: { accessKeyId: "id", accessKeySecret: "secret" }, region: "cn-shanghai", client: client as never });
+    const graph = await lineage.queryEntityGraph({ entityId: rootId, direction: "down" });
+    expect(columnsCalled).toBe(false);
+    expect(graph.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: rootId, root: true, boundary: false }),
+      expect.objectContaining({ id: targetId, root: false, boundary: true }),
+    ]));
+    expect(graph.edges).toHaveLength(1);
+  });
+
+  it("recognizes DataWorks user throttling errors", () => {
+    expect(isDataWorksThrottleError(new Error("9990020002: code: 400, Throttling.User request id: abc"))).toBe(true);
+    expect(isDataWorksThrottleError(new Error("InvalidParameter"))).toBe(false);
   });
 });

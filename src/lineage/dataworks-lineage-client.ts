@@ -70,6 +70,11 @@ interface DataWorksRuntime {
 }
 const require = createRequire(import.meta.url);
 let cachedRuntime: DataWorksRuntime | null = null;
+let dataWorksRequestQueue: Promise<void> = Promise.resolve();
+let lastDataWorksRequestAt = 0;
+
+const DATAWORKS_MINIMUM_REQUEST_INTERVAL_MS = 240;
+const DATAWORKS_THROTTLE_RETRY_DELAYS_MS = [800, 1_600, 3_200];
 
 function loadDataWorksRuntime(): DataWorksRuntime {
   if (cachedRuntime) return cachedRuntime;
@@ -165,6 +170,26 @@ export class DataWorksColumnLineageClient {
     const root = parseMaxComputeColumn({ id: selected.id, name: selected.name });
     if (!root) return { rootId: "", depth: maximumDepth, direction, nodes: [], edges: [], truncated: false };
 
+    return this.walkGraph(root, maximumDepth, direction, maximumNodes);
+  }
+
+  async queryEntityGraph(input: {
+    entityId: string;
+    direction?: "up" | "down" | "both";
+    maximumNodes?: number;
+  }): Promise<DataWorksColumnGraph> {
+    const root = parseMaxComputeColumn({ id: input.entityId });
+    if (!root) return { rootId: "", depth: 1, direction: input.direction ?? "both", nodes: [], edges: [], truncated: false };
+    return this.walkGraph(root, 1, input.direction ?? "both", Math.max(20, Math.min(300, input.maximumNodes ?? 180)));
+  }
+
+  private async walkGraph(
+    root: NonNullable<ReturnType<typeof parseMaxComputeColumn>>,
+    maximumDepth: number,
+    direction: "up" | "down" | "both",
+    maximumNodes: number,
+  ): Promise<DataWorksColumnGraph> {
+
     const nodeDepth = new Map<string, number>([[root.id, 0]]);
     const nodeValues = new Map<string, ReturnType<typeof parseMaxComputeColumn>>([[root.id, root]]);
     const edges = new Map<string, DataWorksColumnRelation>();
@@ -173,16 +198,14 @@ export class DataWorksColumnLineageClient {
     let truncated = false;
     for (let currentDepth = 1; currentDepth <= maximumDepth && frontier.length; currentDepth += 1) {
       const next = new Set<string>();
-      for (let offset = 0; offset < frontier.length; offset += 6) {
-        const batch = frontier.slice(offset, offset + 6).filter((id) => !expanded.has(id));
-        const batches = await Promise.all(batch.map(async (id) => ({
+      for (const id of frontier.filter((value) => !expanded.has(value))) {
+        const item = {
           id,
           lineages: [
             ...(direction !== "down" ? await this.listDirection({ dstEntityId: id }) : []),
             ...(direction !== "up" ? await this.listDirection({ srcEntityId: id }) : []),
           ],
-        })));
-        for (const item of batches) {
+        };
           expanded.add(item.id);
           for (const relation of relationsFromLineages(item.lineages)) {
             const neighborId = relation.sourceId === item.id ? relation.targetId : relation.sourceId;
@@ -194,7 +217,6 @@ export class DataWorksColumnLineageClient {
             }
             if (nodeDepth.has(relation.sourceId) && nodeDepth.has(relation.targetId)) edges.set(relationKey(relation), relation);
           }
-        }
       }
       frontier = [...next];
     }
@@ -209,29 +231,33 @@ export class DataWorksColumnLineageClient {
 
   private async resolveColumn(input: { project: string; table: string; column: string }): Promise<DataWorksColumn | undefined> {
     const tableId = `maxcompute-table:::${input.project}::${input.table}`;
-    const columns = (await this.client.listColumns(this.columnsRequest({
+    const columns = (await this.call(() => this.client.listColumns(this.columnsRequest({
       tableId, name: input.column, pageNumber: 1, pageSize: 100, sortBy: "Name", order: "Asc",
-    }))).body?.pagingInfo?.columns ?? [];
+    })))).body?.pagingInfo?.columns ?? [];
     return columns.find((item) => item.name?.toLocaleLowerCase() === input.column.toLocaleLowerCase());
   }
 
   private async listDirection(filter: { srcEntityId?: string; dstEntityId?: string }): Promise<DataWorksLineage[]> {
     const output: DataWorksLineage[] = [];
     for (let pageNumber = 1; pageNumber <= this.maximumPages; pageNumber += 1) {
-      const response = await this.client.listLineages(this.lineagesRequest({
+      const response = await this.call(() => this.client.listLineages(this.lineagesRequest({
         ...filter,
         needAttachRelationship: true,
         pageNumber,
         pageSize: 100,
         sortBy: "Name",
         order: "Asc",
-      }));
+      })));
       const paging = response.body?.pagingInfo;
       const rows = paging?.lineages ?? [];
       output.push(...rows);
       if (!rows.length || output.length >= (paging?.totalCount ?? 0)) break;
     }
     return output;
+  }
+
+  private call<T>(operation: () => Promise<T>): Promise<T> {
+    return this.requestModels ? scheduleDataWorksRequest(operation) : operation();
   }
 
   private columnsRequest(values: Record<string, unknown>): object {
@@ -241,6 +267,43 @@ export class DataWorksColumnLineageClient {
   private lineagesRequest(values: Record<string, unknown>): object {
     return this.requestModels ? new this.requestModels.ListLineagesRequest(values) : values;
   }
+}
+
+export function isDataWorksThrottleError(error: unknown): boolean {
+  const message = dataWorksErrorText(error).toLocaleLowerCase();
+  return message.includes("throttling.user") || message.includes("throttling.system")
+    || message.includes("request is too frequent") || message.includes("too many requests");
+}
+
+async function scheduleDataWorksRequest<T>(operation: () => Promise<T>): Promise<T> {
+  const previous = dataWorksRequestQueue;
+  let release: () => void = () => undefined;
+  dataWorksRequestQueue = new Promise<void>((resolve) => { release = resolve; });
+  await previous;
+  try {
+    for (let attempt = 0; ; attempt += 1) {
+      const spacing = DATAWORKS_MINIMUM_REQUEST_INTERVAL_MS - (Date.now() - lastDataWorksRequestAt);
+      if (spacing > 0) await delay(spacing);
+      lastDataWorksRequestAt = Date.now();
+      try {
+        return await operation();
+      } catch (error) {
+        if (!isDataWorksThrottleError(error) || attempt >= DATAWORKS_THROTTLE_RETRY_DELAYS_MS.length) throw error;
+        await delay(DATAWORKS_THROTTLE_RETRY_DELAYS_MS[attempt]!);
+      }
+    }
+  } finally {
+    release();
+  }
+}
+
+function dataWorksErrorText(error: unknown): string {
+  if (error instanceof Error) return `${error.name} ${error.message} ${(error as Error & { code?: string }).code ?? ""}`;
+  try { return JSON.stringify(error); } catch { return String(error); }
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 export function inferDataWorksRegion(config: MaxComputeConfig, project: string): string | null {

@@ -6,7 +6,7 @@ import { previousShanghaiDate, type LineageScheduler } from "../../lineage/sched
 import { diagnoseLineageSource } from "../../lineage/sync-service.js";
 import type { MaxComputeCredentials } from "../../lineage/maxcompute-client.js";
 import { PyOdpsClient, PyOdpsError, type PyOdpsDiagnostic } from "../../lineage/pyodps-client.js";
-import { DataWorksColumnLineageClient, inferDataWorksRegion, splitMaxComputeTable, type DataWorksColumnGraph, type DataWorksColumnRelation } from "../../lineage/dataworks-lineage-client.js";
+import { DataWorksColumnLineageClient, inferDataWorksRegion, isDataWorksThrottleError, splitMaxComputeTable, type DataWorksColumnGraph, type DataWorksColumnRelation } from "../../lineage/dataworks-lineage-client.js";
 import type { SecretBox } from "../../security/secret-box.js";
 import { HttpError, readJsonBody, sendJson } from "../core.js";
 import { assertOnlyKeys, inputBoolean, inputEnum, inputInteger, inputString, inputStringList, objectBody, optionalQuery, queryInteger } from "../validation.js";
@@ -224,9 +224,10 @@ export class LineageRoutes {
     const depth = scope === "first" ? 1 : queryInteger(url, "depth", 6, 1, 12);
     const limit = queryInteger(url, "limit", 120, 10, 500);
     let rootId = inputString(url.searchParams.get("table"), "table", 3, 260);
+    let targetId: string | null = null;
     let edges: Array<LineageEdge & { depth?: number; collapsed?: number }>;
     if (scope === "path") {
-      const targetId = inputString(url.searchParams.get("target"), "target", 3, 260);
+      targetId = inputString(url.searchParams.get("target"), "target", 3, 260);
       edges = this.options.repository.findLineagePath(rootId, targetId, depth);
     } else {
       if (scope === "terminal" && direction === "both") {
@@ -240,9 +241,11 @@ export class LineageRoutes {
       }
     }
     const ids = new Set([rootId]);
+    if (targetId) ids.add(targetId);
     edges.forEach((edge) => { ids.add(edge.sourceTableId); ids.add(edge.targetTableId); });
     const tables = [...ids].map((id) => this.options.repository.getLineageTable(id) ?? tableStub(id));
-    sendJson(response, 200, { rootId, scope, direction, tables, edges, truncated: edges.length >= limit });
+    const pathReversed = scope === "path" && edges.length > 0 && edges[0]!.sourceTableId !== rootId;
+    sendJson(response, 200, { rootId, scope, direction, tables, edges, truncated: edges.length >= limit, pathReversed, pathFound: scope !== "path" || edges.length > 0 || rootId === targetId });
   }
 
   private async analyzeColumn({ request, response, auth }: RouteRequest): Promise<void> {
@@ -283,30 +286,40 @@ export class LineageRoutes {
   private async columnGraph({ request, response, auth }: RouteRequest): Promise<void> {
     this.assertDirectoryAccess(auth.user);
     const body = objectBody(await readJsonBody(request, this.options.maxBodySize));
-    assertOnlyKeys(body, ["table", "column", "depth", "direction"]);
+    assertOnlyKeys(body, ["table", "column", "depth", "direction", "entityId"]);
     const table = inputString(body.table, "table", 1, 260);
     const column = inputString(body.column, "column", 1, 260);
-    const depth = body.depth === undefined ? 3 : inputInteger(body.depth, "depth", 1, 5);
+    if (body.depth !== undefined) inputInteger(body.depth, "depth", 1, 5);
+    const depth = 1;
     const direction = body.direction === undefined ? "both" : inputEnum(body.direction, ["up", "down", "both"] as const, "direction");
+    const entityId = body.entityId === undefined ? null : inputString(body.entityId, "entityId", 1, 512);
     validateColumnReference(table, column);
+    if (entityId && !/^maxcompute-column:::[A-Za-z0-9_.-]+::[A-Za-z0-9_$.-]+:[A-Za-z0-9_$.-]+$/.test(entityId)) {
+      throw new HttpError(400, "INVALID_COLUMN_ENTITY", "字段血缘节点标识格式不正确。");
+    }
     const source = this.options.repository.getMaxComputeConfig();
     if (!source?.credentialCiphertext) throw new HttpError(400, "MAXCOMPUTE_CREDENTIAL_MISSING", "请先在系统设置的数据同步中配置 MaxCompute AccessKey。");
     const reference = splitMaxComputeTable(table, source.project);
     if (!reference) throw new HttpError(400, "INVALID_LINEAGE_IDENTIFIER", "无法确定字段所属的 MaxCompute 项目。");
     const region = inferDataWorksRegion(source, reference.project);
     if (!region) throw new HttpError(400, "DATAWORKS_REGION_UNKNOWN", "无法识别该项目所在的 DataWorks 地域。");
-    const cacheKey = [source.updatedAt, region, reference.project, reference.table, column.toLocaleLowerCase(), depth, direction].join("\u0000");
+    const cacheKey = [source.updatedAt, region, entityId || `${reference.project}.${reference.table}.${column.toLocaleLowerCase()}`, direction].join("\u0000");
     const cached = this.columnGraphCache.get(cacheKey);
     if (cached && cached.expiresAt > this.options.now()) return sendJson(response, 200, { graph: cached.graph, cached: true });
     const credentials = this.options.secretBox.decrypt<MaxComputeCredentials>(source.credentialCiphertext);
     try {
       const client = new DataWorksColumnLineageClient({ credentials, region });
-      const graph = await client.queryColumnGraph({ ...reference, column, depth, direction, maximumNodes: 180 });
-      this.columnGraphCache.set(cacheKey, { expiresAt: this.options.now() + 10 * 60 * 1_000, graph });
-      while (this.columnGraphCache.size > 100) this.columnGraphCache.delete(this.columnGraphCache.keys().next().value!);
-      this.options.audit(auth.user.id, "lineage.column.graph.viewed", "lineage_column", `${table}.${column}`, { depth, direction, nodes: graph.nodes.length, edges: graph.edges.length });
+      const graph = entityId
+        ? await client.queryEntityGraph({ entityId, direction, maximumNodes: 180 })
+        : await client.queryColumnGraph({ ...reference, column, depth, direction, maximumNodes: 180 });
+      this.columnGraphCache.set(cacheKey, { expiresAt: this.options.now() + 30 * 60 * 1_000, graph });
+      while (this.columnGraphCache.size > 500) this.columnGraphCache.delete(this.columnGraphCache.keys().next().value!);
+      this.options.audit(auth.user.id, entityId ? "lineage.column.node_expanded" : "lineage.column.graph.viewed", "lineage_column", entityId || `${table}.${column}`, { depth, direction, nodes: graph.nodes.length, edges: graph.edges.length });
       sendJson(response, 200, { graph, cached: false });
     } catch (error) {
+      if (isDataWorksThrottleError(error)) {
+        throw new HttpError(429, "DATAWORKS_RATE_LIMITED", "DataWorks 接口当前限流，系统已自动重试。请稍后点击节点继续展开。");
+      }
       throw new HttpError(502, "DATAWORKS_COLUMN_LINEAGE_FAILED", `DataWorks 字段血缘查询失败：${safeDataWorksError(error, credentials)}`);
     }
   }

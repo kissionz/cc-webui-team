@@ -645,7 +645,7 @@ document.addEventListener("input", (event) => {
     window.clearTimeout(sessionSearchTimer);
     sessionSearchTimer = window.setTimeout(() => void runAction("session-filter", target, changeSessionFilters), 280);
   }
-  if (target.matches("[data-lineage-table-search]")) lineageFeature.search(target.value);
+  if (target.matches("[data-lineage-table-search]")) lineageFeature.search(target.value, target.dataset.lineageTableSearch === "target" ? "target" : "source");
 });
 
 document.addEventListener("toggle", (event) => {
@@ -686,6 +686,16 @@ document.addEventListener("close", (event) => {
 document.addEventListener("click", (event) => {
   const origin = event.target;
   if (!(origin instanceof Element)) return;
+  const expandColumn = origin.closest<SVGElement>("[data-lineage-expand-column]");
+  if (expandColumn?.dataset.lineageExpandColumn) {
+    void lineageFeature.expandColumn(expandColumn.dataset.lineageExpandColumn).catch(showError);
+    return;
+  }
+  const expandTable = origin.closest<SVGElement>("[data-lineage-expand-table]");
+  if (expandTable?.dataset.lineageExpandTable) {
+    void lineageFeature.expandTable(expandTable.dataset.lineageExpandTable).catch(showError);
+    return;
+  }
   const lineageNode = origin.closest<SVGElement>("[data-lineage-node]");
   if (lineageNode?.dataset.lineageNode) {
     void lineageFeature.selectNode(lineageNode.dataset.lineageNode).catch(showError);
@@ -699,6 +709,11 @@ document.addEventListener("click", (event) => {
   }
   const target = origin.closest<HTMLButtonElement>("button");
   if (!target || target.disabled) return;
+
+  if (target.dataset.lineageTableChoice && (target.dataset.lineagePicker === "source" || target.dataset.lineagePicker === "target")) {
+    lineageFeature.chooseTable(target.dataset.lineagePicker, target.dataset.lineageTableChoice);
+    return;
+  }
 
   if (target.dataset.view) {
     setState({ activeView: target.dataset.view as AppView, mobileNavOpen: false }, "push");
@@ -783,11 +798,6 @@ document.addEventListener("click", (event) => {
     lineageFeature.setCanvasMode(target.dataset.lineageCanvasMode);
     return;
   }
-  if (target.dataset.lineageDepth) {
-    void runAction(`lineage-depth:${target.dataset.lineageDepth}`, target, () => lineageFeature.setColumnDepth(Number(target.dataset.lineageDepth)));
-    return;
-  }
-
   const key = `click:${actionName || target.dataset.permission || target.dataset.deleteSession || target.dataset.deleteTeam || target.dataset.toggleUser || target.dataset.copyMessage || "action"}`;
   void runAction(key, target, async () => {
     if (actionName === "logout") {
@@ -816,6 +826,7 @@ document.addEventListener("click", (event) => {
     else if (actionName === "lineage-source-diagnostic") await lineageFeature.diagnoseSource();
     else if (actionName === "lineage-reprocess") await lineageFeature.reprocess();
     else if (actionName === "lineage-close-detail") lineageFeature.closeDetail();
+    else if (actionName === "lineage-swap-path") lineageFeature.swapPath();
     else if (actionName === "lineage-zoom-in") lineageFeature.zoomBy(0.15);
     else if (actionName === "lineage-zoom-out") lineageFeature.zoomBy(-0.15);
     else if (actionName === "lineage-fit") lineageFeature.fit();

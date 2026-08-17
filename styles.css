@@ -2723,7 +2723,10 @@ body {
 }
 
 .lineage-querybar {
+  position: relative;
+  z-index: 10;
   padding: 16px 18px;
+  overflow: visible;
   border-bottom: 1px solid var(--line);
   background: linear-gradient(180deg, #fff 0%, #fbfcff 100%);
 }
@@ -2774,6 +2777,49 @@ body {
   gap: 10px;
 }
 
+.lineage-table-command-row {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.lineage-direction-field { width: min(220px, 34vw); }
+
+.lineage-standard-query {
+  display: grid;
+  grid-template-columns: minmax(320px, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+}
+
+.lineage-path-query {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) 38px minmax(260px, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+  padding: 13px;
+  border: 1px solid #d8e5f5;
+  border-radius: 10px;
+  background: #f8fbff;
+}
+
+.lineage-path-endpoint { min-width: 0; display: grid; gap: 7px; }
+.lineage-path-endpoint > .endpoint-label { color: var(--brand-dark); font-size: 11px; font-weight: 700; letter-spacing: 0.02em; }
+.lineage-path-swap {
+  width: 36px;
+  height: 36px;
+  margin-bottom: 1px;
+  border: 1px solid #b7d5ff;
+  border-radius: 50%;
+  background: #fff;
+  color: var(--brand);
+  font-size: 18px;
+  box-shadow: 0 2px 7px rgba(22, 119, 255, 0.1);
+}
+.lineage-path-swap:hover { border-color: var(--brand); background: #eef6ff; }
+.lineage-path-hint { margin: 0 0 7px auto; color: var(--subtle); font-size: 12px; }
+
 .lineage-scope-field { min-width: 238px; }
 
 .lineage-scope-buttons,
@@ -2822,7 +2868,8 @@ body {
   gap: 6px;
 }
 
-.lineage-field > span {
+.lineage-field > span,
+.lineage-field > label {
   overflow: hidden;
   color: #455468;
   font-size: 12px;
@@ -2830,6 +2877,53 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.lineage-field > .lineage-table-picker {
+  position: relative;
+  display: block;
+  overflow: visible;
+  color: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.lineage-table-menu {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 5px);
+  right: 0;
+  left: 0;
+  max-height: 292px;
+  padding: 5px;
+  overflow-y: auto;
+  border: 1px solid #ccd9e9;
+  border-radius: 9px;
+  background: #fff;
+  box-shadow: 0 16px 36px rgba(28, 58, 96, 0.18);
+}
+
+.lineage-table-menu button {
+  width: 100%;
+  min-height: 49px;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  padding: 7px 9px;
+  border-radius: 6px;
+  color: #26364b;
+  text-align: left;
+}
+
+.lineage-table-menu button:hover,
+.lineage-table-menu button[aria-selected="true"] { background: #edf5ff; }
+.lineage-table-menu button > i { width: 14px; height: 14px; border: 1.5px solid #9aabc1; border-radius: 50%; background: #fff; }
+.lineage-table-menu button[aria-selected="true"] > i { border: 4px solid var(--brand); }
+.lineage-table-menu button > span { min-width: 0; display: grid; gap: 2px; }
+.lineage-table-menu strong { overflow-wrap: anywhere; color: #1c2c42; font-size: 12px; line-height: 1.35; }
+.lineage-table-menu small { overflow: hidden; color: var(--subtle); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 
 .lineage-submit { min-width: 100px; }
 
@@ -2936,6 +3030,7 @@ body {
 }
 
 .lineage-canvas-toolbar > div { display: flex; align-items: center; gap: 6px; }
+.lineage-expand-hint { margin-right: 4px; color: #718096; font-size: 11px; }
 .icon-button.compact { width: 30px; height: 30px; }
 .button.compact { min-height: 30px; padding: 0 9px; font-size: 12px; }
 
@@ -2998,6 +3093,12 @@ body {
 
 .boundary-dot { fill: #faad14; stroke: #fff; stroke-width: 2; }
 
+.node-expand { cursor: pointer; }
+.node-expand circle { fill: #fff; stroke: #69b1ff; stroke-width: 1.4; filter: drop-shadow(0 2px 4px rgba(22, 119, 255, 0.18)); }
+.node-expand text { fill: #1677ff; font-size: 15px; font-weight: 700; text-anchor: middle; pointer-events: none; }
+.node-expand:hover circle { fill: #e8f3ff; stroke: #1677ff; }
+.node-expand.loading circle { fill: #e8f3ff; stroke-dasharray: 3 2; }
+
 .lineage-svg-node.view .node-icon-bg { fill: #f6ffed; stroke: #b7eb8f; }
 .lineage-svg-node.table .node-icon-bg { fill: #e6f4ff; stroke: #91caff; }
 .lineage-svg-node.root .node-icon-bg { fill: #1677ff; stroke: #1677ff; }
@@ -3042,6 +3143,8 @@ body {
   color: #874d00;
   font-size: 12px;
 }
+.graph-notice.info { border-color: #91caff; background: #e6f4ff; color: #0958d9; }
+.graph-notice.error { border-color: #ffa39e; background: #fff1f0; color: #cf1322; }
 
 .lineage-selection-box {
   position: absolute;
@@ -3310,7 +3413,7 @@ body {
 
 @media (max-width: 1280px) {
   .lineage-controls { grid-template-columns: minmax(220px, 1.4fr) repeat(2, minmax(140px, 0.7fr)) auto; }
-  .lineage-target-field { grid-column: 1 / 3; }
+  .lineage-path-query { grid-template-columns: minmax(220px, 1fr) 36px minmax(220px, 1fr) auto; }
   .lineage-settings-form { grid-template-columns: repeat(3, minmax(150px, 1fr)); }
   .toggle-row { grid-column: 1; }
   .lineage-args-field { grid-column: 1 / 3; }
@@ -3324,6 +3427,8 @@ body {
   .lineage-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .lineage-table-field { grid-column: 1 / -1; }
   .lineage-submit { min-height: 40px; }
+  .lineage-path-query { grid-template-columns: minmax(0, 1fr) 36px minmax(0, 1fr); }
+  .lineage-path-query > .lineage-submit { grid-column: 1 / -1; }
 }
 
 @media (max-width: 760px) {
@@ -3334,6 +3439,13 @@ body {
   .lineage-mode-row { align-items: flex-start; flex-direction: column; gap: 7px; }
   .lineage-controls,
   .lineage-settings-form { grid-template-columns: minmax(0, 1fr); }
+  .lineage-table-command-row { align-items: stretch; flex-direction: column; gap: 10px; }
+  .lineage-direction-field { width: auto; }
+  .lineage-path-hint { margin: 0; }
+  .lineage-standard-query { grid-template-columns: minmax(0, 1fr); }
+  .lineage-path-query { grid-template-columns: minmax(0, 1fr); }
+  .lineage-path-swap { margin: 0 auto; transform: rotate(90deg); }
+  .lineage-path-query > .lineage-submit { grid-column: auto; }
   .lineage-table-field,
   .lineage-target-field,
   .lineage-args-field { grid-column: auto; }

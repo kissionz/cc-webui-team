@@ -206,29 +206,48 @@ test("数据同步集中配置后可查询血缘并手动触发", async ({ page,
     lastBizDate: "20260812", accessCount: 24, accessBytes: 2048, createdAt: 1, updatedAt: 1,
   });
   const root = table("analytics.dws_sales", "dws_sales");
-  const upstream = table("analytics.ods_orders", "ods_orders");
+  const upstream = table("analytics.ods_orders", "ods_orders_with_an_extremely_long_table_name");
   const columns = Array.from({ length: 80 }, (_, index) => ({
     tableId: root.id, name: `field_${String(index + 1).padStart(3, "0")}`, ordinalPosition: index + 1,
     dataType: "STRING", comment: `字段 ${index + 1}`, nullable: true, partitionKey: false, primaryKey: false, updatedAt: 1,
   }));
-  await page.route("**/api/lineage/graph?*", (route) => route.fulfill({
+  await page.route(/\/api\/lineage\/tables(?:\?.*)?$/, (route) => route.fulfill({
     contentType: "application/json",
-    body: JSON.stringify({
-      rootId: root.id, scope: "first", direction: "both", tables: [root, upstream], truncated: false,
-      edges: [{ sourceTableId: upstream.id, targetTableId: root.id, firstSeenAt: 1, lastSeenAt: 1, occurrenceCount: 1, lastInstanceId: "i1", lastTaskName: "daily_sales", lastOwnerName: "scheduler", lastNodeId: "n1", lastNodeName: "销售日汇总", lastOnDuty: "u42", updatedAt: 1 }],
-    }),
+    body: JSON.stringify({ tables: [root, upstream] }),
   }));
+  await page.route("**/api/lineage/graph?*", (route) => {
+    const path = new URL(route.request().url()).searchParams.get("scope") === "path";
+    return route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        rootId: root.id, scope: path ? "path" : "first", direction: "both", tables: [root, upstream], truncated: false,
+        pathReversed: path, pathFound: true,
+        edges: [{ sourceTableId: upstream.id, targetTableId: root.id, firstSeenAt: 1, lastSeenAt: 1, occurrenceCount: 1, lastInstanceId: "i1", lastTaskName: "daily_sales", lastOwnerName: "scheduler", lastNodeId: "n1", lastNodeName: "销售日汇总", lastOnDuty: "u42", updatedAt: 1 }],
+      }),
+    });
+  });
   await page.route("**/api/lineage/tables/analytics.dws_sales", (route) => route.fulfill({
     contentType: "application/json",
     body: JSON.stringify({ table: root, columns, relations: { upstream: 1, downstream: 0 } }),
   }));
-  await page.getByLabel("查询表").fill("analytics.dws_sales");
+  await page.getByLabel("查询表").fill("analytics.dws");
+  await page.getByRole("option", { name: /analytics\.dws_sales/ }).click();
   await page.getByRole("button", { name: "查询血缘" }).click();
   await expect(page.locator(".lineage-svg-node", { hasText: "dws_sales" })).toBeVisible();
+  await expect(page.locator(".lineage-svg-node", { hasText: "…" })).toBeVisible();
   await expect(page.locator(".lineage-inspector")).toContainText("销售日汇总");
   const inspectorOverflow = await page.locator(".inspector-scroll").evaluate((element) => ({ clientHeight: element.clientHeight, scrollHeight: element.scrollHeight }));
   expect(inspectorOverflow.scrollHeight).toBeGreaterThan(inspectorOverflow.clientHeight);
   if (!isMobile) expect((await page.locator(".lineage-workbench").boundingBox())?.height ?? 0).toBeLessThanOrEqual(822);
+
+  await page.getByRole("button", { name: "查路径" }).click();
+  await page.getByLabel("表 B").fill("analytics.ods");
+  await page.getByRole("option", { name: /analytics\.ods_orders/ }).click();
+  await page.getByRole("button", { name: "交换两张表" }).click();
+  await expect(page.getByLabel("表 A")).toHaveValue("analytics.ods_orders");
+  await page.getByRole("button", { name: "交换两张表" }).click();
+  await page.getByRole("button", { name: "查询两表路径" }).click();
+  await expect(page.getByText("已识别反向输入，并按真实数据流方向展示。")).toBeVisible();
 
   const syncRequest = page.waitForRequest((request) => request.method() === "POST" && new URL(request.url()).pathname === "/api/lineage/sync");
   await page.route("**/api/lineage/sync", (route) => route.fulfill({ status: 202, contentType: "application/json", body: JSON.stringify({ accepted: true }) }));
