@@ -47,6 +47,14 @@ export function createTeamViews(deps: TeamViewDeps) {
     icons, fmt, badge, escapeHtml, compactText, canApprove, canManageSession,
   });
 
+function harnessLabel(value: HtmlValue): string {
+  return String(value ?? "").replace(/Claude Code/gi, "Harness").replace(/\bClaude\b/gi, "Harness");
+}
+
+function displayAgentName(agent?: Agent): string {
+  return agent?.type === "claude_code" ? "Harness Agent" : harnessLabel(agent?.name || "Agent");
+}
+
 function renderTeams(): string {
   const user = currentUser();
   if (!user) return "";
@@ -69,7 +77,7 @@ function renderTeams(): string {
       return `
         <article class="card team-card">
           <div>
-            <h3>${escapeHtml(team.name)}</h3>
+            <h3>${escapeHtml(harnessLabel(team.name))}</h3>
             <div class="meta">${badge(role, role === "viewer" ? "" : "green")} ${running ? badge(`${running} running`, "blue") : badge("idle")}</div>
           </div>
           <div class="workspace">${escapeHtml(team.workspacePath)}</div>
@@ -89,12 +97,12 @@ function renderTeams(): string {
       <div class="dashboard-hero">
         <div>
           <p class="eyebrow">Team Agent Console</p>
-          <h2>统一管理 Claude Code 工作区</h2>
+          <h2>统一管理 Harness 工作区</h2>
           <p>查看团队、运行会话、待审批动作和 CLI 健康状态。进入团队后可以直接发送任务、观察输出和调整工作区。</p>
         </div>
         <div class="health-pill ${cli.available ? "ok" : "down"}">
           ${badge(cli.label, cli.tone)}
-          <span>${escapeHtml(cli.detail)}</span>
+          <span>${escapeHtml(harnessLabel(cli.detail))}</span>
         </div>
       </div>
       <div class="metric-row">
@@ -170,7 +178,7 @@ function renderTeamDetail(): string {
   `;
 
   return appRoot(`
-    ${topbar(team.name, `${team.workspacePath} · 我的角色 ${role}`, actions)}
+    ${topbar(harnessLabel(team.name), `${team.workspacePath} · 我的角色 ${role}`, actions)}
     <section class="content team-content">
       <div class="team-layout ${state.teamRailOpen ? "team-rail-open" : ""} ${state.rightRailOpen ? "right-rail-open" : ""}">
         <button class="workspace-drawer-scrim" aria-label="关闭侧栏" data-action="close-workspace-drawers"></button>
@@ -188,7 +196,7 @@ function renderTeamRail(team: Team, activeSession?: Session): string {
   return `
     <aside class="panel team-rail" id="team-rail">
       <div class="team-summary">
-        <div class="section-title"><h3>${escapeHtml(team.name)}</h3>${badge(running ? `${running} running` : "idle", running ? "blue" : "")}</div>
+        <div class="section-title"><h3>${escapeHtml(harnessLabel(team.name))}</h3>${badge(running ? `${running} running` : "idle", running ? "blue" : "")}</div>
         <p>${escapeHtml(team.workspacePath)}</p>
         <div class="meta"><span>${members.length} 名成员</span><span>${fmt(team.updatedAt)}</span></div>
       </div>
@@ -291,7 +299,7 @@ function renderSessionRow(session: Session, activeSession?: Session): string {
 
 function renderChat(team: Team, session?: Session): string {
   if (!session) {
-    return `<section class="panel chat-panel" id="chat-panel"><div class="empty">创建一个 Claude Code 会话开始协作</div></section>`;
+    return `<section class="panel chat-panel" id="chat-panel"><div class="empty">创建一个 Harness 会话开始协作</div></section>`;
   }
   const allMessages = state.messages.filter((message) => message.sessionId === session.id);
   const messages = allMessages.slice(-CHAT_RENDER_LIMIT);
@@ -432,10 +440,10 @@ function turnEventKey(messages: Message[]): string {
 function composerPlaceholder(team: Team, session: Session): string {
   if (!canWriteTeam(team.id)) return "viewer 角色只能查看会话";
   if (!canAskSession(session)) return "共享会话只读，只有会话创建者可以继续提问";
-  if (session.status === "idle") return "向 Claude Code 发送任务";
-  if (session.status === "running") return "Claude Code 正在执行，可以追加引导，不会开启新会话";
+  if (session.status === "idle") return "向 Harness 发送任务";
+  if (session.status === "running") return "Harness 正在执行，可以追加引导，不会开启新会话";
   if (session.status === "waiting_permission") return "当前任务等待审批";
-  return "继续发送下一轮消息，会自动恢复 Claude Code 会话上下文";
+  return "继续发送下一轮消息，会自动恢复 Harness 会话上下文";
 }
 
 function renderMessage(message: Message): string {
@@ -448,7 +456,7 @@ function renderMessage(message: Message): string {
     message.senderType === "user"
       ? userName(message.senderId)
       : message.senderType === "agent"
-        ? agentById(message.senderId || undefined)?.name || "Agent"
+        ? displayAgentName(agentById(message.senderId || undefined))
         : message.senderType;
   const rich = message.senderType === "agent";
   const guidance = message.senderType === "user" && message.metadata?.guidance;
@@ -482,8 +490,8 @@ function renderTimelineEvent(message: Message): string {
 
 function timelineEventMeta(message: Message): { title: string; detail: HtmlValue; icon: string; tone: string; spinner?: boolean } {
   const type = message.metadata?.type || (message.senderType === "system" ? "system" : "tool");
-  if (type === "command") return { title: message.metadata?.claudeSessionId ? "已恢复 Claude Code 会话" : "已启动 Claude Code 会话", detail: message.content, icon: icons.terminal, tone: "tool" };
-  if (type === "input") return { title: "已发送到 Claude Code", detail: message.content, icon: icons.terminal, tone: "tool" };
+  if (type === "command") return { title: message.metadata?.claudeSessionId ? "已恢复 Harness 会话" : "已启动 Harness 会话", detail: harnessLabel(message.content), icon: icons.terminal, tone: "tool" };
+  if (type === "input") return { title: "已发送到 Harness", detail: message.content, icon: icons.terminal, tone: "tool" };
   if (type === "tool_call") {
     const running = message.metadata?.status === "running";
     return { title: `${running ? "正在调用" : "已调用"} ${message.metadata?.name || "工具"}`, detail: message.content, icon: icons.terminal, tone: running ? "pending" : "done", spinner: running };
@@ -530,14 +538,14 @@ function renderRightRail(team: Team, session?: Session): string {
       <div class="panel-header"><h2 class="panel-title">运行侧栏</h2>${badge(cli.label, cli.tone)}</div>
       <div class="side-stack">
         <div class="side-card">
-          <h4>Claude Code CLI</h4>
-          <p>${escapeHtml(cli.message)}</p>
+          <h4>Harness Runtime</h4>
+          <p>${escapeHtml(harnessLabel(cli.message))}</p>
         </div>
         <div class="side-card">
           <h4>Agent 状态</h4>
           ${agents.map((agent) => {
             const status = effectiveAgentStatus(agent, session);
-            return `<div class="agent-row"><div><strong>${escapeHtml(agent.name)}</strong><p>${escapeHtml(agent.command)} · ${escapeHtml(status.label)}</p></div><span title="${escapeHtml(status.label)}" class="status-dot ${status.className}"></span></div>`;
+            return `<div class="agent-row"><div><strong>${escapeHtml(displayAgentName(agent))}</strong><p>Harness Runtime · ${escapeHtml(status.label)}</p></div><span title="${escapeHtml(status.label)}" class="status-dot ${status.className}"></span></div>`;
           }).join("")}
         </div>
         <div class="side-card">

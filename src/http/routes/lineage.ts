@@ -259,7 +259,7 @@ export class LineageRoutes {
     const column = inputString(body.column, "column", 1, 260);
     if (!/^[A-Za-z0-9_.-]+$/.test(table) || !/^[A-Za-z0-9_$-]+$/.test(column)) throw new HttpError(400, "INVALID_LINEAGE_IDENTIFIER", "表名或字段名格式不正确。");
     const config = this.options.claudeConfig();
-    if (!config?.enabled || !config.available || !config.authenticated) throw new HttpError(503, "CLAUDE_UNAVAILABLE", "Claude Code 当前不可用或未登录。");
+    if (!config?.enabled || !config.available || !config.authenticated) throw new HttpError(503, "CLAUDE_UNAVAILABLE", "Harness 当前不可用或未登录。");
     try {
       const platform = await this.dataWorksColumnRelations(table, column);
       const result = await this.options.analyzer.analyze({
@@ -356,7 +356,7 @@ export class LineageRoutes {
       return relation;
     });
     const config = this.options.claudeConfig();
-    if (!config?.enabled || !config.available || !config.authenticated) throw new HttpError(503, "CLAUDE_UNAVAILABLE", "Claude Code 当前不可用或未登录。");
+    if (!config?.enabled || !config.available || !config.authenticated) throw new HttpError(503, "CLAUDE_UNAVAILABLE", "Harness 当前不可用或未登录。");
     try {
       const result = await this.options.analyzer.analyzeSelection({ cwd: team.workspacePath, nodes, relations, config });
       this.options.audit(auth.user.id, "lineage.column.selection_analyzed", "lineage_column", nodes.map((node) => `${node.table}.${node.column}`).join(","), { teamId, nodes: nodes.length, relations: relations.length, groups: result.groups.length, status: result.status });
@@ -369,28 +369,28 @@ export class LineageRoutes {
 
   private async dataWorksColumnRelations(table: string, column: string): Promise<{ relations: DataWorksColumnRelation[]; warnings: string[] }> {
     const source = this.options.repository.getMaxComputeConfig();
-    if (!source?.credentialCiphertext) return { relations: [], warnings: ["未配置 MaxCompute AccessKey，字段血缘已使用 Claude Code 本地分析。"] };
+    if (!source?.credentialCiphertext) return { relations: [], warnings: ["未配置 MaxCompute AccessKey，字段血缘已使用 Harness 本地分析。"] };
     const reference = splitMaxComputeTable(table, source.project);
-    if (!reference) return { relations: [], warnings: ["无法从表名确定 MaxCompute 项目，字段血缘已使用 Claude Code 本地分析。"] };
+    if (!reference) return { relations: [], warnings: ["无法从表名确定 MaxCompute 项目，字段血缘已使用 Harness 本地分析。"] };
     const region = inferDataWorksRegion(source, reference.project);
-    if (!region) return { relations: [], warnings: ["无法识别 DataWorks 地域，字段血缘已使用 Claude Code 本地分析。"] };
+    if (!region) return { relations: [], warnings: ["无法识别 DataWorks 地域，字段血缘已使用 Harness 本地分析。"] };
     let credentials: MaxComputeCredentials;
     try {
       credentials = this.options.secretBox.decrypt<MaxComputeCredentials>(source.credentialCiphertext);
     } catch {
-      return { relations: [], warnings: ["MaxCompute AccessKey 无法解密，字段血缘已使用 Claude Code 本地分析。"] };
+      return { relations: [], warnings: ["MaxCompute AccessKey 无法解密，字段血缘已使用 Harness 本地分析。"] };
     }
     try {
       const client = new DataWorksColumnLineageClient({ credentials, region });
       const relations = await client.queryColumn({ project: reference.project, table: reference.table, column });
       return {
         relations,
-        warnings: relations.length ? [] : ["DataWorks 未返回该字段的上下游关系，已继续使用 Claude Code 搜索工作空间。"],
+        warnings: relations.length ? [] : ["DataWorks 未返回该字段的上下游关系，已继续使用 Harness 搜索工作空间。"],
       };
     } catch (error) {
       return {
         relations: [],
-        warnings: [`DataWorks 字段血缘查询失败，已回退到 Claude Code：${safeDataWorksError(error, credentials)}`],
+        warnings: [`DataWorks 字段血缘查询失败，已回退到 Harness：${safeDataWorksError(error, credentials)}`],
       };
     }
   }

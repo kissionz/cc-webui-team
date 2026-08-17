@@ -480,7 +480,12 @@ function badge(text: HtmlValue, tone = ""): string {
 }
 
 function titleText(value: HtmlValue): string {
-  return String(value || "新会话").replace(/\s+/g, " ").trim().slice(0, 50) || "新会话";
+  return String(value || "新会话")
+    .replace(/Claude Code/gi, "Harness")
+    .replace(/\bClaude\b/gi, "Harness")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 50) || "新会话";
 }
 
 function compactText(value: unknown, max = 900): string {
@@ -691,9 +696,19 @@ document.addEventListener("click", (event) => {
     void lineageFeature.expandColumn(expandColumn.dataset.lineageExpandColumn).catch(showError);
     return;
   }
+  const collapseColumn = origin.closest<SVGElement>("[data-lineage-collapse-column]");
+  if (collapseColumn?.dataset.lineageCollapseColumn) {
+    lineageFeature.collapseColumn(collapseColumn.dataset.lineageCollapseColumn);
+    return;
+  }
   const expandTable = origin.closest<SVGElement>("[data-lineage-expand-table]");
   if (expandTable?.dataset.lineageExpandTable) {
     void lineageFeature.expandTable(expandTable.dataset.lineageExpandTable).catch(showError);
+    return;
+  }
+  const collapseTable = origin.closest<SVGElement>("[data-lineage-collapse-table]");
+  if (collapseTable?.dataset.lineageCollapseTable) {
+    lineageFeature.collapseTable(collapseTable.dataset.lineageCollapseTable);
     return;
   }
   const lineageNode = origin.closest<SVGElement>("[data-lineage-node]");

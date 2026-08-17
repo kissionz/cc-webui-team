@@ -67,7 +67,7 @@ function renderMcpPermission(permission: Permission, canAct: boolean): string {
     <div class="permission-card">
       <div class="meta">${badge("MCP 工具", "amber")} ${permission.serverName ? badge(permission.serverName, "blue") : ""}</div>
       <h4>${escapeHtml(permission.summary)}</h4>
-      <p>${escapeHtml(permission.reason || "Claude Code 请求使用该工具。")}</p>
+      <p>${escapeHtml(permission.reason || "Harness 请求使用该工具。")}</p>
       ${renderPermissionInput(permission)}
       <div class="meta">过期 ${fmt(permission.expiresAt)} · ${escapeHtml(permission.status)}</div>
       <div class="permission-actions">

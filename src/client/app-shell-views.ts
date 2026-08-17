@@ -31,8 +31,8 @@ export function createAppShellViews(deps: AppShellViewDeps) {
         <button class="mobile-nav-scrim" aria-label="关闭导航" data-action="toggle-mobile-nav"></button>
         <aside class="sidebar">
           <div class="brand">
-            <div class="brand-mark">CC</div>
-            <div class="brand-copy"><div class="brand-title">Claude Code</div><div class="brand-subtitle">Team Platform</div></div>
+            <div class="brand-mark">H</div>
+            <div class="brand-copy"><div class="brand-title">Harness</div><div class="brand-subtitle">Team Platform</div></div>
             <button class="sidebar-toggle" title="${sidebarLabel}" aria-label="${sidebarLabel}" data-action="toggle-sidebar">${icons.panel}</button>
           </div>
           <nav class="nav-group">${nav}</nav>
@@ -59,7 +59,7 @@ export function createAppShellViews(deps: AppShellViewDeps) {
     if (!element) throw new Error("应用挂载节点不存在");
     element.innerHTML = `
       <div class="login-page">
-        <section class="login-copy"><h1>Claude Code Team Platform</h1><p>把服务器上的 Claude Code CLI 封装成团队可共享、可观察、可审批的 Agent 工作台。</p></section>
+        <section class="login-copy"><h1>Harness Team Platform</h1><p>把服务器上的 Harness 运行能力封装成团队可共享、可观察、可审批的 Agent 工作台。</p></section>
         <section class="login-panel">
           <form class="login-box" data-form="login">
             <h2>登录工作台</h2><p>管理员账号为 admin，密码来自部署环境变量 ADMIN_PASSWORD。</p>

@@ -15,10 +15,10 @@ test("管理员可登录、筛选会话并查看审计", async ({ page, isMobile
   await page.getByRole("button", { name: "打开工作台" }).click();
   await page.keyboard.press("Tab");
   await expect(page.locator(":focus")).toBeVisible();
-  await expect(page.locator("h1", { hasText: "Claude Code Platform" })).toBeVisible();
+  await expect(page.locator("h1", { hasText: "Harness Platform" })).toBeVisible();
   const search = page.getByPlaceholder("搜索标题或消息");
   await search.fill("部署后的第一条");
-  await expect(page.getByRole("button", { name: /部署后的第一条 Claude Code 会话 idle/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /部署后的第一条 Harness 会话 idle/ })).toBeVisible();
   expect(await page.locator("body").evaluate((body) => body.scrollWidth <= body.clientWidth + 1)).toBe(true);
   await page.setViewportSize({ width: 1024, height: 800 });
   expect(await page.locator("body").evaluate((body) => body.scrollWidth <= body.clientWidth + 1)).toBe(true);
@@ -239,6 +239,13 @@ test("数据同步集中配置后可查询血缘并手动触发", async ({ page,
   const inspectorOverflow = await page.locator(".inspector-scroll").evaluate((element) => ({ clientHeight: element.clientHeight, scrollHeight: element.scrollHeight }));
   expect(inspectorOverflow.scrollHeight).toBeGreaterThan(inspectorOverflow.clientHeight);
   if (!isMobile) expect((await page.locator(".lineage-workbench").boundingBox())?.height ?? 0).toBeLessThanOrEqual(822);
+  const tableExpand = page.locator(`[data-lineage-expand-table="${upstream.id}"]`);
+  await expect(tableExpand).toBeVisible();
+  await tableExpand.click();
+  const tableCollapse = page.locator(`[data-lineage-collapse-table="${upstream.id}"]`);
+  await expect(tableCollapse).toBeVisible();
+  await tableCollapse.click();
+  await expect(tableExpand).toBeVisible();
 
   await page.getByRole("button", { name: "查路径" }).click();
   await page.getByLabel("表 B").fill("analytics.ods");
@@ -248,6 +255,40 @@ test("数据同步集中配置后可查询血缘并手动触发", async ({ page,
   await page.getByRole("button", { name: "交换两张表" }).click();
   await page.getByRole("button", { name: "查询两表路径" }).click();
   await expect(page.getByText("已识别反向输入，并按真实数据流方向展示。")).toBeVisible();
+
+  const columnRootId = "maxcompute-column:::analytics::dws_sales:total_amount";
+  const columnSourceId = "maxcompute-column:::analytics::ods_orders:amount";
+  await page.route("**/api/lineage/columns/graph", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({ graph: {
+      rootId: columnRootId, depth: 1, direction: "both", truncated: false,
+      nodes: [
+        { id: columnSourceId, table: upstream.id, column: "amount", depth: -1, root: false, boundary: true },
+        { id: columnRootId, table: root.id, column: "total_amount", depth: 0, root: true, boundary: false },
+      ],
+      edges: [{ sourceId: columnSourceId, sourceTable: upstream.id, sourceColumn: "amount", targetId: columnRootId, targetTable: root.id, targetColumn: "total_amount", taskId: "task-1", taskType: "sql", createTime: 1 }],
+    } }),
+  }));
+  await page.route("**/api/lineage/columns/analyze-selection", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ result: {
+        status: "found", summary: "订单金额汇总为销售金额。", warnings: [],
+        groups: [{ id: "g1", title: "销售金额汇总", fields: [`${upstream.id}.amount`, `${root.id}.total_amount`], relations: [{ sourceTable: upstream.id, sourceColumn: "amount", targetTable: root.id, targetColumn: "total_amount", transformation: "SUM 聚合", confidence: "high", evidenceIds: ["e1"] }] }],
+        snippets: [{ id: "e1", language: "sql", explanation: "销售金额聚合", snippet: "SELECT SUM(amount) AS total_amount\nFROM analytics.ods_orders" }],
+      } }),
+    });
+  });
+  await page.getByRole("button", { name: "字段血缘" }).click();
+  await page.getByLabel("查询表").fill(root.id);
+  await page.getByLabel("字段").fill("total_amount");
+  await page.getByRole("button", { name: "查看字段血缘" }).click();
+  await page.locator(`[data-lineage-field-node="${columnRootId}"]`).click();
+  await page.getByRole("button", { name: "分析字段逻辑" }).click();
+  await expect(page.locator(".lineage-inspector")).toContainText("Harness 分析中");
+  await expect(page.locator(".lineage-inspector")).toContainText("销售金额汇总");
+  await expect(page.locator(".analysis-code-snippets")).toContainText("SELECT SUM(amount) AS total_amount");
 
   const syncRequest = page.waitForRequest((request) => request.method() === "POST" && new URL(request.url()).pathname === "/api/lineage/sync");
   await page.route("**/api/lineage/sync", (route) => route.fulfill({ status: 202, contentType: "application/json", body: JSON.stringify({ accepted: true }) }));

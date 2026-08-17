@@ -370,7 +370,7 @@ export class ClaudeRuntimeManager {
       sessionId: session.id,
       senderType: "tool",
       senderId: agent.id,
-      content: `${session.claudeSessionId ? "恢复" : "启动"} Claude Code SDK 会话\ncommand: ${executablePath ?? "SDK bundled Claude Code"}\npreauthorizedTools: ${allowedTools.join(", ") || "(none)"}\nautoCompact: ${config.autoCompactEnabled ? `${autoCompactWindow(config)} tokens` : "disabled"}\ncwd: ${cwd}`,
+      content: `${session.claudeSessionId ? "恢复" : "启动"} Harness 会话\nruntime: Harness SDK\npreauthorizedTools: ${allowedTools.join(", ") || "(none)"}\nautoCompact: ${config.autoCompactEnabled ? `${autoCompactWindow(config)} tokens` : "disabled"}\ncwd: ${cwd}`,
       metadata: { type: "command", command: executablePath ?? "sdk-bundled", args: allowedTools, cwd, runtime: "sdk", claudeSessionId: session.claudeSessionId },
     });
 
@@ -458,7 +458,7 @@ export class ClaudeRuntimeManager {
     if (subtype === "compact_boundary") {
       await this.recordCompact(runtime, toJsonObject(recordAt(event, "compact_metadata") ?? {}), "");
     } else if (subtype === "status" && stringAt(event, "status") === "compacting") {
-      await this.appendThinkingDelta(runtime, "Claude Code 正在进行原生上下文压缩。\n", "上下文压缩");
+      await this.appendThinkingDelta(runtime, "Harness 正在进行原生上下文压缩。\n", "上下文压缩");
     } else if (subtype === "hook_response") {
       const input = recordAt(event, "input");
       if (stringAt(input, "hook_event_name") === "PostCompact") {
@@ -618,8 +618,8 @@ export class ClaudeRuntimeManager {
     await runtime.deltaBuffer.flushAll();
     await this.store.recordCompact(runtime.session.id, { occurredAt: this.now(), metadata, summary });
     const detail = summary
-      ? `Claude Code 压缩摘要：\n${summary}`
-      : `Claude Code 已执行上下文压缩。\ntrigger: ${String(metadata.trigger ?? "unknown")}\npre_tokens: ${String(metadata.pre_tokens ?? "unknown")}\npost_tokens: ${String(metadata.post_tokens ?? "unknown")}`;
+      ? `Harness 压缩摘要：\n${summary}`
+      : `Harness 已执行上下文压缩。\ntrigger: ${String(metadata.trigger ?? "unknown")}\npre_tokens: ${String(metadata.pre_tokens ?? "unknown")}\npost_tokens: ${String(metadata.post_tokens ?? "unknown")}`;
     await this.createMessage({
       sessionId: runtime.session.id,
       senderType: "tool",
@@ -673,8 +673,8 @@ export class ClaudeRuntimeManager {
       : status === "waiting_permission"
         ? "本轮等待用户确认后继续。"
         : status === "completed"
-          ? "Claude Code 本轮没有返回文本。"
-          : runtime.error || `Claude Code exited with code ${exitCode}.`;
+          ? "Harness 本轮没有返回文本。"
+          : runtime.error || `Harness exited with code ${exitCode}.`;
     if (!runtime.currentMessage.content.trim()) {
       runtime.currentMessage = await this.store.updateMessage(runtime.currentMessage.id, fallback, {
         ...runtime.currentMessage.metadata,
@@ -774,7 +774,7 @@ export class ClaudeRuntimeManager {
       const now = this.now();
       this.turnsFailed += 1;
       this.lastActivityAt = now;
-      const message = errorMessage(event.turn.error ?? "Claude runtime failed before completion.");
+      const message = errorMessage(event.turn.error ?? "Harness runtime failed before completion.");
       await this.store.updateTurn(event.turn.id, { status: "failed", finishedAt: now, error: message, updatedAt: now });
       await this.store.updateSession(event.turn.sessionId, { status: "failed", updatedAt: now });
       const session = await this.store.getSession(event.turn.sessionId);

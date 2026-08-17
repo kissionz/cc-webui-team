@@ -67,7 +67,7 @@ function sessionMarkdown(session: ConversationSession, messages: Message[], expo
     "",
   ];
   for (const message of messages) {
-    const label = message.senderType === "user" ? "User" : message.senderType === "agent" ? "Claude" : message.senderType === "tool" ? "Tool" : "System";
+    const label = message.senderType === "user" ? "User" : message.senderType === "agent" ? "Harness" : message.senderType === "tool" ? "Tool" : "System";
     lines.push(`## ${label} · ${new Date(message.createdAt).toISOString()}`, "", message.content, "");
   }
   return lines.join("\n");

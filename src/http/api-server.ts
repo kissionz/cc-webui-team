@@ -355,7 +355,7 @@ export class ApiServer {
   private async updateClaudeConfig(request: IncomingMessage, response: ServerResponse, user: User): Promise<void> {
     if (!isSystemAdmin(user)) throw forbidden();
     const current = this.repository.getClaudeConfig();
-    if (!current) throw new HttpError(500, "CONFIG_MISSING", "Claude 配置不存在。");
+    if (!current) throw new HttpError(500, "CONFIG_MISSING", "Harness 配置不存在。");
     const body = record(await readJsonBody(request, this.config.maxBodySize));
     const workspaceRoot = body.workspaceRoot === undefined
       ? current.workspaceRoot
@@ -379,7 +379,7 @@ export class ApiServer {
   private async checkClaudeHealth(response: ServerResponse, user: User): Promise<void> {
     if (!isSystemAdmin(user)) throw forbidden();
     const current = this.repository.getClaudeConfig();
-    if (!current) throw new HttpError(500, "CONFIG_MISSING", "Claude 配置不存在。");
+    if (!current) throw new HttpError(500, "CONFIG_MISSING", "Harness 配置不存在。");
     const started = this.now();
     let available = false;
     let version = "unknown";
@@ -405,7 +405,7 @@ export class ApiServer {
     );
     const updated: ClaudeConfig = {
       ...current, available, authenticated, version, latencyMs: Math.max(0, this.now() - started),
-      lastCheckAt: this.now(), healthMessage: message || (authenticated ? null : "Claude Code 可执行，但未检测到独立运行凭据。"), updatedAt: this.now(),
+      lastCheckAt: this.now(), healthMessage: message || (authenticated ? null : "Harness 可执行，但未检测到独立运行凭据。"), updatedAt: this.now(),
     };
     this.repository.saveClaudeConfig(updated);
     this.audit(user.id, "claude.health_checked", "config", "claude", { available });

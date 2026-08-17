@@ -96,7 +96,7 @@ export class RuntimePermissionBroker {
       requestedByUserId: runtime.session.createdBy,
       type: "mcp_tool",
       risk: ["Bash", "Read", "Write", "Edit", "MultiEdit", "NotebookEdit"].includes(toolName) ? "critical" : toolName.startsWith("mcp__") ? "medium" : "low",
-      summary: sdkOptions.title || `Claude Code 请求使用 ${parsed.serverName ? `${parsed.serverName} / ` : ""}${sdkOptions.displayName || parsed.toolName}`,
+      summary: sdkOptions.title || `Harness 请求使用 ${parsed.serverName ? `${parsed.serverName} / ` : ""}${sdkOptions.displayName || parsed.toolName}`,
       payload: runtime.payload.prompt,
       turnId: runtime.turnId,
       status: "pending",
@@ -107,7 +107,7 @@ export class RuntimePermissionBroker {
       toolUseId: sdkOptions.toolUseID,
       sdkPermission: true,
       permissionSuggestions: (sdkOptions.suggestions ?? []).map(toJsonValue),
-      reason: sdkOptions.description || sdkOptions.decisionReason || "Claude Code 请求使用该工具。",
+      reason: sdkOptions.description || sdkOptions.decisionReason || "Harness 请求使用该工具。",
       fallbackResume: false,
       metadata: {
         ...(sdkOptions.blockedPath ? { blockedPath: sdkOptions.blockedPath } : {}),

@@ -251,7 +251,7 @@ function normalizeDecision(value: unknown, type: "platform_gate" | "mcp_tool"): 
 function permissionMessage(reason: string): string {
   if (reason === "expired") return "权限请求已过期。";
   if (reason === "already_decided") return "权限请求已被处理。";
-  if (reason === "runtime_missing") return "Claude Code 已不再等待此权限，请刷新会话状态。";
+  if (reason === "runtime_missing") return "Harness 已不再等待此权限，请刷新会话状态。";
   return "权限请求不存在。";
 }
 

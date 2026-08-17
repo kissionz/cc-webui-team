@@ -74,11 +74,11 @@ const runtime = new ClaudeRuntimeManager({
 if (process.platform === "win32") {
   if (config.allowUnsandboxedWindows) {
     logger.warn("runtime.windows_unsandboxed_fallback_enabled", {
-      message: "Claude Code tasks may access files outside the configured workspace. Use only on a trusted Windows host.",
+      message: "Harness tasks may access files outside the configured workspace. Use only on a trusted Windows host.",
     });
   } else {
     logger.warn("runtime.windows_sandbox_unavailable", {
-      message: "Native Windows does not support the Claude Code sandbox. Use WSL2 or set CLAUDE_ALLOW_UNSANDBOXED_WINDOWS=true to opt in to unsandboxed execution.",
+      message: "Native Windows does not support the Harness sandbox. Use WSL2 or set CLAUDE_ALLOW_UNSANDBOXED_WINDOWS=true to opt in to unsandboxed execution.",
     });
   }
 }

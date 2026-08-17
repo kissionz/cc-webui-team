@@ -414,7 +414,8 @@ describe("ColumnLineageAnalyzer", () => {
         async *[Symbol.asyncIterator]() {
           yield { type: "result", subtype: "success", is_error: false, structured_output: {
             status: "found", summary: "sales.sql L1 中订单金额汇总为销售金额", warnings: [],
-            groups: [{ id: "g1", title: "销售金额汇总", fields: ["analytics.ods_orders.amount", "analytics.dws_sales.total_amount"], relations: [{ sourceTable: "analytics.ods_orders", sourceColumn: "amount", targetTable: "analytics.dws_sales", targetColumn: "total_amount", transformation: "sales.sql 第1行执行 SUM 聚合", confidence: "high" }] }],
+            groups: [{ id: "g1", title: "销售金额汇总", fields: ["analytics.ods_orders.amount", "analytics.dws_sales.total_amount"], relations: [{ sourceTable: "analytics.ods_orders", sourceColumn: "amount", targetTable: "analytics.dws_sales", targetColumn: "total_amount", transformation: "sales.sql 第1行执行 SUM 聚合", confidence: "high", evidenceIds: ["e1"] }] }],
+            evidence: [{ id: "e1", path: "sales.sql", startLine: 1, endLine: 1, language: "sql", explanation: "sales.sql L1 中的金额聚合" }],
           } };
         },
       };
@@ -429,7 +430,10 @@ describe("ColumnLineageAnalyzer", () => {
     expect(result.groups[0]?.relations[0]).toMatchObject({ sourceColumn: "amount", targetColumn: "total_amount", transformation: "工作区代码 执行 SUM 聚合" });
     expect(result.summary).not.toMatch(/sales\.sql|L1/);
     expect(result).not.toHaveProperty("evidence");
-    expect(prompt).toContain("不得返回文件名、文件路径、行号、代码片段");
+    expect(result.snippets[0]).toMatchObject({ id: "e1", language: "sql", explanation: "工作区代码 中的金额聚合" });
+    expect(result.snippets[0]?.snippet).toContain("SUM(amount) AS total_amount");
+    expect(result.snippets[0]).not.toHaveProperty("path");
+    expect(prompt).toContain("只向用户展示代码片段，不展示路径和行号");
   });
 });
 

@@ -10,7 +10,7 @@ export type SenderType = "user" | "agent" | "tool" | "system";
 export interface User { id: string; username: string; displayName: string; email?: string; role: SystemRole; status: "active" | "disabled" }
 export interface Team { id: string; name: string; workspacePath: string; updatedAt: number }
 export interface Member { teamId: string; userId: string; role: TeamRole }
-export interface Agent { id: string; teamId: string | null; name: string; command: string; status?: "idle" | "running" | "waiting" }
+export interface Agent { id: string; teamId: string | null; name: string; type?: string; command: string; status?: "idle" | "running" | "waiting" }
 export interface ToolApprovals { alwaysTools?: string[]; alwaysServers?: string[]; onceTools?: string[] }
 export interface PlanItem { id?: string; content?: string; activeForm?: string; status?: "pending" | "in_progress" | "completed" | "deleted" }
 export interface Session { id: string; teamId: string; agentId?: string; title?: string; status: SessionStatus; visibility?: SessionVisibility; createdBy: string; createdAt: number; updatedAt: number; archivedAt?: number | null; archived?: boolean; plan?: PlanItem[]; toolApprovals?: ToolApprovals }
@@ -55,7 +55,8 @@ export interface DataWorksColumnNode { id: string; table: string; column: string
 export interface DataWorksColumnRelation { sourceId: string; sourceTable: string; sourceColumn: string; targetId: string; targetTable: string; targetColumn: string; taskId: string | null; taskType: string | null; createTime: number | null }
 export interface DataWorksColumnGraph { rootId: string; depth: number; direction: "up" | "down" | "both"; nodes: DataWorksColumnNode[]; edges: DataWorksColumnRelation[]; truncated: boolean }
 export interface ColumnSelectionAnalysisGroup { id: string; title: string; fields: string[]; relations: ColumnLineageRelation[] }
-export interface ColumnSelectionAnalysisResult { status: "found" | "partial" | "not_found"; summary: string; groups: ColumnSelectionAnalysisGroup[]; warnings: string[] }
+export interface ColumnSelectionCodeSnippet { id: string; language: string; snippet: string; explanation: string }
+export interface ColumnSelectionAnalysisResult { status: "found" | "partial" | "not_found"; summary: string; groups: ColumnSelectionAnalysisGroup[]; snippets: ColumnSelectionCodeSnippet[]; warnings: string[] }
 export interface SessionGroup { id: string; label: string; minimum: number; defaultExpanded: boolean; sessions: Session[] }
 export interface MessageTurn { id: string; user?: Message; messages: Message[] }
 export interface ScrollPosition { top: number; left: number; distanceFromBottom: number }
