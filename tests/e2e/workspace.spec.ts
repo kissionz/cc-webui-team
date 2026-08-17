@@ -319,6 +319,10 @@ test("数据同步集中配置后可查询血缘并手动触发", async ({ page,
 
   const syncRequest = page.waitForRequest((request) => request.method() === "POST" && new URL(request.url()).pathname === "/api/lineage/sync");
   await page.route("**/api/lineage/sync", (route) => route.fulfill({ status: 202, contentType: "application/json", body: JSON.stringify({ accepted: true }) }));
+  await expect(page.locator(".topbar").getByRole("button", { name: "立即同步" })).toHaveCount(0);
+  if (isMobile) await page.getByRole("button", { name: "打开导航" }).click();
+  await page.getByRole("button", { name: "系统设置" }).click();
+  await page.locator(".system-subnav [data-view='sync']").click();
   await page.getByRole("button", { name: "立即同步" }).click();
   await syncRequest;
   await expect(page.getByText("血缘同步已启动")).toBeVisible();

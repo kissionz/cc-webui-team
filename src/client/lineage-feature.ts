@@ -76,7 +76,7 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
 
   function render(): string {
     const syncBadge = syncStatus(status);
-    const actions = `<div class="lineage-top-actions">${syncBadge}${deps.isAdmin() ? '<button class="button" type="button" data-action="lineage-sync">立即同步</button>' : ""}</div>`;
+    const actions = `<div class="lineage-top-actions">${syncBadge}</div>`;
     return deps.appRoot(`${deps.topbar("数据血缘", "查询表级依赖，或让 Harness 从工作区实时分析字段加工逻辑", actions)}
       <section class="content lineage-page">
         <div class="lineage-workbench ${maximized ? "maximized" : ""}">
