@@ -846,6 +846,7 @@ document.addEventListener("click", (event) => {
     else if (actionName === "lineage-zoom-out") lineageFeature.zoomBy(-0.15);
     else if (actionName === "lineage-fit") lineageFeature.fit();
     else if (actionName === "lineage-maximize") lineageFeature.toggleMaximize();
+    else if (actionName === "lineage-toggle-analysis-downstream") lineageFeature.toggleAnalysisDownstream();
     else if (actionName === "lineage-analyze-selection") await lineageFeature.analyzeSelection();
     else if (actionName === "lineage-cancel-analysis") lineageFeature.cancelAnalysis();
     else if (actionName === "lineage-download") lineageFeature.downloadGraph();

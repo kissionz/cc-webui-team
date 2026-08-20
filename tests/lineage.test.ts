@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ClaudeConfig, MaxComputeConfig } from "../src/domain/index.js";
+import { columnAnalysisRelations } from "../src/client/lineage-feature.js";
 import { ColumnLineageAnalyzer } from "../src/lineage/column-analyzer.js";
 import { DataWorksColumnLineageClient, inferDataWorksRegion, isDataWorksThrottleError } from "../src/lineage/dataworks-lineage-client.js";
 import type { MaxComputeQueryClient, MaxComputeRow } from "../src/lineage/maxcompute-client.js";
@@ -426,7 +427,7 @@ describe("ColumnLineageAnalyzer", () => {
       authenticated: true, lastCheckAt: now, healthMessage: null, updatedAt: now,
     };
     const relation = { sourceId: "s", sourceTable: "analytics.ods_orders", sourceColumn: "amount", targetId: "t", targetTable: "analytics.dws_sales", targetColumn: "total_amount", taskId: "task-1", taskType: "sql", createTime: 1 };
-    const result = await new ColumnLineageAnalyzer({ queryFactory }).analyzeSelection({ cwd: root, nodes: [{ id: "t", table: "analytics.dws_sales", column: "total_amount" }], relations: [relation], config: claudeConfig });
+    const result = await new ColumnLineageAnalyzer({ queryFactory }).analyzeSelection({ cwd: root, nodes: [{ id: "t", table: "analytics.dws_sales", column: "total_amount" }], relations: [relation], scope: "single_upstream", config: claudeConfig });
     expect(result.groups[0]?.relations[0]).toMatchObject({ sourceColumn: "amount", targetColumn: "total_amount", transformation: "工作区代码 执行 SUM 聚合" });
     expect(result.summary).not.toMatch(/sales\.sql|L1/);
     expect(result).not.toHaveProperty("evidence");
@@ -434,6 +435,71 @@ describe("ColumnLineageAnalyzer", () => {
     expect(result.snippets[0]?.snippet).toContain("SUM(amount) AS total_amount");
     expect(result.snippets[0]).not.toHaveProperty("path");
     expect(prompt).toContain("只向用户展示代码片段，不展示路径和行号");
+    expect(prompt).toContain("只分析完整上游加工链路，不补充任何下游");
+  });
+
+  it("splits long paths into ordered Harness calls instead of truncating lineage depth", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cc-lineage-long-selection-"));
+    roots.push(root);
+    const prompts: string[] = [];
+    const queryFactory = ((input: { prompt: string }) => {
+      prompts.push(input.prompt);
+      const part = prompts.length;
+      return { async *[Symbol.asyncIterator]() {
+        yield { type: "result", subtype: "success", is_error: false, structured_output: {
+          status: "found", summary: `第${part}段`, warnings: [], evidence: [],
+          groups: [{ id: `g${part}`, title: `加工阶段${part}`, fields: [], relations: [] }],
+        } };
+      } };
+    }) as never;
+    const claudeConfig: ClaudeConfig = {
+      command: "claude", args: "", workspaceRoot: root, modelContextTokens: 1_000_000, autoCompactRatio: 0.62,
+      autoCompactEnabled: true, mcpToolAllowlist: [], enabled: true, available: true, version: "test", latencyMs: 1,
+      authenticated: true, lastCheckAt: now, healthMessage: null, updatedAt: now,
+    };
+    const relations = Array.from({ length: 81 }, (_, index) => ({
+      sourceId: `s${index}`, sourceTable: `p.s${index}`, sourceColumn: "value",
+      targetId: `s${index + 1}`, targetTable: `p.s${index + 1}`, targetColumn: "value",
+      taskId: `task-${index}`, taskType: "sql", createTime: index,
+    }));
+    const result = await new ColumnLineageAnalyzer({ queryFactory }).analyzeSelection({
+      cwd: root,
+      nodes: [{ id: "s0", table: "p.s0", column: "value" }, { id: "s81", table: "p.s81", column: "value" }],
+      relations,
+      scope: "selected_paths",
+      config: claudeConfig,
+    });
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0]).toContain("第 1/2 个连续处理片段");
+    expect(prompts[1]).toContain("第 2/2 个连续处理片段");
+    expect(result.groups).toHaveLength(2);
+    expect(result.summary).toContain("81 条字段关系");
+  });
+});
+
+describe("Field selection paths", () => {
+  const relation = (sourceId: string, targetId: string) => ({
+    sourceId, sourceTable: `p.${sourceId}`, sourceColumn: "value",
+    targetId, targetTable: `p.${targetId}`, targetColumn: "value",
+    taskId: `${sourceId}-${targetId}`, taskType: "sql", createTime: 1,
+  });
+  const graph = {
+    rootId: "a", depth: 5, direction: "both" as const, truncated: false,
+    nodes: ["u", "b", "c", "d", "a", "z", "x"].map((id, depth) => ({ id, table: `p.${id}`, column: "value", depth, root: id === "a", boundary: false })),
+    edges: [relation("u", "b"), relation("b", "c"), relation("c", "d"), relation("d", "a"), relation("a", "z"), relation("c", "x"), relation("x", "a")],
+  };
+
+  it("keeps every directed route between multiple selected endpoints and excludes outside lineage", () => {
+    expect(columnAnalysisRelations(graph, new Set(["a", "b"])).map((edge) => `${edge.sourceId}->${edge.targetId}`)).toEqual([
+      "b->c", "c->d", "c->x", "d->a", "x->a",
+    ]);
+  });
+
+  it("traces a single field to every upstream source and includes downstream only when requested", () => {
+    expect(columnAnalysisRelations(graph, new Set(["a"])).map((edge) => `${edge.sourceId}->${edge.targetId}`)).toEqual([
+      "u->b", "b->c", "c->d", "c->x", "d->a", "x->a",
+    ]);
+    expect(columnAnalysisRelations(graph, new Set(["a"]), true).map((edge) => `${edge.sourceId}->${edge.targetId}`)).toContain("a->z");
   });
 });
 

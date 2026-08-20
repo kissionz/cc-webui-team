@@ -7,6 +7,8 @@ import type {
 interface LineageStatus { config: MaxComputeConfigView | null; running: boolean; runs: LineageSyncRun[] }
 interface LineageDetail { table: LineageTable; columns: LineageColumn[]; relations: { upstream: number; downstream: number } }
 type ExpansionDirection = "up" | "down";
+type ColumnAnalysisScope = "single_upstream" | "single_both" | "selected_paths";
+type AnalysisPhase = "lineage" | "workspace";
 interface DirectionalExpansion<T> { nodeId: string; direction: ExpansionDirection; graph: T }
 interface ConnectionDiagnostic { stdout: string; stderr: string; parsed: Array<{ name: string; status: string; region: string }> }
 interface SourceDiagnostic {
@@ -57,6 +59,9 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
   let columnText = "";
   let graphLoading = false;
   let analysisLoading = false;
+  let includeSingleDownstream = false;
+  let analysisPhase: AnalysisPhase = "lineage";
+  let analysisRelationCount = 0;
   let analysisElapsedSeconds = 0;
   let analysisTimer: number | undefined;
   let connectionDiagnostic: ConnectionDiagnostic | null = null;
@@ -231,7 +236,14 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
       const controls = node.boundary ? directionalControls("column", node.id, `${table}.${node.column}`, pos, loadedColumnDirections, columnExpansions, expandingDirections, deps.escape) : "";
       return `<g class="lineage-svg-node column-node ${node.root ? "root" : ""} ${selected ? "selected" : ""}" transform="translate(${pos.x} ${pos.y})" tabindex="0" role="button" data-lineage-field-node="${deps.escape(node.id)}"><rect width="210" height="66" rx="8"/><text class="node-name" x="14" y="26">${deps.escape(shortSvgName(table, 26))}</text><text class="node-meta" x="14" y="48">${deps.escape(shortSvgName(meta, 29))}</text><title>${deps.escape(`${node.table}.${node.column}`)}</title></g>${controls}`;
     }).join("");
-    const action = selectedColumns.size ? `<div class="lineage-selection-action"><div><strong>${selectedColumns.size} 个字段已选</strong><span>最多 20 个，Harness 仅在点击后运行</span></div>${analysisLoading ? '<button class="button" type="button" data-action="lineage-cancel-analysis">取消分析</button>' : '<button class="button primary" type="button" data-action="lineage-analyze-selection">分析字段逻辑</button>'}</div>` : "";
+    const singleSelection = selectedColumns.size === 1;
+    const analysisHint = singleSelection
+      ? `完整分析上游${includeSingleDownstream ? "及下游" : "，不包含下游"}`
+      : "仅分析所选字段之间的完整路径";
+    const downstreamToggle = singleSelection && !analysisLoading
+      ? `<button class="lineage-analysis-option ${includeSingleDownstream ? "active" : ""}" type="button" data-action="lineage-toggle-analysis-downstream" aria-pressed="${includeSingleDownstream}"><i></i>包含下游</button>`
+      : "";
+    const action = selectedColumns.size ? `<div class="lineage-selection-action"><div class="lineage-selection-summary"><strong>${selectedColumns.size} 个字段已选</strong><span>${analysisHint}</span></div><div class="lineage-selection-actions">${downstreamToggle}${analysisLoading ? '<button class="button" type="button" data-action="lineage-cancel-analysis">取消分析</button>' : '<button class="button primary" type="button" data-action="lineage-analyze-selection">分析字段逻辑</button>'}</div></div>` : "";
     return `<div class="lineage-svg-wrap ${canvasMode === "pan" ? "pan-mode" : "select-mode"}" data-lineage-canvas><svg class="lineage-graph" id="lineage-graph-svg" data-lineage-layout-width="${layout.width}" data-lineage-layout-height="${layout.height}" viewBox="${view.x} ${view.y} ${view.width} ${view.height}" role="img" aria-label="字段血缘图"><defs><marker id="lineage-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z"/></marker></defs>${paths}${nodes}</svg><div class="lineage-selection-box" data-lineage-selection-box hidden></div>${action}<div class="lineage-canvas-help"><strong>画布操作</strong><span>←＋ 仅展开上游 · ＋→ 仅展开下游 · 对应减号单独收回</span><span>左键拖框 · Space + 拖动 / 中键平移 · 滚轮连续缩放 · Esc 清空</span></div>${value.truncated ? '<div class="graph-notice">当前节点返回数量已达到上限，可从边界节点继续展开。</div>' : ""}</div>`;
   }
 
@@ -249,13 +261,16 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
   }
 
   function renderAnalysisProgress(): string {
-    const thresholds = [0, 2, 7, 15];
-    const activeIndex = analysisElapsedSeconds >= thresholds[3]! ? 3 : analysisElapsedSeconds >= thresholds[2]! ? 2 : analysisElapsedSeconds >= thresholds[1]! ? 1 : 0;
+    const workspaceIndex = analysisElapsedSeconds >= 15 ? 3 : analysisElapsedSeconds >= 7 ? 2 : 1;
+    const activeIndex = analysisPhase === "lineage" ? 0 : workspaceIndex;
+    const selectionDescription = selectedColumns.size === 1
+      ? `正在沿${includeSingleDownstream ? "上下游" : "上游"}逐层追溯，已发现 ${analysisRelationCount} 条关系`
+      : `正在解析 ${selectedColumns.size} 个字段之间的有向路径`;
     const steps = [
-      ["提交分析请求", `${selectedColumns.size} 个字段已进入分析队列`],
+      ["解析完整字段路径", selectionDescription],
       ["只读检索工作区", "搜索相关 SQL、脚本和调度配置"],
-      ["核对字段与代码证据", "校验源字段、目标字段和加工表达式"],
-      ["整理加工说明", "生成链路总结和可展示的代码片段"],
+      ["核对字段与代码证据", "按数据流顺序校验每段加工表达式"],
+      ["整理逐层加工说明", "生成路径总结、差异风险和代码片段"],
     ];
     return `<aside class="lineage-inspector analysis-running" aria-live="polite"><div class="inspector-header"><div><span class="inspector-kicker">Harness 分析中</span><h2>字段加工逻辑</h2><p>已运行 ${analysisElapsedSeconds} 秒</p></div><button class="icon-button" type="button" aria-label="取消分析" data-action="lineage-cancel-analysis">×</button></div><div class="inspector-scroll"><section class="inspector-section"><div class="analysis-live-status"><span class="analysis-orbit" aria-hidden="true"><i></i></span><div><strong>${steps[activeIndex]![0]}</strong><p>${steps[activeIndex]![1]}</p></div></div><ol class="analysis-progress-list">${steps.map((step, index) => `<li class="${index < activeIndex ? "complete" : index === activeIndex ? "active" : "pending"}"><i>${index < activeIndex ? "✓" : index + 1}</i><div><strong>${step[0]}</strong><span>${step[1]}</span></div></li>`).join("")}</ol><p class="analysis-progress-note">这里展示可审计的执行阶段与最终依据，不展示模型内部推理文本。</p></section></div></aside>`;
   }
@@ -522,14 +537,29 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
   async function analyzeSelection(): Promise<void> {
     if (!columnGraph || !selectedColumns.size) return;
     const nodes = columnGraph.nodes.filter((node) => selectedColumns.has(node.id)).slice(0, 20).map(({ id, table, column }) => ({ id, table, column }));
-    const connected = connectedRelations(columnGraph, new Set(nodes.map((node) => node.id))).slice(0, 200);
     analysisController?.abort();
     analysisController = new AbortController();
-    analysisLoading = true; selectionAnalysis = null; startAnalysisTimer(); deps.scheduleRender();
+    const controller = analysisController;
+    analysisLoading = true; analysisPhase = "lineage"; analysisRelationCount = 0; selectionAnalysis = null; startAnalysisTimer(); deps.scheduleRender();
     try {
+      const scope: ColumnAnalysisScope = nodes.length === 1
+        ? includeSingleDownstream ? "single_both" : "single_upstream"
+        : "selected_paths";
+      const analysisGraph = nodes.length === 1
+        ? await collectCompleteSingleSelection(columnGraph, nodes[0]!, includeSingleDownstream, controller.signal)
+        : columnGraph;
+      const relations = columnAnalysisRelations(analysisGraph, new Set(nodes.map((node) => node.id)), includeSingleDownstream);
+      analysisRelationCount = relations.length;
+      if (!relations.length) {
+        throw new Error(nodes.length === 1
+          ? "DataWorks 没有返回该字段可分析的上游关系。"
+          : "所选字段之间没有已加载的有向血缘路径，请确认字段属于同一条链路。"
+        );
+      }
+      analysisPhase = "workspace"; deps.scheduleRender();
       const response = await api<{ result: ColumnSelectionAnalysisResult }>("/api/lineage/columns/analyze-selection", {
-        method: "POST", signal: analysisController.signal,
-        body: JSON.stringify({ teamId: analysisTeamId || deps.state().selectedTeamId, nodes, relations: connected }),
+        method: "POST", signal: controller.signal,
+        body: JSON.stringify({ teamId: analysisTeamId || deps.state().selectedTeamId, scope, nodes, relations }),
       });
       selectionAnalysis = response.result;
     } catch (error) {
@@ -545,6 +575,45 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
   }
   function stopAnalysisTimer(): void { if (analysisTimer !== undefined) window.clearInterval(analysisTimer); analysisTimer = undefined; }
   function cancelAnalysis(): void { analysisController?.abort(); analysisLoading = false; stopAnalysisTimer(); deps.scheduleRender(); }
+  function toggleAnalysisDownstream(): void {
+    if (selectedColumns.size !== 1 || analysisLoading) return;
+    includeSingleDownstream = !includeSingleDownstream;
+    deps.scheduleRender();
+  }
+
+  async function collectCompleteSingleSelection(
+    initial: DataWorksColumnGraph,
+    selected: { id: string; table: string; column: string },
+    includeDownstream: boolean,
+    signal: AbortSignal,
+  ): Promise<DataWorksColumnGraph> {
+    let collected = initial;
+    for (const direction of includeDownstream ? ["up", "down"] as const : ["up"] as const) {
+      const pending = [selected.id];
+      const expanded = new Set<string>();
+      while (pending.length) {
+        if (signal.aborted) throw new DOMException("字段分析已取消", "AbortError");
+        const entityId = pending.shift()!;
+        if (expanded.has(entityId)) continue;
+        expanded.add(entityId);
+        const node = collected.nodes.find((item) => item.id === entityId) ?? selected;
+        const response = await api<{ graph: DataWorksColumnGraph }>("/api/lineage/columns/graph", {
+          method: "POST", signal,
+          body: JSON.stringify({ table: node.table, column: node.column, entityId, depth: 1, direction }),
+        });
+        collected = mergeColumnGraphs(collected, response.graph, entityId, direction);
+        for (const edge of response.graph.edges) {
+          const nextId = direction === "up" && edge.targetId === entityId
+            ? edge.sourceId
+            : direction === "down" && edge.sourceId === entityId ? edge.targetId : null;
+          if (nextId && !expanded.has(nextId)) pending.push(nextId);
+        }
+        analysisRelationCount = columnAnalysisRelations(collected, new Set([selected.id]), includeDownstream).length;
+        deps.scheduleRender();
+      }
+    }
+    return collected;
+  }
 
   function pointerDown(event: PointerEvent): void {
     const origin = event.target instanceof Element ? event.target : null;
@@ -590,12 +659,14 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
     const moved = Math.hypot(current.lastX - current.startX, current.lastY - current.startY);
     if (current.kind === "pan") canvasView = readSvgView(svg);
     if (current.kind === "node" && current.nodeId && moved < 6) {
+      includeSingleDownstream = false;
       if (!current.additive) selectedColumns.clear();
       if (current.additive && selectedColumns.has(current.nodeId)) selectedColumns.delete(current.nodeId);
       else if (selectedColumns.size < 20) selectedColumns.add(current.nodeId);
       else deps.toast("一次最多选择 20 个字段", "info");
     }
     if (current.kind === "box" && moved >= 4) {
+      includeSingleDownstream = false;
       if (!current.additive) selectedColumns.clear();
       const selection = { left: Math.min(current.startX, current.lastX), right: Math.max(current.startX, current.lastX), top: Math.min(current.startY, current.lastY), bottom: Math.max(current.startY, current.lastY) };
       for (const node of canvas.querySelectorAll<SVGElement>("[data-lineage-field-node]")) {
@@ -629,7 +700,7 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
 
   function keyDown(event: KeyboardEvent): void {
     if (event.key === " " && !(event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement)) spacePressed = true;
-    if (event.key === "Escape" && selectedColumns.size) { selectedColumns.clear(); deps.scheduleRender(); }
+    if (event.key === "Escape" && selectedColumns.size) { selectedColumns.clear(); includeSingleDownstream = false; deps.scheduleRender(); }
   }
   function keyUp(event: KeyboardEvent): void { if (event.key === " ") spacePressed = false; }
 
@@ -662,7 +733,7 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
   document.addEventListener("keydown", keyDown);
   document.addEventListener("keyup", keyUp);
 
-  return { render, renderDataSync, load, submitQuery, saveConfig, testConnection, triggerSync, diagnoseSource, reprocess, search, chooseTable, swapPath, expandColumn, collapseColumn, expandTable, collapseTable, selectNode, setMode, setScope, setCanvasMode, setCollectionMode, closeDetail, chooseColumn, zoomBy, fit, toggleMaximize, analyzeSelection, cancelAnalysis, downloadGraph };
+  return { render, renderDataSync, load, submitQuery, saveConfig, testConnection, triggerSync, diagnoseSource, reprocess, search, chooseTable, swapPath, expandColumn, collapseColumn, expandTable, collapseTable, selectNode, setMode, setScope, setCanvasMode, setCollectionMode, closeDetail, chooseColumn, zoomBy, fit, toggleMaximize, analyzeSelection, cancelAnalysis, toggleAnalysisDownstream, downloadGraph };
 }
 
 function isConnectionDiagnostic(value: unknown): value is { diagnostic: ConnectionDiagnostic } {
@@ -804,8 +875,76 @@ function directionalControls<T>(
   }).join("");
 }
 
-function connectedRelations(graph: DataWorksColumnGraph, selected: Set<string>): DataWorksColumnGraph["edges"] {
-  return graph.edges.filter((edge) => selected.has(edge.sourceId) || selected.has(edge.targetId));
+export function columnAnalysisRelations(graph: DataWorksColumnGraph, selected: Set<string>, includeSingleDownstream = false): DataWorksColumnGraph["edges"] {
+  if (!selected.size) return [];
+  const selectedIds = [...selected];
+  if (selectedIds.length === 1) {
+    const root = selectedIds[0]!;
+    const upstream = reachable(root, graph.edges, "up");
+    const downstream = includeSingleDownstream ? reachable(root, graph.edges, "down") : new Set<string>();
+    return orderColumnRelations(graph.edges.filter((edge) =>
+      (upstream.has(edge.sourceId) && upstream.has(edge.targetId))
+      || (includeSingleDownstream && downstream.has(edge.sourceId) && downstream.has(edge.targetId))
+    ));
+  }
+
+  const pathEdges = new Map<string, DataWorksColumnGraph["edges"][number]>();
+  for (const sourceId of selectedIds) {
+    const forward = reachable(sourceId, graph.edges, "down");
+    for (const targetId of selectedIds) {
+      if (sourceId === targetId || !forward.has(targetId)) continue;
+      const backward = reachable(targetId, graph.edges, "up");
+      for (const edge of graph.edges) {
+        if (!forward.has(edge.sourceId) || !backward.has(edge.targetId)) continue;
+        pathEdges.set(`${edge.sourceId}\u0000${edge.targetId}`, edge);
+      }
+    }
+  }
+  return orderColumnRelations([...pathEdges.values()]);
+}
+
+function reachable(root: string, edges: DataWorksColumnGraph["edges"], direction: ExpansionDirection): Set<string> {
+  const reached = new Set([root]);
+  const pending = [root];
+  while (pending.length) {
+    const current = pending.shift()!;
+    for (const edge of edges) {
+      const next = direction === "down" && edge.sourceId === current
+        ? edge.targetId
+        : direction === "up" && edge.targetId === current ? edge.sourceId : null;
+      if (next && !reached.has(next)) { reached.add(next); pending.push(next); }
+    }
+  }
+  return reached;
+}
+
+function orderColumnRelations(edges: DataWorksColumnGraph["edges"]): DataWorksColumnGraph["edges"] {
+  const outgoing = new Map<string, DataWorksColumnGraph["edges"]>();
+  const indegree = new Map<string, number>();
+  for (const edge of edges) {
+    const list = outgoing.get(edge.sourceId) ?? [];
+    list.push(edge); outgoing.set(edge.sourceId, list);
+    indegree.set(edge.sourceId, indegree.get(edge.sourceId) ?? 0);
+    indegree.set(edge.targetId, (indegree.get(edge.targetId) ?? 0) + 1);
+  }
+  const pending = [...indegree].filter(([, degree]) => degree === 0).map(([id]) => id).sort();
+  const ordered: DataWorksColumnGraph["edges"] = [];
+  const emitted = new Set<string>();
+  while (pending.length) {
+    const sourceId = pending.shift()!;
+    for (const edge of outgoing.get(sourceId) ?? []) {
+      const key = `${edge.sourceId}\u0000${edge.targetId}`;
+      if (!emitted.has(key)) { emitted.add(key); ordered.push(edge); }
+      const degree = (indegree.get(edge.targetId) ?? 1) - 1;
+      indegree.set(edge.targetId, degree);
+      if (degree === 0) pending.push(edge.targetId);
+    }
+  }
+  for (const edge of edges) {
+    const key = `${edge.sourceId}\u0000${edge.targetId}`;
+    if (!emitted.has(key)) ordered.push(edge);
+  }
+  return ordered;
 }
 
 function mergeColumnGraphs(current: DataWorksColumnGraph, patch: DataWorksColumnGraph, expandedId: string, direction: ExpansionDirection): DataWorksColumnGraph {

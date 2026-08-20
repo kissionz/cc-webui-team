@@ -1,7 +1,7 @@
 import { canSeeTeam, isSystemAdmin, type JsonObject, type LineageEdge, type LineageTable, type MaxComputeConfig, type MaxComputeProject } from "../../domain/index.js";
 import type { PersistenceRepository } from "../../persistence/index.js";
 import type { ClaudeConfig } from "../../domain/index.js";
-import type { ColumnLineageAnalyzer, ColumnSelectionNode } from "../../lineage/column-analyzer.js";
+import type { ColumnLineageAnalyzer, ColumnSelectionNode, ColumnSelectionScope } from "../../lineage/column-analyzer.js";
 import { previousShanghaiDate, type LineageScheduler } from "../../lineage/scheduler.js";
 import { diagnoseLineageSource } from "../../lineage/sync-service.js";
 import type { MaxComputeCredentials } from "../../lineage/maxcompute-client.js";
@@ -327,17 +327,21 @@ export class LineageRoutes {
   private async analyzeColumnSelection({ request, response, auth }: RouteRequest): Promise<void> {
     this.assertDirectoryAccess(auth.user);
     const body = objectBody(await readJsonBody(request, this.options.maxBodySize));
-    assertOnlyKeys(body, ["teamId", "nodes", "relations"]);
+    assertOnlyKeys(body, ["teamId", "scope", "nodes", "relations"]);
     const teamId = inputString(body.teamId, "teamId", 1, 128);
+    const scope = inputEnum(body.scope, ["single_upstream", "single_both", "selected_paths"] as const, "scope") satisfies ColumnSelectionScope;
     const team = this.options.repository.getTeam(teamId);
     if (!team || !canSeeTeam(this.options.repository, auth.user, teamId)) throw forbidden();
     if (!Array.isArray(body.nodes) || body.nodes.length < 1 || body.nodes.length > 20) throw new HttpError(400, "INVALID_COLUMN_SELECTION", "请选择 1 到 20 个字段进行分析。");
-    if (!Array.isArray(body.relations) || body.relations.length > 200) throw new HttpError(400, "INVALID_COLUMN_RELATIONS", "字段关系数量不能超过 200 条。");
+    if (!Array.isArray(body.relations)) throw new HttpError(400, "INVALID_COLUMN_RELATIONS", "字段关系必须使用数组格式。");
     const nodes: ColumnSelectionNode[] = body.nodes.map((raw, index) => {
       const item = objectBody(raw); assertOnlyKeys(item, ["id", "table", "column"]);
       const node = { id: inputString(item.id, `nodes[${index}].id`, 1, 512), table: inputString(item.table, `nodes[${index}].table`, 1, 260), column: inputString(item.column, `nodes[${index}].column`, 1, 260) };
       validateColumnReference(node.table, node.column); return node;
     });
+    if ((scope === "selected_paths") !== (nodes.length > 1)) {
+      throw new HttpError(400, "INVALID_COLUMN_ANALYSIS_SCOPE", nodes.length > 1 ? "多字段分析必须使用字段间路径模式。" : "单字段分析必须使用上游或上下游模式。");
+    }
     const relations: DataWorksColumnRelation[] = body.relations.map((raw, index) => {
       const item = objectBody(raw); assertOnlyKeys(item, ["sourceId", "sourceTable", "sourceColumn", "targetId", "targetTable", "targetColumn", "taskId", "taskType", "createTime"]);
       const relation: DataWorksColumnRelation = {
@@ -358,8 +362,8 @@ export class LineageRoutes {
     const config = this.options.claudeConfig();
     if (!config?.enabled || !config.available || !config.authenticated) throw new HttpError(503, "CLAUDE_UNAVAILABLE", "Harness 当前不可用或未登录。");
     try {
-      const result = await this.options.analyzer.analyzeSelection({ cwd: team.workspacePath, nodes, relations, config });
-      this.options.audit(auth.user.id, "lineage.column.selection_analyzed", "lineage_column", nodes.map((node) => `${node.table}.${node.column}`).join(","), { teamId, nodes: nodes.length, relations: relations.length, groups: result.groups.length, status: result.status });
+      const result = await this.options.analyzer.analyzeSelection({ cwd: team.workspacePath, nodes, relations, scope, config });
+      this.options.audit(auth.user.id, "lineage.column.selection_analyzed", "lineage_column", nodes.map((node) => `${node.table}.${node.column}`).join(","), { teamId, scope, nodes: nodes.length, relations: relations.length, groups: result.groups.length, status: result.status });
       sendJson(response, 200, { result });
     } catch (error) {
       if (error instanceof Error && error.message.includes("任务已满")) throw new HttpError(429, "COLUMN_LINEAGE_BUSY", error.message);
