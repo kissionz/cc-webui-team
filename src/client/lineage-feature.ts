@@ -265,7 +265,7 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
     const activeIndex = analysisPhase === "lineage" ? 0 : workspaceIndex;
     const selectionDescription = selectedColumns.size === 1
       ? `正在沿${includeSingleDownstream ? "上下游" : "上游"}逐层追溯，已发现 ${analysisRelationCount} 条关系`
-      : `正在解析 ${selectedColumns.size} 个字段之间的有向路径`;
+      : `正在独立解析 ${selectedColumns.size} 个字段之间的完整路径，已发现 ${analysisRelationCount} 条关系`;
     const steps = [
       ["解析完整字段路径", selectionDescription],
       ["只读检索工作区", "搜索相关 SQL、脚本和调度配置"],
@@ -546,14 +546,14 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
         ? includeSingleDownstream ? "single_both" : "single_upstream"
         : "selected_paths";
       const analysisGraph = nodes.length === 1
-        ? await collectCompleteSingleSelection(columnGraph, nodes[0]!, includeSingleDownstream, controller.signal)
-        : columnGraph;
+        ? await collectCompleteSingleSelection(nodes[0]!, includeSingleDownstream, controller.signal)
+        : await collectCompleteSelectedPaths(nodes, controller.signal);
       const relations = columnAnalysisRelations(analysisGraph, new Set(nodes.map((node) => node.id)), includeSingleDownstream);
       analysisRelationCount = relations.length;
       if (!relations.length) {
         throw new Error(nodes.length === 1
           ? "DataWorks 没有返回该字段可分析的上游关系。"
-          : "所选字段之间没有已加载的有向血缘路径，请确认字段属于同一条链路。"
+          : "DataWorks 没有找到所选字段之间的有向血缘路径，请确认字段属于同一条链路。"
         );
       }
       analysisPhase = "workspace"; deps.scheduleRender();
@@ -582,12 +582,11 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
   }
 
   async function collectCompleteSingleSelection(
-    initial: DataWorksColumnGraph,
     selected: { id: string; table: string; column: string },
     includeDownstream: boolean,
     signal: AbortSignal,
   ): Promise<DataWorksColumnGraph> {
-    let collected = initial;
+    let collected = selectionSeedGraph([selected]);
     for (const direction of includeDownstream ? ["up", "down"] as const : ["up"] as const) {
       const pending = [selected.id];
       const expanded = new Set<string>();
@@ -613,6 +612,55 @@ export function createLineageFeature(deps: LineageFeatureDeps) {
       }
     }
     return collected;
+  }
+
+  async function collectCompleteSelectedPaths(
+    selected: Array<{ id: string; table: string; column: string }>,
+    signal: AbortSignal,
+  ): Promise<DataWorksColumnGraph> {
+    let collected = selectionSeedGraph(selected);
+    const selectedIds = new Set(selected.map((item) => item.id));
+    const pending = selected.flatMap((item) => ([
+      { entityId: item.id, direction: "up" as const },
+      { entityId: item.id, direction: "down" as const },
+    ]));
+    const expanded = new Set<string>();
+    while (pending.length) {
+      if (signal.aborted) throw new DOMException("字段分析已取消", "AbortError");
+      const current = pending.shift()!;
+      const key = expansionKey(current.entityId, current.direction);
+      if (expanded.has(key)) continue;
+      expanded.add(key);
+      const node = collected.nodes.find((item) => item.id === current.entityId);
+      if (!node) continue;
+      const response = await api<{ graph: DataWorksColumnGraph }>("/api/lineage/columns/graph", {
+        method: "POST", signal,
+        body: JSON.stringify({ table: node.table, column: node.column, entityId: current.entityId, depth: 1, direction: current.direction }),
+      });
+      collected = mergeColumnGraphs(collected, response.graph, current.entityId, current.direction);
+      for (const edge of response.graph.edges) {
+        const nextId = current.direction === "up" && edge.targetId === current.entityId
+          ? edge.sourceId
+          : current.direction === "down" && edge.sourceId === current.entityId ? edge.targetId : null;
+        if (nextId && !expanded.has(expansionKey(nextId, current.direction))) pending.push({ entityId: nextId, direction: current.direction });
+      }
+      const paths = columnAnalysisRelations(collected, selectedIds);
+      analysisRelationCount = paths.length;
+      deps.scheduleRender();
+      if (selected.every((item) => paths.some((edge) => edge.sourceId === item.id || edge.targetId === item.id))) return collected;
+    }
+    return collected;
+  }
+
+  function selectionSeedGraph(selected: Array<{ id: string; table: string; column: string }>): DataWorksColumnGraph {
+    return {
+      rootId: selected[0]?.id ?? "",
+      depth: 0,
+      direction: "both",
+      nodes: selected.map((item, index) => ({ ...item, depth: 0, root: index === 0, boundary: true })),
+      edges: [],
+      truncated: false,
+    };
   }
 
   function pointerDown(event: PointerEvent): void {
