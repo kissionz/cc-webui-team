@@ -22,6 +22,8 @@ const icons = {
   stop: '<svg class="icon" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
   send: '<svg class="icon" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4 20-7Z"/><path d="M22 2 11 13"/></svg>',
   check: '<svg class="icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>',
+  archive: '<svg class="icon" viewBox="0 0 24 24"><path d="M4 7h16v13H4z"/><path d="M3 3h18v4H3zM9 11h6"/></svg>',
+  lock: '<svg class="icon" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>',
   close: '<svg class="icon" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>',
   logout: '<svg class="icon" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></svg>',
   terminal: '<svg class="icon" viewBox="0 0 24 24"><path d="m4 17 6-6-6-6"/><path d="M12 19h8"/></svg>',
@@ -100,6 +102,7 @@ const uiMemory = {
   composerDrafts: new Map<string, string>(),
   openTurnEvents: new Map<string, boolean>(),
   openSessionGroups: new Map<string, boolean>(),
+  sessionSelectionMode: false,
 };
 
 function loadState(): AppState {
@@ -599,6 +602,7 @@ async function runAction(key: string, element: HTMLElement, action: () => Promis
 
 async function changeSessionFilters(): Promise<void> {
   selectedSessionIds.clear();
+  uiMemory.sessionSelectionMode = false;
   state.sessionPagination = { nextCursor: null, loading: false, initialized: false };
   await loadSessions({ reset: true });
   if (state.selectedSessionId) await loadMessages(state.selectedSessionId, { reset: true });
@@ -743,6 +747,8 @@ document.addEventListener("click", (event) => {
     return;
   }
   if (target.dataset.openTeam) {
+    selectedSessionIds.clear();
+    uiMemory.sessionSelectionMode = false;
     setState({ activeView: "team", selectedTeamId: target.dataset.openTeam, selectedSessionId: target.dataset.session || "", sessionMemberFilter: "all", mobileNavOpen: false }, "push");
     void runAction(`open-team:${target.dataset.openTeam}`, target, async () => {
       await loadSessions({ reset: true });
@@ -767,6 +773,12 @@ document.addEventListener("click", (event) => {
     return;
   }
   const actionName = target.dataset.action;
+  if (actionName === "toggle-session-selection") {
+    uiMemory.sessionSelectionMode = !uiMemory.sessionSelectionMode;
+    selectedSessionIds.clear();
+    scheduleTeamRender({ rail: true }, 0);
+    return;
+  }
   if (actionName === "toggle-sidebar") {
     const collapsed = !state.sidebarCollapsed;
     localStorage.setItem("cc.sidebarCollapsed", String(collapsed));
@@ -821,8 +833,14 @@ document.addEventListener("click", (event) => {
       realtime = null;
       setState({ currentUserId: null });
     } else if (actionName === "new-session") await createSession();
-    else if (actionName === "batch-archive") await adminController.batchArchive(true);
-    else if (actionName === "batch-unarchive") await adminController.batchArchive(false);
+    else if (actionName === "batch-archive") {
+      await adminController.batchArchive(true);
+      uiMemory.sessionSelectionMode = false;
+    }
+    else if (actionName === "batch-unarchive") {
+      await adminController.batchArchive(false);
+      uiMemory.sessionSelectionMode = false;
+    }
     else if (actionName === "load-more-audit") { await adminController.loadAudit(); scheduleRender(); }
     else if (actionName === "clear-audit-filter") await adminController.clearAuditFilters();
     else if (actionName === "toggle-session-visibility") await toggleSessionVisibility();

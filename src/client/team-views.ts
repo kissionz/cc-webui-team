@@ -33,7 +33,7 @@ export interface TeamViewDeps {
   isSessionGroupExpanded(teamId: string, group: SessionGroup, session?: Session): boolean;
   sortSessionsNewestFirst(sessions: Session[]): Session[];
   selectedSessionIds: Set<string>;
-  uiMemory: { composerDrafts: Map<string, string>; openTurnEvents: Map<string, boolean> };
+  uiMemory: { composerDrafts: Map<string, string>; openTurnEvents: Map<string, boolean>; sessionSelectionMode: boolean };
 }
 
 export function createTeamViews(deps: TeamViewDeps) {
@@ -226,7 +226,13 @@ function renderSessionList(team: Team, activeSession?: Session, embedded = false
     .filter((option) => option.label);
   return `
     <section class="${embedded ? "session-section" : "panel"}">
-      <div class="panel-header"><h2 class="panel-title">会话</h2>${badge(`${sessions.length}/${allSessions.length}`)}</div>
+      <div class="panel-header">
+        <h2 class="panel-title">会话</h2>
+        <div class="session-header-actions">
+          ${isSystemAdmin() ? `<button class="button compact" data-action="toggle-session-selection" aria-pressed="${uiMemory.sessionSelectionMode}">${uiMemory.sessionSelectionMode ? "完成" : "批量管理"}</button>` : ""}
+          ${badge(`${sessions.length}/${allSessions.length}`)}
+        </div>
+      </div>
       <div class="session-filter">
         <div class="session-search-field">
           <label class="visually-hidden" for="session-search">搜索会话</label>
@@ -249,7 +255,7 @@ function renderSessionList(team: Team, activeSession?: Session, embedded = false
         </div>
       </div>
       <div class="session-list">
-        ${isSystemAdmin() && selectedSessionIds.size ? `<div class="batch-actions" role="group" aria-label="批量会话操作"><span>已选择 ${selectedSessionIds.size} 个会话</span><button class="button" data-action="batch-unarchive">恢复选中</button><button class="button" data-action="batch-archive">归档选中</button></div>` : ""}
+        ${isSystemAdmin() && uiMemory.sessionSelectionMode ? `<div class="batch-actions" role="group" aria-label="批量会话操作"><span>已选择 ${selectedSessionIds.size} 个会话</span><button class="button compact" data-action="batch-unarchive" ${selectedSessionIds.size ? "" : "disabled"}>恢复选中</button><button class="button compact" data-action="batch-archive" ${selectedSessionIds.size ? "" : "disabled"}>归档选中</button></div>` : ""}
         ${groups.map((group) => renderSessionGroup(team, group, activeSession)).join("") || '<div class="empty">没有匹配的会话</div>'}
         ${state.sessionPagination.loading ? '<div class="session-list-loading" role="status">正在加载会话...</div>' : ""}
         ${state.sessionPagination.nextCursor ? '<button class="button load-more" data-action="load-more-sessions">加载更多</button>' : ""}
@@ -283,14 +289,20 @@ function renderSessionGroup(team: Team, group: SessionGroup, activeSession?: Ses
 function renderSessionRow(session: Session, activeSession?: Session): string {
   const archived = Boolean(session.archived || session.archivedAt);
   const batchUnavailable = ["queued", "running", "compacting", "waiting_permission"].includes(session.status);
-  const selectable = isSystemAdmin();
+  const selectable = isSystemAdmin() && uiMemory.sessionSelectionMode;
+  const visibility = sessionVisibility(session);
+  const statusLabel = sessionStatusLabel(session.status);
+  const visibilityLabel = visibility === "team" ? "团队可见" : "私有";
   return `
     <div class="session-row ${selectable ? "has-selection" : ""}">
       ${selectable ? `<label class="session-select" title="${batchUnavailable ? "运行中的会话不能批量归档或恢复" : ""}"><input type="checkbox" data-session-select="${session.id}" ${selectedSessionIds.has(session.id) ? "checked" : ""} ${batchUnavailable ? "disabled" : ""} aria-label="选择会话 ${escapeHtml(titleText(session.title))}" /></label>` : ""}
-      <button class="session-item ${session.id === activeSession?.id ? "active" : ""}" data-session="${session.id}">
+      <button class="session-item ${session.id === activeSession?.id ? "active" : ""}" data-session="${session.id}" aria-label="${escapeHtml(titleText(session.title))}，${statusLabel}，${visibilityLabel}${archived ? "，已归档" : ""}">
         <strong class="truncate-title" title="${escapeHtml(titleText(session.title))}">${escapeHtml(titleText(session.title))}</strong>
-        <div class="meta">${badge(session.status, statusTone(session.status))}${archived ? badge("已归档") : ""}${badge(sessionVisibility(session) === "team" ? "团队可见" : "私有", sessionVisibility(session) === "team" ? "green" : "")}</div>
-        <div class="meta"><span>${escapeHtml(userName(session.createdBy))}</span><span>${fmt(session.updatedAt)}</span></div>
+        <span class="session-signals" aria-hidden="true">
+          <span class="session-status-dot ${session.status}" title="${statusLabel}"></span>
+          ${archived ? `<span class="session-signal archived" title="已归档">${icons.archive}</span>` : ""}
+          <span class="session-signal visibility ${visibility}" title="${visibilityLabel}">${visibility === "team" ? icons.users : icons.lock}</span>
+        </span>
       </button>
       ${canManageSession(session) ? `<button class="icon-button session-delete" title="删除会话" aria-label="删除会话 ${escapeHtml(titleText(session.title))}" data-delete-session="${session.id}">${icons.close}</button>` : ""}
     </div>
@@ -583,6 +595,21 @@ function effectiveAgentStatus(agent: Agent, session?: Session): { label: string;
 
 function statusTone(status: SessionStatus): string {
   return status === "running" || status === "compacting" ? "green" : status === "waiting_permission" ? "amber" : status === "failed" || status === "stopped" ? "red" : "blue";
+}
+
+function sessionStatusLabel(status: SessionStatus): string {
+  const labels: Record<SessionStatus, string> = {
+    idle: "空闲",
+    queued: "排队中",
+    running: "运行中",
+    compacting: "压缩上下文",
+    waiting_permission: "等待审批",
+    completed: "已完成",
+    failed: "失败",
+    stopped: "已停止",
+    interrupted: "已中断",
+  };
+  return labels[status];
 }
 
 function renderModal(kind: string, teamId = state.selectedTeamId): string {

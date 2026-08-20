@@ -18,7 +18,7 @@ test("管理员可登录、筛选会话并查看审计", async ({ page, isMobile
   await expect(page.locator("h1", { hasText: "Harness Platform" })).toBeVisible();
   const search = page.getByPlaceholder("搜索标题或消息");
   await search.fill("部署后的第一条");
-  await expect(page.getByRole("button", { name: /部署后的第一条 Harness 会话 idle/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /部署后的第一条 Harness 会话，空闲，私有/ })).toBeVisible();
   expect(await page.locator("body").evaluate((body) => body.scrollWidth <= body.clientWidth + 1)).toBe(true);
   await page.setViewportSize({ width: 1024, height: 800 });
   expect(await page.locator("body").evaluate((body) => body.scrollWidth <= body.clientWidth + 1)).toBe(true);
@@ -82,11 +82,14 @@ test("管理员可查看指标、应用模板并批量归档", async ({ page, is
   const sessionRail = page.locator(".session-section .session-list");
   const sessionRow = page.locator(".session-row").first();
   expect(await sessionRail.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
-  expect((await sessionRow.boundingBox())?.height ?? 0).toBeLessThan(100);
+  expect((await sessionRow.boundingBox())?.height ?? 0).toBeLessThan(56);
+  await expect(page.locator("[data-session-select]")).toHaveCount(0);
+  await page.getByRole("button", { name: "批量管理" }).click();
   await page.locator("[data-session-select='session_welcome']").check();
   expect(await sessionRail.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
   await page.getByRole("button", { name: "归档选中" }).click();
   await expect(page.getByText("已归档 1 个会话")).toBeVisible();
+  await expect(page.locator("[data-session-select]")).toHaveCount(0);
 });
 
 test("移动端导航与会话抽屉可通过按钮开关", async ({ page, isMobile }) => {
